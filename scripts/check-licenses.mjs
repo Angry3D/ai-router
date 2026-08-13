@@ -756,25 +756,33 @@ export async function evaluateCargoMetadata(
   return { packageCount: packages.length, packages };
 }
 
-async function dependencyAudit(projectRoot, policy) {
+async function dependencyAudit(projectRoot, policy, commandRunner) {
   const nodeVersion = process.version.replace(/^v/, "");
   if (nodeVersion !== policy.tools.node) {
     throw new LicenseAuditError(
       `Node ${nodeVersion} does not match pinned ${policy.tools.node}; run nvm use before the audit.`,
     );
   }
+  const cargoVersion = await commandRunner("cargo", ["--version"], {
+    cwd: projectRoot,
+  });
+  if (!cargoVersion.startsWith(`cargo ${policy.tools.cargo} `)) {
+    throw new LicenseAuditError(
+      `${cargoVersion} does not match pinned Cargo ${policy.tools.cargo}.`,
+    );
+  }
   const [
     pnpmVersion,
-    cargoVersion,
     pnpmOutput,
     cargoOutput,
     pnpmLock,
     cargoLock,
   ] = await Promise.all([
-    execute("pnpm", ["--version"], { cwd: projectRoot }),
-    execute("cargo", ["--version"], { cwd: projectRoot }),
-    execute("pnpm", ["licenses", "list", "--json"], { cwd: projectRoot }),
-    execute(
+    commandRunner("pnpm", ["--version"], { cwd: projectRoot }),
+    commandRunner("pnpm", ["licenses", "list", "--json"], {
+      cwd: projectRoot,
+    }),
+    commandRunner(
       "cargo",
       [
         "metadata",
@@ -790,11 +798,6 @@ async function dependencyAudit(projectRoot, policy) {
   if (pnpmVersion !== policy.tools.pnpm) {
     throw new LicenseAuditError(
       `pnpm ${pnpmVersion} does not match pinned ${policy.tools.pnpm}.`,
-    );
-  }
-  if (!cargoVersion.startsWith(`cargo ${policy.tools.cargo} `)) {
-    throw new LicenseAuditError(
-      `${cargoVersion} does not match pinned Cargo ${policy.tools.cargo}.`,
     );
   }
 
@@ -910,6 +913,7 @@ export async function scanPublicTree(publicRoot, policy) {
 }
 
 export async function runLicenseAudit({
+  commandRunner = execute,
   policyPath = DEFAULT_POLICY_PATH,
   projectRoot = DEFAULT_PROJECT_ROOT,
   publicTreeRoot,
@@ -933,7 +937,7 @@ export async function runLicenseAudit({
     thirdParty,
   };
   if (!skipDependencies)
-    report.dependencies = await dependencyAudit(root, policy);
+    report.dependencies = await dependencyAudit(root, policy, commandRunner);
   if (publicTreeRoot)
     report.publicTree = await scanPublicTree(publicTreeRoot, policy);
   return report;

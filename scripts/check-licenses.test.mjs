@@ -50,6 +50,56 @@ describe("license and provenance gate", () => {
     ]);
   });
 
+  it("validates the Cargo probe before starting metadata", async () => {
+    const root = await temporaryRoot("ai-router-license-policy-");
+    const policy = JSON.parse(
+      await readFile(
+        join(projectRoot, "scripts", "license-policy.json"),
+        "utf8",
+      ),
+    );
+    policy.tools.node = process.version.replace(/^v/, "");
+    const policyPath = join(root, "license-policy.json");
+    await writeFile(policyPath, JSON.stringify(policy));
+
+    let signalCargoProbeStarted;
+    const cargoProbeStarted = new Promise((resolvePromise) => {
+      signalCargoProbeStarted = resolvePromise;
+    });
+    let resolveCargoProbe;
+    const cargoProbe = new Promise((resolvePromise) => {
+      resolveCargoProbe = resolvePromise;
+    });
+    let metadataStarted = false;
+    const commandRunner = (command, args) => {
+      if (command === "cargo" && args[0] === "--version") {
+        signalCargoProbeStarted();
+        return cargoProbe;
+      }
+      if (command === "cargo" && args[0] === "metadata") {
+        metadataStarted = true;
+        return Promise.resolve("{}");
+      }
+      if (command === "pnpm" && args[0] === "--version") {
+        return Promise.resolve(policy.tools.pnpm);
+      }
+      if (command === "pnpm" && args[0] === "licenses") {
+        return Promise.resolve("{}");
+      }
+      throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
+    };
+
+    const audit = runLicenseAudit({ commandRunner, policyPath, projectRoot });
+    await cargoProbeStarted;
+    expect(metadataStarted).toBe(false);
+
+    resolveCargoProbe("cargo 0.0.0 (fixture)");
+    await expect(audit).rejects.toThrow(
+      "does not match pinned Cargo 1.97.1",
+    );
+    expect(metadataStarted).toBe(false);
+  });
+
   it("rejects a missing required NOTICE entry", async () => {
     const root = await temporaryRoot("ai-router-provenance-");
     await mkdir(join(root, "embedded"));
