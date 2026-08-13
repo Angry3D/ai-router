@@ -1,0 +1,68 @@
+[
+  {
+    "input": " https://example.com ",
+    "canonical": "https://example.com",
+    "inference": "https://example.com/responses"
+  },
+  {
+    "input": "https://example.com/v1///",
+    "canonical": "https://example.com/v1",
+    "inference": "https://example.com/v1/responses"
+  },
+  {
+    "input": "https://example.com/openai/v1/responses/",
+    "canonical": "https://example.com/openai/v1",
+    "inference": "https://example.com/openai/v1/responses"
+  },
+  {
+    "input": "https://example.com/Responses",
+    "canonical": "https://example.com/Responses",
+    "inference": "https://example.com/Responses/responses"
+  },
+  {
+    "input": "https://responses",
+    "canonical": "https://responses",
+    "inference": "https://responses/responses"
+  },
+  {
+    "input": "https://chat/completions",
+    "canonical": "https://chat/completions",
+    "inference": "https://chat/completions/responses"
+  },
+  {
+    "input": "https://example.com/v1/responses/responses",
+    "error": "base_url_duplicate_responses"
+  },
+  {
+    "input": "https://example.com/v1/chat/completions/",
+    "error": "base_url_unsupported_endpoint"
+  },
+  {
+    "input": "ftp://example.com",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "/v1",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "https://user@example.com/v1",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "https://user:secret@example.com/v1",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "https://example.com/v1?q=1",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "https://example.com/v1#fragment",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "http:/",
+    "error": "base_url_invalid"
+  }
+]

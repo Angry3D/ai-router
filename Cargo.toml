@@ -1,0 +1,25 @@
+[workspace]
+members = ["crates/router-core", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+authors = ["Angry3D"]
+description = "A local macOS routing tool for Codex CLI and Codex App."
+edition = "2024"
+homepage = "https://github.com/Angry3D/ai-router"
+license = "MIT"
+repository = "https://github.com/Angry3D/ai-router"
+rust-version = "1.97.1"
+version = "0.1.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

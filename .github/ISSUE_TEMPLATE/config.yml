@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私下报告安全问题
+    url: https://github.com/Angry3D/ai-router/security/advisories/new
+    about: 不要在公开 Issue 中提交漏洞细节、凭据、完整配置、数据库或原始日志。
+  - name: 支持范围与报告准备
+    url: https://github.com/Angry3D/ai-router/blob/main/SUPPORT.md
+    about: 先确认支持范围、必要上下文和敏感数据禁令。

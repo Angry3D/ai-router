@@ -1,0 +1,16 @@
+({
+  request: {
+    url: "{{baseUrl}}",
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: "Bearer {{apiKey}}",
+    },
+  },
+  extractor(_response) {
+    return {
+      isValid: false,
+      invalidMessage: "请根据接口响应实现余额解析",
+    };
+  },
+})

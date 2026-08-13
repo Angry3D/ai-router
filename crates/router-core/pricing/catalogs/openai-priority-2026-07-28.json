@@ -1,0 +1,20 @@
+{
+  "version": "openai-priority-2026-07-28",
+  "captured_at": "2026-07-28",
+  "currency": "USD",
+  "unit": "micro_usd_per_million_tokens",
+  "service_tier": "priority",
+  "sources": [
+    "https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode",
+    "https://developers.openai.com/api/docs/pricing/",
+    "https://developers.openai.com/api/docs/guides/prompt-caching/"
+  ],
+  "models": [
+    { "model_id": "gpt-5.6-sol", "minimum_input_tokens": null, "maximum_input_tokens": 272000, "input": 10000000, "cached_input": 1000000, "cache_write": 12500000, "output": 60000000 },
+    { "model_id": "gpt-5.6-sol", "minimum_input_tokens": 272001, "maximum_input_tokens": null, "input": 20000000, "cached_input": 2000000, "cache_write": 25000000, "output": 90000000 },
+    { "model_id": "gpt-5.6-terra", "minimum_input_tokens": null, "maximum_input_tokens": 272000, "input": 5000000, "cached_input": 500000, "cache_write": 6250000, "output": 30000000 },
+    { "model_id": "gpt-5.6-terra", "minimum_input_tokens": 272001, "maximum_input_tokens": null, "input": 10000000, "cached_input": 1000000, "cache_write": 12500000, "output": 45000000 },
+    { "model_id": "gpt-5.6-luna", "minimum_input_tokens": null, "maximum_input_tokens": 272000, "input": 2000000, "cached_input": 200000, "cache_write": 2500000, "output": 12000000 },
+    { "model_id": "gpt-5.6-luna", "minimum_input_tokens": 272001, "maximum_input_tokens": null, "input": 4000000, "cached_input": 400000, "cache_write": 5000000, "output": 18000000 }
+  ]
+}

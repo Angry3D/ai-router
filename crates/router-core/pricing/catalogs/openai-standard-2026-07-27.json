@@ -1,0 +1,42 @@
+{
+  "version": "openai-standard-2026-07-27",
+  "captured_at": "2026-07-27",
+  "effective_at": "2026-07-27",
+  "currency": "USD",
+  "unit": "micro_usd_per_million_tokens",
+  "service_tier": "default",
+  "sources": [
+    "https://developers.openai.com/api/docs/pricing/",
+    "https://developers.openai.com/api/docs/guides/prompt-caching/"
+  ],
+  "models": [
+    { "model_id": "gpt-5.6-sol", "minimum_input_tokens": null, "maximum_input_tokens": 272000, "input": 5000000, "cached_input": 500000, "cache_write": 6250000, "output": 30000000 },
+    { "model_id": "gpt-5.6-sol", "minimum_input_tokens": 272001, "maximum_input_tokens": null, "input": 10000000, "cached_input": 1000000, "cache_write": 12500000, "output": 45000000 },
+    { "model_id": "gpt-5.6-terra", "minimum_input_tokens": null, "maximum_input_tokens": 272000, "input": 2500000, "cached_input": 250000, "cache_write": 3125000, "output": 15000000 },
+    { "model_id": "gpt-5.6-terra", "minimum_input_tokens": 272001, "maximum_input_tokens": null, "input": 5000000, "cached_input": 500000, "cache_write": 6250000, "output": 22500000 },
+    { "model_id": "gpt-5.6-luna", "minimum_input_tokens": null, "maximum_input_tokens": 272000, "input": 1000000, "cached_input": 100000, "cache_write": 1250000, "output": 6000000 },
+    { "model_id": "gpt-5.6-luna", "minimum_input_tokens": 272001, "maximum_input_tokens": null, "input": 2000000, "cached_input": 200000, "cache_write": 2500000, "output": 9000000 },
+    { "model_id": "gpt-5.5", "minimum_input_tokens": null, "maximum_input_tokens": 272000, "input": 5000000, "cached_input": 500000, "cache_write": null, "output": 30000000 },
+    { "model_id": "gpt-5.5", "minimum_input_tokens": 272001, "maximum_input_tokens": null, "input": 10000000, "cached_input": 1000000, "cache_write": null, "output": 45000000 },
+    { "model_id": "gpt-5.4", "minimum_input_tokens": null, "maximum_input_tokens": 272000, "input": 2500000, "cached_input": 250000, "cache_write": null, "output": 15000000 },
+    { "model_id": "gpt-5.4", "minimum_input_tokens": 272001, "maximum_input_tokens": null, "input": 5000000, "cached_input": 500000, "cache_write": null, "output": 22500000 },
+    { "model_id": "gpt-5.4-mini", "input": 750000, "cached_input": 75000, "cache_write": null, "output": 4500000 },
+    { "model_id": "gpt-5.4-nano", "input": 200000, "cached_input": 20000, "cache_write": null, "output": 1250000 },
+    { "model_id": "gpt-5.2", "input": 1750000, "cached_input": 175000, "cache_write": null, "output": 14000000 },
+    { "model_id": "gpt-5.1", "input": 1250000, "cached_input": 125000, "cache_write": null, "output": 10000000 },
+    { "model_id": "gpt-5", "input": 1250000, "cached_input": 125000, "cache_write": null, "output": 10000000 },
+    { "model_id": "gpt-5-mini", "input": 250000, "cached_input": 25000, "cache_write": null, "output": 2000000 },
+    { "model_id": "gpt-5-nano", "input": 50000, "cached_input": 5000, "cache_write": null, "output": 400000 },
+    { "model_id": "gpt-4.1", "input": 2000000, "cached_input": 500000, "cache_write": null, "output": 8000000 },
+    { "model_id": "gpt-4.1-mini", "input": 400000, "cached_input": 100000, "cache_write": null, "output": 1600000 },
+    { "model_id": "gpt-4.1-nano", "input": 100000, "cached_input": 25000, "cache_write": null, "output": 400000 },
+    { "model_id": "o3", "input": 2000000, "cached_input": 500000, "cache_write": null, "output": 8000000 },
+    { "model_id": "o4-mini", "input": 1100000, "cached_input": 275000, "cache_write": null, "output": 4400000 },
+    { "model_id": "codex-mini-latest", "input": 1500000, "cached_input": 375000, "cache_write": null, "output": 6000000 },
+    { "model_id": "gpt-5-codex", "input": 1250000, "cached_input": 125000, "cache_write": null, "output": 10000000 },
+    { "model_id": "gpt-5.3-codex", "input": 1750000, "cached_input": 175000, "cache_write": null, "output": 14000000 },
+    { "model_id": "gpt-5.1-codex", "input": 1250000, "cached_input": 125000, "cache_write": null, "output": 10000000 },
+    { "model_id": "gpt-5.1-codex-mini", "input": 250000, "cached_input": 25000, "cache_write": null, "output": 2000000 },
+    { "model_id": "gpt-5.2-codex", "input": 1750000, "cached_input": 175000, "cache_write": null, "output": 14000000 }
+  ]
+}

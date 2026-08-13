@@ -1,0 +1,9 @@
+/target/
+/dist/
+/node_modules/
+/.pnpm-store/
+/src-tauri/target/
+/src-tauri/gen/schemas/
+*.tsbuildinfo
+.DS_Store
+*.log

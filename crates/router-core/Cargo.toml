@@ -1,0 +1,49 @@
+[package]
+name = "router-core"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+arc-swap = "1"
+axum = "0.8"
+base64 = "0.22"
+brotli = "8"
+bytes = "1"
+chrono = { version = "0.4.45", default-features = false }
+chrono-tz = "0.10.4"
+flate2 = "1"
+futures-util = "0.3"
+getrandom = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "stream"] }
+rmcp = { version = "1.8.0", default-features = false, features = ["base64", "server", "transport-streamable-http-server"] }
+rquickjs = "0.12.1"
+rusqlite = { version = "0.38", features = ["backup", "bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+time = { version = "0.3", features = ["parsing"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+ts-rs = { version = "11", features = ["serde-compat"] }
+toml_edit = "0.25"
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = "1"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

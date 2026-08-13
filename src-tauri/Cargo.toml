@@ -1,0 +1,38 @@
+[package]
+name = "ai-router-app"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ai_router_app_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+async-trait = "0.1"
+log = "0.4"
+router-core = { path = "../crates/router-core" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "=2.11.5", features = ["macos-private-api", "image-png", "tray-icon"] }
+tauri-plugin-log = "=2.9.0"
+tauri-plugin-positioner = { version = "=2.3.3", features = ["tray-icon"] }
+tauri-plugin-single-instance = "=2.4.3"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+unicode-segmentation = "1.13"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"

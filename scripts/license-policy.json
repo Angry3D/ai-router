@@ -1,0 +1,247 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "2026-08-11",
+  "project": {
+    "name": "ai-router",
+    "version": "0.1.0",
+    "author": "Angry3D",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2026 Angry3D",
+    "repository": "https://github.com/Angry3D/ai-router"
+  },
+  "tools": {
+    "node": "22.22.3",
+    "pnpm": "10.33.2",
+    "cargo": "1.97.1",
+    "cargoMetadataFormat": 1
+  },
+  "dependencies": {
+    "javascriptAllowedIdentifiers": [
+      "0BSD",
+      "Apache-2.0",
+      "BSD-2-Clause",
+      "BSD-3-Clause",
+      "BlueOak-1.0.0",
+      "CC-BY-4.0",
+      "CC0-1.0",
+      "ISC",
+      "MIT",
+      "MIT-0",
+      "Python-2.0"
+    ],
+    "rustAllowedIdentifiers": [
+      "0BSD",
+      "Apache-2.0",
+      "BSD-2-Clause",
+      "BSD-3-Clause",
+      "BSL-1.0",
+      "CC0-1.0",
+      "CDLA-Permissive-2.0",
+      "ISC",
+      "LLVM-exception",
+      "MIT",
+      "MIT-0",
+      "MPL-2.0",
+      "Unicode-3.0",
+      "Unlicense",
+      "Zlib"
+    ],
+    "rustLicenseOverrides": [
+      {
+        "name": "tauri-nspanel",
+        "version": "2.1.0",
+        "source": "git+https://github.com/ahkohd/tauri-nspanel?rev=a3122e894383aa068ec5365a42994e3ac94ba1b6#a3122e894383aa068ec5365a42994e3ac94ba1b6",
+        "license": "MIT OR Apache-2.0",
+        "licenseFiles": [
+          {
+            "path": "LICENSE_MIT",
+            "sha256": "35e740d8a0d71739293b136b9f289c6b05f21ff6b0584b9b691dd5de5233d7e8"
+          },
+          {
+            "path": "LICENSE_APACHE-2.0",
+            "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+          }
+        ],
+        "disposition": "The pinned upstream commit ships MIT and Apache-2.0 license texts but omits the Cargo manifest license field."
+      }
+    ]
+  },
+  "thirdParty": [
+    {
+      "id": "openai-codex-base-instructions",
+      "name": "OpenAI Codex base instructions",
+      "version": "rust-v0.146.0",
+      "license": "Apache-2.0",
+      "upstream": "https://github.com/openai/codex",
+      "noticeMarker": "<!-- provenance:openai-codex-base-instructions -->",
+      "localPaths": [
+        "fixtures/codex-base-instructions-v0.146.0.md",
+        "fixtures/codex-base-instructions-v0.146.0.provenance.json",
+        "third-party/licenses/Apache-2.0.txt"
+      ],
+      "sourceRecord": {
+        "path": "fixtures/codex-base-instructions-v0.146.0.provenance.json",
+        "requiredStrings": [
+          "https://github.com/openai/codex",
+          "rust-v0.146.0",
+          "codex-rs/protocol/src/prompts/base_instructions/default.md",
+          "Apache-2.0",
+          "modifications"
+        ]
+      },
+      "hashes": {
+        "fixtures/codex-base-instructions-v0.146.0.md": "294602e3502bb0ff840a82cd1d08ac526125a6cdf763e1f883e8d74f47cc2a8d",
+        "third-party/licenses/Apache-2.0.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      }
+    },
+    {
+      "id": "lucide-icons",
+      "name": "Lucide icons",
+      "version": "lucide-react 0.468.0",
+      "license": "ISC",
+      "upstream": "https://github.com/lucide-icons/lucide",
+      "noticeMarker": "<!-- provenance:lucide-icons -->",
+      "localPaths": [
+        "scripts/generate-app-icons.mjs",
+        "src-tauri/icons/README.md",
+        "src-tauri/icons/app-icon-qa.icns",
+        "src-tauri/icons/app-icon-qa.png",
+        "src-tauri/icons/app-icon-qa.svg",
+        "src-tauri/icons/app-icon.icns",
+        "src-tauri/icons/app-icon.png",
+        "src-tauri/icons/app-icon.svg",
+        "src-tauri/icons/icon.png",
+        "src-tauri/icons/tray-attention.png",
+        "src-tauri/icons/tray-attention.svg",
+        "src-tauri/icons/tray-failure.png",
+        "src-tauri/icons/tray-failure.svg",
+        "src-tauri/icons/tray-normal.png",
+        "src-tauri/icons/tray-normal.svg",
+        "src-tauri/icons/tray-route.png",
+        "src-tauri/icons/tray-route.svg",
+        "third-party/licenses/ISC-Lucide.txt"
+      ],
+      "sourceRecord": {
+        "path": "src-tauri/icons/README.md",
+        "requiredStrings": [
+          "<!-- provenance:lucide-icons -->",
+          "lucide-react 0.468.0",
+          "ISC",
+          "scripts/generate-app-icons.mjs"
+        ]
+      },
+      "hashes": {
+        "third-party/licenses/ISC-Lucide.txt": "1e7290b35280a048667bbf0ebabac1c7fd52a75300e8b2946ac165715997f2bc"
+      }
+    },
+    {
+      "id": "openai-pricing-snapshots",
+      "name": "OpenAI pricing snapshots",
+      "version": "2026-07-27 / 2026-07-28",
+      "license": "Factual data; no upstream code or prose redistributed",
+      "upstream": "https://developers.openai.com/api/docs/pricing/",
+      "noticeMarker": "<!-- provenance:openai-pricing-snapshots -->",
+      "localPaths": [
+        "crates/router-core/pricing/catalogs/README.md",
+        "crates/router-core/pricing/catalogs/openai-priority-2026-07-28.json",
+        "crates/router-core/pricing/catalogs/openai-standard-2026-07-27.json"
+      ],
+      "sourceRecord": {
+        "path": "crates/router-core/pricing/catalogs/README.md",
+        "requiredStrings": [
+          "<!-- provenance:openai-pricing-snapshots -->",
+          "micro_usd_per_million_tokens",
+          "not an OpenAI bill",
+          "capture date"
+        ]
+      },
+      "hashes": {
+        "crates/router-core/pricing/catalogs/openai-priority-2026-07-28.json": "28028f0647cda3fc10d6af36072ec84e509ffcb866be2a4d3cca1e1461bcee37",
+        "crates/router-core/pricing/catalogs/openai-standard-2026-07-27.json": "87f3cd449fdc0789d850577c35848db43a7dbc76296ebedd4b2471a88594f9f1"
+      }
+    }
+  ],
+  "pricingCatalogs": [
+    {
+      "path": "crates/router-core/pricing/catalogs/openai-standard-2026-07-27.json",
+      "version": "openai-standard-2026-07-27",
+      "capturedAt": "2026-07-27",
+      "unit": "micro_usd_per_million_tokens",
+      "sources": [
+        "https://developers.openai.com/api/docs/pricing/",
+        "https://developers.openai.com/api/docs/guides/prompt-caching/"
+      ]
+    },
+    {
+      "path": "crates/router-core/pricing/catalogs/openai-priority-2026-07-28.json",
+      "version": "openai-priority-2026-07-28",
+      "capturedAt": "2026-07-28",
+      "unit": "micro_usd_per_million_tokens",
+      "sources": [
+        "https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode",
+        "https://developers.openai.com/api/docs/pricing/",
+        "https://developers.openai.com/api/docs/guides/prompt-caching/"
+      ]
+    }
+  ],
+  "declaredVisualAssets": [
+    "src-tauri/icons/app-icon-qa.icns",
+    "src-tauri/icons/app-icon-qa.png",
+    "src-tauri/icons/app-icon-qa.svg",
+    "src-tauri/icons/app-icon.icns",
+    "src-tauri/icons/app-icon.png",
+    "src-tauri/icons/app-icon.svg",
+    "src-tauri/icons/icon.png",
+    "src-tauri/icons/tray-attention.png",
+    "src-tauri/icons/tray-attention.svg",
+    "src-tauri/icons/tray-failure.png",
+    "src-tauri/icons/tray-failure.svg",
+    "src-tauri/icons/tray-normal.png",
+    "src-tauri/icons/tray-normal.svg",
+    "src-tauri/icons/tray-route.png",
+    "src-tauri/icons/tray-route.svg"
+  ],
+  "declaredVisualAssetHashes": {
+    "src-tauri/icons/app-icon-qa.icns": "0a74c4bcde5a87735a8e9bc07d77d5c21e2841d5f5019c431052ac5487a8ad4b",
+    "src-tauri/icons/app-icon-qa.png": "b8ab93518ad8d01083d82cb88b89b8d128ff6e1ebe7e7d93bbfd2ca63ee8dade",
+    "src-tauri/icons/app-icon-qa.svg": "ebcb75628c6e88c8a5eeba91afcdf0ad5e1806828abdc260c98a6f3c6ec7b43d",
+    "src-tauri/icons/app-icon.icns": "7910ecebca96188fd6ab85b956384e89005c40c930114697265578c101eb9d00",
+    "src-tauri/icons/app-icon.png": "65afb3b08935ba94e610b544ebbdc74a4f174b31c35696b429a08da79fbdf141",
+    "src-tauri/icons/app-icon.svg": "71959b433dbe9fa04a289f421753d6fc8d6cc6f5e3fc756604168b02c62c6a7b",
+    "src-tauri/icons/icon.png": "65afb3b08935ba94e610b544ebbdc74a4f174b31c35696b429a08da79fbdf141",
+    "src-tauri/icons/tray-attention.png": "bf055cd128d0b780a652948fd295a25bf13e2d9e95a67c0e4eb4118952734fef",
+    "src-tauri/icons/tray-attention.svg": "0117bb575c96af28348d114fd4cace369575706a1e146ffdc87bf538edac1883",
+    "src-tauri/icons/tray-failure.png": "3b73147ec968a8d1f87ad03b7177e2ff1e444422eff5d310c6b8cc66193ca5a4",
+    "src-tauri/icons/tray-failure.svg": "fc3b86e23b33db4613fa4717aba505a0bb7f840979cc76f81b2bbbe51f7fe54d",
+    "src-tauri/icons/tray-normal.png": "1681be125693830a441fbbd5c07d8061861545ce912403b5ad6d6095a7a1c934",
+    "src-tauri/icons/tray-normal.svg": "3a62df9c9d0ddfbc73bfc393e7502642deb48e0754a5ee2de6f34bf3235b204d",
+    "src-tauri/icons/tray-route.png": "c5e051233187abf0b3e786e1f2be77ff976a06ed84cc1a477e87cbabdd5aedd8",
+    "src-tauri/icons/tray-route.svg": "6fb4e41d93fc838314107f2f392e1d40d26a808d7267aa4c609b511c139c02c1"
+  },
+  "publicTree": {
+    "forbiddenPathPrefixes": [".agents/", ".claude/", ".codex/", ".trellis/"],
+    "forbiddenExactPaths": [
+      "design-qa.md",
+      "scripts/public-snapshot-policy.json",
+      "scripts/public-snapshot.mjs",
+      "scripts/public-snapshot.test.mjs"
+    ],
+    "markerExemptPaths": [
+      "scripts/check-ci-policy.mjs",
+      "scripts/check-ci-policy.test.mjs",
+      "scripts/check-public-docs.mjs",
+      "scripts/check-licenses.mjs",
+      "scripts/check-licenses.test.mjs",
+      "scripts/check-repository-security.mjs",
+      "scripts/check-repository-security.test.mjs",
+      "scripts/license-policy.json"
+    ],
+    "forbiddenTextMarkers": [
+      "<!-- TRELLIS:START -->",
+      "Managed by Trellis.",
+      "@mindfoldhq/trellis",
+      "AGPL-3.0-only",
+      "CC Switch"
+    ]
+  }
+}

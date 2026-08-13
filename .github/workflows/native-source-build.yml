@@ -1,0 +1,54 @@
+name: Native source build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - "LICENSE"
+      - "NOTICE"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-source-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-source-build:
+    name: Native / Source build
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version-file: .nvmrc
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Record source-build inputs
+        run: |
+          {
+            echo "## Native source-build inputs"
+            echo "- Revision: $(git rev-parse HEAD)"
+            echo "- Runner: $(sw_vers -productName) $(sw_vers -productVersion) $(uname -m)"
+            echo "- Node: $(node --version)"
+            echo "- pnpm: $(pnpm --version)"
+            echo "- Cargo: $(cargo --version)"
+            echo "- Rust: $(rustc --version)"
+            echo "- Command: pnpm tauri:source:build"
+            echo "- Distribution: source verification only; no artifact upload"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Build unsigned production source bundle
+        run: pnpm tauri:source:build
