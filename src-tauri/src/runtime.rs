@@ -4707,6 +4707,12 @@ mod tests {
             .settings_snapshot()
             .await
             .expect("settings snapshot");
+        let database = services.database().await.expect("database");
+        let gateway_token_revision = database
+            .critical_revision()
+            .await
+            .expect("gateway-token revision");
+        assert_eq!(gateway_token_revision, 1);
         let recovery = services
             .recovery
             .lock()
@@ -4718,7 +4724,8 @@ mod tests {
             loop {
                 let health = recovery.health();
                 if health.kind == router_core::recovery::RecoveryHealthKind::Protected
-                    && health.covered_critical_revision == Some(health.live_critical_revision)
+                    && health.live_critical_revision == gateway_token_revision
+                    && health.covered_critical_revision == Some(gateway_token_revision)
                 {
                     break;
                 }
@@ -4734,6 +4741,15 @@ mod tests {
         assert_eq!(
             settings.recovery.kind,
             router_core::recovery::RecoveryHealthKind::Protected
+        );
+        let protected_health = recovery.health();
+        assert_eq!(
+            protected_health.live_critical_revision,
+            gateway_token_revision
+        );
+        assert_eq!(
+            protected_health.covered_critical_revision,
+            Some(gateway_token_revision)
         );
         assert_eq!(settings.recovery.valid_point_count, 2);
 
