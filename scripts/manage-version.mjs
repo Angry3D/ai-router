@@ -2,7 +2,9 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+import semver from "semver";
+
+const MAX_MANIFEST_VERSION_LENGTH = 256;
 
 export class VersionError extends Error {}
 
@@ -15,9 +17,18 @@ function managedPaths(root) {
 }
 
 export function validateVersion(value, file) {
-  if (typeof value !== "string" || !SEMVER.test(value)) {
+  if (typeof value !== "string" || value.length > MAX_MANIFEST_VERSION_LENGTH) {
     throw new VersionError(`${file} must declare a valid SemVer version.`);
   }
+
+  const parsed = semver.parse(value, { loose: false });
+  const canonical = parsed
+    ? `${parsed.version}${parsed.build.length > 0 ? `+${parsed.build.join(".")}` : ""}`
+    : undefined;
+  if (canonical !== value) {
+    throw new VersionError(`${file} must declare a valid SemVer version.`);
+  }
+
   return value;
 }
 
