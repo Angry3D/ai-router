@@ -67,7 +67,7 @@ Trellis 根误报为待发布文件。提交后的公开 export 仍必须运行�
 CI 原生源码验证使用 `pnpm tauri:source:build` 显式关闭签名；本地生产构建仍使用
 `pnpm tauri:prod:build`。两个命令都只生成工作区内的 bundle，不安装或启动应用。
 
-最后一个命令只启动临时 loopback fixture，使用 lockfile 固定的 `codex-cli 0.146.0` 和临时
+最后一个命令只启动临时 loopback fixture，使用 lockfile 固定的 `codex-cli 0.147.0` 和临时
 `CODEX_HOME`，不读取用户 Codex 配置或真实上游。
 
 ## 避免重复

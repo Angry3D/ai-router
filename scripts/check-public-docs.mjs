@@ -259,7 +259,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
     "22.22.3",
     "10.33.2",
     "1.97.1",
-    "codex-cli 0.146.0",
+    "codex-cli 0.147.0",
     "仅提供源码",
     "不签名",
     "不公证",
