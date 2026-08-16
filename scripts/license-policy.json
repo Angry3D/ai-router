@@ -3,7 +3,7 @@
   "policyVersion": "2026-08-11",
   "project": {
     "name": "ai-router",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "author": "Angry3D",
     "license": "MIT",
     "copyright": "Copyright (c) 2026 Angry3D",
