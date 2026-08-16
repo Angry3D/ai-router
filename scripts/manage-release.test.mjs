@@ -13,6 +13,7 @@ import {
   renderReleaseConfig,
   uploadPreparedDraft,
   validateReleaseIdentity,
+  validateRemoteAssetInventory,
   validateRepairableDraft,
   validateUpdaterPublicKey,
   verifyReleaseDirectory,
@@ -241,6 +242,35 @@ describe("release draft upload", () => {
     expect(upload.args.slice(-2)).toEqual(["--repo", identity.repository]);
     expect(calls.map(({ args }) => args[1])).toEqual(["view", "upload"]);
   });
+});
+
+describe("remote draft inventory", () => {
+  const version = "1.2.3";
+  const names = expectedAssetNames(version);
+  const validAssets = [names[1], names[2], names[0], names[3], names[4]].map(
+    (name, index) => ({ name, size: index + 1 }),
+  );
+
+  it("accepts the complete GitHub asset order without locale-dependent sorting", () => {
+    expect(() =>
+      validateRemoteAssetInventory(validAssets, version),
+    ).not.toThrow();
+  });
+
+  it.each([
+    validAssets.slice(1),
+    [...validAssets.slice(0, -1), { name: "unexpected.txt", size: 5 }],
+    [validAssets[0], validAssets[0], ...validAssets.slice(2)],
+    [{ ...validAssets[0], size: 0 }, ...validAssets.slice(1)],
+    [{ ...validAssets[0], size: 1.5 }, ...validAssets.slice(1)],
+  ])(
+    "rejects an incomplete, unexpected, duplicate, or invalid inventory",
+    (assets) => {
+      expect(() => validateRemoteAssetInventory(assets, version)).toThrow(
+        "inventory",
+      );
+    },
+  );
 });
 
 describe("release signing configuration", () => {

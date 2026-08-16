@@ -637,25 +637,30 @@ async function compareDirectories(left, right, version) {
   }
 }
 
+export function validateRemoteAssetInventory(assets, version) {
+  const expected = new Set(expectedAssetNames(version));
+  const seen = new Set();
+  if (!Array.isArray(assets) || assets.length !== expected.size) {
+    fail("The draft release asset inventory is incomplete or unexpected.");
+  }
+  for (const asset of assets) {
+    if (
+      typeof asset?.name !== "string" ||
+      !expected.has(asset.name) ||
+      seen.has(asset.name) ||
+      !Number.isSafeInteger(asset.size) ||
+      asset.size <= 0
+    ) {
+      fail("The draft release asset inventory is incomplete or unexpected.");
+    }
+    seen.add(asset.name);
+  }
+}
+
 async function verifyRemoteDraft(root, identity, runner = execute) {
   const release = await readDraft(identity, runner);
   if (!release) fail("The draft release is missing.");
-  const expected = expectedAssetNames(identity.version);
-  const assets = release.assets
-    .map((asset) => ({ name: asset.name, size: asset.size }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const wanted = [...expected].sort();
-  if (
-    assets.length !== wanted.length ||
-    assets.some(
-      (asset, index) =>
-        asset.name !== wanted[index] ||
-        !Number.isSafeInteger(asset.size) ||
-        asset.size <= 0,
-    )
-  ) {
-    fail("The draft release asset inventory is incomplete or unexpected.");
-  }
+  validateRemoteAssetInventory(release.assets, identity.version);
   const downloadDirectory = generatedDirectory(root, DRAFT_DOWNLOAD_DIRECTORY);
   await rm(downloadDirectory, { force: true, recursive: true });
   await mkdir(downloadDirectory, { recursive: true, mode: 0o700 });

@@ -10,7 +10,7 @@ homepage = "https://github.com/Angry3D/ai-router"
 license = "MIT"
 repository = "https://github.com/Angry3D/ai-router"
 rust-version = "1.97.1"
-version = "0.1.1"
+version = "0.1.2"
 
 [profile.release]
 lto = "thin"
