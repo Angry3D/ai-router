@@ -40,8 +40,15 @@ pnpm tauri:qa:build
 pnpm tauri:prod:build
 ```
 
-构建脚本统一使用根 `target/`，只生成 `.app`。生产和 QA 构建分别检查名称、identifier、图标和最低
-macOS 版本。当前没有 DMG、安装器、签名、公证、App Store 或自动更新。
+普通生产、QA 和 CI source 构建统一使用根 `target/`，只生成 `.app`，且不消费 release secret。
+生产和 QA 构建分别检查名称、identifier、图标和最低 macOS 版本。受保护的 tag workflow 使用独立
+release 配置生成 DMG、显式 ad-hoc-signed `.app` 和 Tauri updater 归档；不使用 Developer ID、Apple
+公证、stapling 或 App Store。
+
+更新安装完成后先发送一个可被 `ExitRequested` 拦截的专用退出意图。既有路径完成
+`AppCoordinator::shutdown()` 后才调用 Tauri restart request；不能先调用 restart request，因为 Tauri
+会忽略该事件的 `prevent_exit()`。普通 Quit 行为不变。自动化 restart/install 验收必须验证 exact QA
+identifier、PID、executable、acceptance root 和生产连续性，不能对生产 bundle 执行更新验收。
 
 仅做文档、React 单元或 Rust 单模块改动时不要为了仪式运行原生 bundle。只有改动 Tauri 配置、图标、
 面板/托盘生命周期、打包脚本或发布边界时，才需要 `.app` 构建和 QA 原生验收。

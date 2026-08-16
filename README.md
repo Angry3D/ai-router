@@ -4,8 +4,8 @@ AI Router 是一个面向中文 macOS 个人开发者的本地菜单栏应用，
 与多个兼容 OpenAI Responses API 的上游之间选择路由。它提供路由切换、余额查询、自动回退、
 自定义 Codex 模型目录、图片生成 MCP、请求用量统计和本地配置恢复。
 
-当前版本为 `0.1.0`，仍处于早期开发阶段。首次公开发布只提供简体中文源码，适合愿意检查并自行
-构建代码的用户，不应视为稳定的通用网络代理或企业级网关。
+当前版本为 `0.1.0`，仍处于早期开发阶段。项目提供简体中文界面、官方 Apple Silicon DMG 和源码，
+不应视为稳定的通用网络代理或企业级网关。
 
 ## 支持范围
 
@@ -15,7 +15,7 @@ AI Router 是一个面向中文 macOS 个人开发者的本地菜单栏应用，
 | 硬件     | Apple Silicon (`aarch64`)                                                             |
 | Codex    | 需要已安装并可运行的 Codex CLI 或 Codex App；自动兼容性检查固定为 `codex-cli 0.147.0` |
 | 界面语言 | 简体中文                                                                              |
-| 分发     | 仅提供源码；不签名、不公证；无官方二进制、安装器、App Store 或自动更新                |
+| 分发     | 官方 DMG 使用 ad-hoc 签名，不做 Developer ID 签名或公证；支持显式确认的应用内更新     |
 | 网络边界 | 本地代理仅监听 loopback；上游请求按用户配置的 Responses API 地址发出                  |
 
 未列出的 Codex 版本可能可以工作，但当前没有兼容性保证。Windows、Linux 和 Intel Mac 不在本次
@@ -31,6 +31,21 @@ AI Router 是一个面向中文 macOS 个人开发者的本地菜单栏应用，
 - Rust/Cargo `1.97.1`；仓库中的 `rust-toolchain.toml` 会选择工具链和
   `aarch64-apple-darwin` target
 - 可正常启动的 Codex CLI 或 Codex App
+
+## 安装官方 DMG
+
+只从 [GitHub Releases](https://github.com/Angry3D/ai-router/releases) 下载文件名为
+`AI.Router_<version>_aarch64.dmg` 的资产。打开 DMG，将 `AI Router.app` 拖入“应用程序”，再从
+Finder 启动。
+
+官方 DMG 使用 macOS ad-hoc 签名以保持 bundle 内代码一致，但它不包含 Apple Developer ID 身份，
+也没有经过 Apple 公证或 Apple 验证。首次打开可能被 macOS 阻止。遇到这种情况，只使用系统提供的
+路径：打开“系统设置 -> 隐私与安全性”，在“安全性”区域确认被阻止的是 `AI Router.app`，选择
+“仍要打开”，再在系统确认框中允许。项目不建议使用终端命令关闭或绕过 Gatekeeper。
+
+Release 同时提供 updater 归档、`.sig`、`latest.json`、`SHA256SUMS` 和 GitHub provenance。这些文件
+用于应用内更新认证、元数据、人工校验和构建来源证明；普通首次安装只需下载 DMG。各文件作用与校验
+方式见 [发布与应用更新](./docs/engineering/application-updates.md)。
 
 ## 从源码开始
 
@@ -69,8 +84,18 @@ pnpm tauri:prod:build
 `~/.codex/config.toml` 的当前 provider 传输字段；断开会恢复保存的恢复目标。首次连接前请确认你
 理解 [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md) 中的配置所有权边界。
 
-自行构建的 `.app` 没有 Developer ID 签名，也没有经过 Apple 公证，macOS 可能显示警告或阻止
-启动。本项目目前不提供绕过 Gatekeeper 的步骤，也不暗示该产物经过 Apple 验证。
+自行构建的 `.app` 没有 Developer ID 签名，也没有经过 Apple 公证，且不嵌入官方 updater 公钥。
+macOS 可能显示警告或阻止启动；项目不提供绕过 Gatekeeper 的步骤，也不暗示该产物经过 Apple 验证。
+
+## 应用内更新
+
+官方安装可在“设置 -> 系统 -> 应用更新”中手动检查。应用启动进入正常运行状态 60 秒后也会做一次
+静默检查，跨启动最多每 24 小时尝试一次。后台检查不会自动下载、安装、通知或打断代理请求。
+发现新稳定版本后，下载并安装需要一次明确确认，安装完成后的重启需要再次确认；更新包必须先通过
+项目 updater 签名校验。
+
+第一个包含 updater 的版本是手动桥接版本：已有的源码构建或更旧版本不能自动升级到它，需要先安装
+该版本的 DMG。以后才能从已嵌入相应公钥的官方版本进行应用内更新。
 
 ## 开发运行
 
@@ -123,6 +148,10 @@ QA 模式不会接管生产 Codex 配置，并使用系统分配的临时代理�
 - Rust target 缺失：执行 `rustup show`，确认活动工具链为 `1.97.1` 且包含
   `aarch64-apple-darwin`。不要通过降低仓库工具链版本规避错误。
 - 端口占用：在系统设置中选择未占用的 loopback 端口；不要把代理改为对外监听。
+- 官方 DMG 首次启动被阻止：使用“系统设置 -> 隐私与安全性 -> 仍要打开”，不要运行 Gatekeeper
+  绕过命令。确认下载来自 canonical GitHub Release，并核对 `SHA256SUMS` 与 provenance。
+- 应用内更新失败：保留当前安装，从应用更新区域重试或打开 canonical GitHub Release 手动安装 DMG。
+  签名或元数据校验失败时不要替换现有应用。
 - Codex 状态为“已更改”或“冲突”：不要直接覆盖 `config.toml`。先断开 Codex，检查当前 provider 与
   保留字段，再使用界面提供的预览/修复操作。
 - 数据库启动失败：保留应用数据目录，不要手工编辑或删除 SQLite/WAL/恢复点。按启动恢复界面选择
@@ -139,6 +168,8 @@ QA 模式不会接管生产 Codex 配置，并使用系统分配的临时代理�
 - [路由与韧性](./docs/engineering/routing-resilience.md)
 - [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)
 - [macOS 原生生命周期](./docs/engineering/native-lifecycle.md)
+- [发布与应用更新](./docs/engineering/application-updates.md)
+- [稳定版本发布操作](./docs/engineering/releasing.md)
 - [风险对应的验证策略](./docs/engineering/verification.md)
 - [贡献指南](./CONTRIBUTING.md)
 - [行为准则](./CODE_OF_CONDUCT.md)

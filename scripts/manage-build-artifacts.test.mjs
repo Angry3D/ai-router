@@ -39,6 +39,17 @@ afterEach(async () => {
 });
 
 describe("macOS build artifact management", () => {
+  it("pins the Tauri application binary independently of helper targets", async () => {
+    const config = JSON.parse(
+      await readFile(
+        resolve("src-tauri/tauri.conf.json"),
+        "utf8",
+      ),
+    );
+
+    expect(config.mainBinaryName).toBe("ai-router-app");
+  });
+
   it("builds production and QA into the canonical workspace target", () => {
     const root = resolve("/tmp/ai-router-fixture");
     const production = buildInvocation(
@@ -49,6 +60,14 @@ describe("macOS build artifact management", () => {
     );
     const qa = buildInvocation("qa", root, {}, "darwin");
     const source = buildInvocation("source", root, {}, "darwin");
+    const releaseConfig = join(root, "temporary-release.json");
+    const release = buildInvocation(
+      "release",
+      root,
+      {},
+      "darwin",
+      releaseConfig,
+    );
 
     expect(production).toMatchObject({
       args: ["exec", "tauri", "build", "--bundles", "app"],
@@ -74,10 +93,22 @@ describe("macOS build artifact management", () => {
       "--no-sign",
     ]);
     expect(source.env.CARGO_TARGET_DIR).toBe(join(root, "target"));
+    expect(release.args).toEqual([
+      "exec",
+      "tauri",
+      "build",
+      "--config",
+      releaseConfig,
+      "--bundles",
+      "dmg",
+    ]);
   });
 
   it("rejects unknown build modes", () => {
     expect(() => buildInvocation("preview")).toThrow("Unknown app build mode");
+    expect(() => buildInvocation("release")).toThrow(
+      "generated updater configuration",
+    );
   });
 
   it("propagates a failed native build", async () => {

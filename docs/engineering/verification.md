@@ -46,7 +46,8 @@ cargo test --workspace
 - SSE：首输出、token、终止状态、终止前/后断流和有界错误。
 - Codex 配置：基线不可变、provider identity、无关字段保留、symlink、fingerprint 竞态和精确恢复。
 - 原生生命周期：只使用 QA identity，验证隐藏/重开、主线程 generation、菜单聚焦和生产连续性。
-- 发布：锁定工具链、license/provenance、公共树分类、secret/path scan 和干净根历史。
+- 发布：锁定工具链、稳定 tag/ref/version/commit、ad-hoc bundle 身份、arm64/minimum OS、updater
+  签名、DMG 内容、`latest.json`、checksums、draft 回读、provenance、secret/path scan 和公开原子性。
 
 GitHub required checks、native source build 和仓库安全功能的稳定名称与配置见
 [GitHub CI 与安全设置](./github-security-settings.md)。修改 workflow、Dependabot 或供应链策略时运行：
@@ -66,6 +67,10 @@ Trellis 根误报为待发布文件。提交后的公开 export 仍必须运行�
 
 CI 原生源码验证使用 `pnpm tauri:source:build` 显式关闭签名；本地生产构建仍使用
 `pnpm tauri:prod:build`。两个命令都只生成工作区内的 bundle，不安装或启动应用。
+
+正式发布只在 protected `release` environment 中运行 `release:validate`、`release:draft`、
+`release:build`、`release:prepare` 与 `release:publish`。本地只运行合成 fixture 的 release 脚本测试；
+不得为了验证流程读取真实 updater secret、创建 tag 或操作 GitHub Release。
 
 最后一个命令只启动临时 loopback fixture，使用 lockfile 固定的 `codex-cli 0.147.0` 和临时
 `CODEX_HOME`，不读取用户 Codex 配置或真实上游。

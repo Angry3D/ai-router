@@ -11,6 +11,8 @@ const WORKFLOW_FILES = [
   ".github/workflows/native-source-build.yml",
   ".github/workflows/security.yml",
 ];
+const RELEASE_WORKFLOW_FILE = ".github/workflows/release.yml";
+const RELEASE_SCRIPT_FILE = "scripts/manage-release.mjs";
 const REQUIRED_CHECKS = new Map([
   ["node-quality", "Required / Node quality"],
   ["rust-quality", "Required / Rust quality"],
@@ -98,6 +100,10 @@ const REVIEWED_ACTIONS = new Map([
   [
     "github/codeql-action/analyze",
     ["ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd", "v4.37.7"],
+  ],
+  [
+    "actions/attest-build-provenance",
+    ["e8998f949152b193b063cb0ec769d69d929409be", "v3.0.0"],
   ],
 ]);
 const ACTION_PIN =
@@ -344,6 +350,196 @@ function assertPinnedEnvironment(project) {
   ) {
     fail(
       "Public CI must run the dedicated public-tree security and license gates.",
+    );
+  }
+  const releaseScripts = {
+    "release:validate": "node scripts/manage-release.mjs validate",
+    "release:draft": "node scripts/manage-release.mjs draft",
+    "release:build": "node scripts/manage-release.mjs build",
+    "release:prepare": "node scripts/manage-release.mjs prepare",
+    "release:publish": "node scripts/manage-release.mjs publish",
+  };
+  for (const [name, command] of Object.entries(releaseScripts)) {
+    if (project.packageJson.scripts?.[name] !== command) {
+      fail(`Protected release automation must retain the ${name} command.`);
+    }
+  }
+}
+
+function assertExactObject(value, expected, label) {
+  const actual = asObject(value, label);
+  const actualEntries = Object.entries(actual).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  const expectedEntries = Object.entries(expected).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  if (JSON.stringify(actualEntries) !== JSON.stringify(expectedEntries)) {
+    fail(`${label} must retain its exact reviewed values.`);
+  }
+}
+
+export function validateReleaseWorkflow(content, workflow) {
+  const path = RELEASE_WORKFLOW_FILE;
+  assertTopLevelReadOnlyPermissions(path, workflow);
+  const triggers = asObject(workflow.on, "release workflow triggers");
+  assertExactTriggerKeys("Stable release", triggers, ["push"]);
+  if (JSON.stringify(triggers.push) !== JSON.stringify({ tags: ["v*.*.*"] })) {
+    fail("Stable release must run only for canonical-looking version tags.");
+  }
+  if (
+    workflow.concurrency?.group !== "release-${{ github.ref }}" ||
+    workflow.concurrency?.["cancel-in-progress"] !== false
+  ) {
+    fail("Stable release must serialize one tag without cancelling a run.");
+  }
+  const jobs = asObject(workflow.jobs, `${path} jobs`);
+  if (Object.keys(jobs).length !== 1 || !jobs.release) {
+    fail("Stable release must contain exactly one protected release job.");
+  }
+  const job = jobs.release;
+  if (
+    job.name !== "Release / Protected macOS" ||
+    job["runs-on"] !== "macos-15" ||
+    job.environment !== "release" ||
+    !Number.isInteger(job["timeout-minutes"]) ||
+    job["timeout-minutes"] <= 0 ||
+    job.if !== undefined ||
+    job.needs !== undefined ||
+    job["continue-on-error"] !== undefined
+  ) {
+    fail(
+      "Stable release must retain the reviewed protected macOS job boundary.",
+    );
+  }
+  assertExactObject(
+    job.permissions,
+    { contents: "write", "id-token": "write", attestations: "write" },
+    "Stable release job permissions",
+  );
+  assertExactObject(
+    job.env,
+    { GH_TOKEN: "${{ github.token }}" },
+    "Stable release job environment",
+  );
+  assertCheckoutPerJob(path, workflow);
+  assertPinnedNodeSetup(path, "release", job);
+  validateActionPins(path, content);
+
+  const expectedCommands = [
+    "corepack enable",
+    "pnpm install --frozen-lockfile",
+    "pnpm release:validate",
+    "pnpm release:draft",
+    "pnpm release:build",
+    "pnpm release:prepare",
+    "pnpm release:publish",
+  ];
+  const runSteps = (job.steps ?? []).filter(
+    (step) => typeof step?.run === "string",
+  );
+  if (
+    runSteps.length !== expectedCommands.length ||
+    runSteps.some((step, index) => step.run.trim() !== expectedCommands[index])
+  ) {
+    fail(
+      "Stable release commands must retain the reviewed immutable draft flow.",
+    );
+  }
+  for (const step of job.steps ?? []) {
+    if (step?.if !== undefined || step?.["continue-on-error"] !== undefined) {
+      fail(
+        "Stable release steps must not be conditional or continue on error.",
+      );
+    }
+  }
+  if (/\bgh\s+release\b|create-release|upload-artifact/i.test(content)) {
+    fail(
+      "Stable release publication must remain inside the reviewed release script.",
+    );
+  }
+  if (
+    /developer[_ -]?id|apple_certificate|notar(?:y|ize)|staple/i.test(content)
+  ) {
+    fail(
+      "Stable release must not request Apple signing or notarization credentials.",
+    );
+  }
+
+  const secretReferences = [
+    ...content.matchAll(/\bsecrets\.([A-Z][A-Z0-9_]*)\b/g),
+  ].map((match) => match[1]);
+  const expectedSecrets = [
+    "AI_ROUTER_UPDATER_PUBLIC_KEY",
+    "AI_ROUTER_UPDATER_PUBLIC_KEY",
+    "TAURI_SIGNING_PRIVATE_KEY",
+    "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    "AI_ROUTER_UPDATER_PUBLIC_KEY",
+  ];
+  if (JSON.stringify(secretReferences) !== JSON.stringify(expectedSecrets)) {
+    fail(
+      "Stable release may reference only the exact updater signing secrets.",
+    );
+  }
+  const stepByCommand = new Map(
+    runSteps.map((step) => [step.run.trim(), step]),
+  );
+  assertExactObject(
+    stepByCommand.get("pnpm release:validate").env,
+    {
+      AI_ROUTER_UPDATER_PUBLIC_KEY:
+        "${{ secrets.AI_ROUTER_UPDATER_PUBLIC_KEY }}",
+    },
+    "Release validation environment",
+  );
+  assertExactObject(
+    stepByCommand.get("pnpm release:build").env,
+    {
+      AI_ROUTER_UPDATER_PUBLIC_KEY:
+        "${{ secrets.AI_ROUTER_UPDATER_PUBLIC_KEY }}",
+      TAURI_SIGNING_PRIVATE_KEY: "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
+    },
+    "Release build environment",
+  );
+  assertExactObject(
+    stepByCommand.get("pnpm release:prepare").env,
+    {
+      AI_ROUTER_UPDATER_PUBLIC_KEY:
+        "${{ secrets.AI_ROUTER_UPDATER_PUBLIC_KEY }}",
+    },
+    "Release preparation environment",
+  );
+  for (const command of [
+    "corepack enable",
+    "pnpm install --frozen-lockfile",
+    "pnpm release:draft",
+    "pnpm release:publish",
+  ]) {
+    if (stepByCommand.get(command).env !== undefined) {
+      fail(
+        `Stable release command ${command} must not receive signing secrets.`,
+      );
+    }
+  }
+  const attestation = requiredActionStep(
+    path,
+    "release",
+    job,
+    "actions/attest-build-provenance",
+  );
+  assertExactObject(
+    attestation.with,
+    { "subject-path": "target/release-distribution/*" },
+    "Release attestation inputs",
+  );
+}
+
+export function validateReleaseScript(content) {
+  if (typeof content !== "string" || content.includes("--clobber")) {
+    fail(
+      `${RELEASE_SCRIPT_FILE} must not permit overwriting existing release assets.`,
     );
   }
 }
@@ -607,19 +803,23 @@ export function validateDependabotConfig(config) {
 }
 
 async function readProject(root) {
-  const [nvmrc, packageJson, rustToolchain, ...workflows] = await Promise.all([
-    readFile(join(root, ".nvmrc"), "utf8"),
-    readFile(join(root, "package.json"), "utf8").then(JSON.parse),
-    readFile(join(root, "rust-toolchain.toml"), "utf8"),
-    ...WORKFLOW_FILES.map((path) => readFile(join(root, path), "utf8")),
-  ]);
-  return { nvmrc, packageJson, rustToolchain, workflows };
+  const [nvmrc, packageJson, rustToolchain, releaseScript, ...workflows] =
+    await Promise.all([
+      readFile(join(root, ".nvmrc"), "utf8"),
+      readFile(join(root, "package.json"), "utf8").then(JSON.parse),
+      readFile(join(root, "rust-toolchain.toml"), "utf8"),
+      readFile(join(root, RELEASE_SCRIPT_FILE), "utf8"),
+      ...WORKFLOW_FILES.map((path) => readFile(join(root, path), "utf8")),
+      readFile(join(root, RELEASE_WORKFLOW_FILE), "utf8"),
+    ]);
+  return { nvmrc, packageJson, releaseScript, rustToolchain, workflows };
 }
 
 export async function checkCiPolicy(projectRoot = DEFAULT_PROJECT_ROOT) {
   const root = resolve(projectRoot);
   const project = await readProject(root);
   assertPinnedEnvironment(project);
+  validateReleaseScript(project.releaseScript);
   let actionPins = 0;
   const parsedWorkflows = new Map();
   for (const [index, path] of WORKFLOW_FILES.entries()) {
@@ -628,6 +828,13 @@ export async function checkCiPolicy(projectRoot = DEFAULT_PROJECT_ROOT) {
     parsedWorkflows.set(path, { content, workflow });
     actionPins += validateWorkflowSafety(path, content, workflow);
   }
+  const releaseContent = project.workflows[WORKFLOW_FILES.length];
+  const releaseWorkflow = asObject(
+    parseYaml(RELEASE_WORKFLOW_FILE, releaseContent),
+    RELEASE_WORKFLOW_FILE,
+  );
+  validateReleaseWorkflow(releaseContent, releaseWorkflow);
+  actionPins += validateActionPins(RELEASE_WORKFLOW_FILE, releaseContent);
   validateCiWorkflow(parsedWorkflows.get(".github/workflows/ci.yml").workflow);
   assertNativeWorkflow(
     parsedWorkflows.get(".github/workflows/native-source-build.yml").workflow,
@@ -647,7 +854,7 @@ export async function checkCiPolicy(projectRoot = DEFAULT_PROJECT_ROOT) {
     actionPins,
     dependabotEcosystems,
     requiredChecks: [...REQUIRED_CHECKS.values(), ...SECURITY_CHECKS.values()],
-    workflows: WORKFLOW_FILES.length,
+    workflows: WORKFLOW_FILES.length + 1,
   };
 }
 

@@ -1,0 +1,61 @@
+name: Stable release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release / Protected macOS
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out immutable tag source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .nvmrc
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Validate release identity and public key
+        run: pnpm release:validate
+        env:
+          AI_ROUTER_UPDATER_PUBLIC_KEY: ${{ secrets.AI_ROUTER_UPDATER_PUBLIC_KEY }}
+      - name: Create or repair unpublished draft
+        run: pnpm release:draft
+      - name: Build signed updater distribution
+        run: pnpm release:build
+        env:
+          AI_ROUTER_UPDATER_PUBLIC_KEY: ${{ secrets.AI_ROUTER_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Verify and upload complete draft assets
+        run: pnpm release:prepare
+        env:
+          AI_ROUTER_UPDATER_PUBLIC_KEY: ${{ secrets.AI_ROUTER_UPDATER_PUBLIC_KEY }}
+      - name: Attest release asset provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v3.0.0
+        with:
+          subject-path: target/release-distribution/*
+      - name: Publish verified draft atomically
+        run: pnpm release:publish

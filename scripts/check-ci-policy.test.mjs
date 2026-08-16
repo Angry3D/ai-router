@@ -8,6 +8,8 @@ import {
   validateActionPins,
   validateCiWorkflow,
   validateDependabotConfig,
+  validateReleaseScript,
+  validateReleaseWorkflow,
   validateSecurityWorkflow,
   validateWorkflowSafety,
 } from "./check-ci-policy.mjs";
@@ -34,7 +36,7 @@ describe("GitHub CI policy", () => {
         "Security / Dependency review",
         "Security / CodeQL",
       ],
-      workflows: 3,
+      workflows: 4,
     });
   });
 
@@ -187,6 +189,54 @@ describe("GitHub CI policy", () => {
     );
     expect(() => validateSecurityWorkflow(workflow)).toThrow(
       "must use exactly one github/codeql-action/analyze action",
+    );
+  });
+
+  it("rejects release trigger, permission, action, secret, and publication drift", async () => {
+    const { parse } = await import("yaml");
+    const source = await readFile(
+      join(projectRoot, ".github/workflows/release.yml"),
+      "utf8",
+    );
+
+    const trigger = parse(source);
+    trigger.on.pull_request = null;
+    expect(() => validateReleaseWorkflow(source, trigger)).toThrow(
+      "only these triggers",
+    );
+
+    const permission = parse(source);
+    permission.jobs.release.permissions.contents = "read";
+    expect(() => validateReleaseWorkflow(source, permission)).toThrow(
+      "permissions",
+    );
+
+    const action = parse(source);
+    action.jobs.release.steps = action.jobs.release.steps.filter(
+      (step) => !step.uses?.startsWith("actions/attest-build-provenance@"),
+    );
+    expect(() => validateReleaseWorkflow(source, action)).toThrow(
+      "attest-build-provenance",
+    );
+
+    const secretSource = source.replace(
+      "pnpm release:draft",
+      `pnpm release:draft\n        env:\n          EXTRA: ${"${{"} secrets.EXTRA }}`,
+    );
+    expect(() =>
+      validateReleaseWorkflow(secretSource, parse(secretSource)),
+    ).toThrow("exact updater signing secrets");
+
+    const publicationSource = source.replace(
+      "pnpm release:publish",
+      "gh release upload v1.2.3 changed.dmg --clobber",
+    );
+    expect(() =>
+      validateReleaseWorkflow(publicationSource, parse(publicationSource)),
+    ).toThrow("reviewed immutable draft flow");
+
+    expect(() => validateReleaseScript('args.push("--clobber");')).toThrow(
+      "overwriting existing release assets",
     );
   });
 

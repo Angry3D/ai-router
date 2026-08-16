@@ -19,6 +19,8 @@ const REQUIRED_FILES = [
   "docs/engineering/routing-resilience.md",
   "docs/engineering/data-privacy-recovery.md",
   "docs/engineering/native-lifecycle.md",
+  "docs/engineering/application-updates.md",
+  "docs/engineering/releasing.md",
   "docs/engineering/verification.md",
   "docs/engineering/github-security-settings.md",
   ".github/ISSUE_TEMPLATE/bug_report.yml",
@@ -260,9 +262,10 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
     "10.33.2",
     "1.97.1",
     "codex-cli 0.147.0",
-    "仅提供源码",
-    "不签名",
-    "不公证",
+    "官方 DMG",
+    "ad-hoc",
+    "Apple 公证",
+    "应用内更新",
     "./LICENSE",
     "./THIRD_PARTY_NOTICES.md",
     ...REQUIRED_README_COMMANDS,
@@ -280,9 +283,10 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
   }
   const support = files.get("SUPPORT.md");
   for (const value of [
-    "仅提供简体中文源码",
-    "不签名",
-    "不公证",
+    "官方 DMG",
+    "ad-hoc",
+    "Apple 公证",
+    "应用内更新",
     "macOS 13",
     "Apple Silicon",
   ]) {
