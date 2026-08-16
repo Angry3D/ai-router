@@ -7,7 +7,12 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    allow:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
     groups:
       npm-minor-and-patch:
         applies-to: version-updates
@@ -24,7 +29,12 @@ updates:
       day: monday
       time: "09:15"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    allow:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
     groups:
       cargo-minor-and-patch:
         applies-to: version-updates
@@ -41,9 +51,17 @@ updates:
       day: monday
       time: "09:30"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    allow:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
     groups:
       actions-updates:
         applies-to: version-updates
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch

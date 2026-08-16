@@ -22,6 +22,16 @@ const SECURITY_CHECKS = new Map([
   ["dependency-review", "Security / Dependency review"],
   ["codeql", "Security / CodeQL"],
 ]);
+const DEPENDABOT_ECOSYSTEMS = new Map([
+  ["npm", "09:00"],
+  ["cargo", "09:15"],
+  ["github-actions", "09:30"],
+]);
+const DEPENDABOT_ALLOWED_UPDATE_TYPES = [
+  "version-update:semver-minor",
+  "version-update:semver-patch",
+];
+const DEPENDABOT_GROUP_UPDATE_TYPES = ["minor", "patch"];
 const REQUIRED_JOB_COMMANDS = new Map([
   [
     "node-quality",
@@ -548,27 +558,46 @@ export function validateDependabotConfig(config) {
   const ecosystems = new Map(
     config.updates.map((update) => [update["package-ecosystem"], update]),
   );
-  for (const ecosystem of ["npm", "cargo", "github-actions"]) {
+  for (const [ecosystem, scheduleTime] of DEPENDABOT_ECOSYSTEMS) {
     const update = ecosystems.get(ecosystem);
+    const allow = update?.allow;
+    const groups = update?.groups;
+    const group = groups && Object.values(groups)[0];
+    const hasExactAllowPolicy =
+      Array.isArray(allow) &&
+      allow.length === 1 &&
+      allow[0]?.["dependency-name"] === "*" &&
+      Array.isArray(allow[0]?.["update-types"]) &&
+      allow[0]["update-types"].length ===
+        DEPENDABOT_ALLOWED_UPDATE_TYPES.length &&
+      DEPENDABOT_ALLOWED_UPDATE_TYPES.every((updateType) =>
+        allow[0]["update-types"].includes(updateType),
+      );
+    const hasSecurityAffectingIgnoreRules =
+      Array.isArray(update?.ignore) && update.ignore.length > 0;
     if (
       update?.directory !== "/" ||
       update.schedule?.interval !== "weekly" ||
-      typeof update.schedule?.day !== "string" ||
-      typeof update.schedule?.time !== "string" ||
-      typeof update.schedule?.timezone !== "string" ||
-      !Number.isInteger(update["open-pull-requests-limit"]) ||
-      update["open-pull-requests-limit"] <= 0 ||
-      !update.groups ||
-      Object.keys(update.groups).length !== 1 ||
-      !Object.values(update.groups).every(
-        (group) =>
-          Array.isArray(group.patterns) &&
-          group.patterns.length > 0 &&
-          group.patterns.every((pattern) => typeof pattern === "string"),
+      update.schedule?.day !== "monday" ||
+      update.schedule?.time !== scheduleTime ||
+      update.schedule?.timezone !== "Asia/Shanghai" ||
+      update["open-pull-requests-limit"] !== 2 ||
+      !hasExactAllowPolicy ||
+      hasSecurityAffectingIgnoreRules ||
+      !groups ||
+      Object.keys(groups).length !== 1 ||
+      !Array.isArray(group?.patterns) ||
+      group.patterns.length !== 1 ||
+      group.patterns[0] !== "*" ||
+      group?.["applies-to"] !== "version-updates" ||
+      !Array.isArray(group?.["update-types"]) ||
+      group["update-types"].length !== DEPENDABOT_GROUP_UPDATE_TYPES.length ||
+      !DEPENDABOT_GROUP_UPDATE_TYPES.every((updateType) =>
+        group["update-types"].includes(updateType),
       )
     ) {
       fail(
-        `Dependabot ${ecosystem} must be weekly, rooted, bounded, and grouped.`,
+        `Dependabot ${ecosystem} must keep the reviewed weekly schedule, allow only ordinary minor/patch updates, cap ordinary PRs at 2, group those updates, and avoid ignore rules that affect security updates.`,
       );
     }
   }
