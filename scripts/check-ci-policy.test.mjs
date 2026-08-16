@@ -14,6 +14,13 @@ import {
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+async function readDependabotConfig() {
+  const { parse } = await import("yaml");
+  return parse(
+    await readFile(join(projectRoot, ".github/dependabot.yml"), "utf8"),
+  );
+}
+
 describe("GitHub CI policy", () => {
   it("accepts the repository workflows and Dependabot configuration", async () => {
     await expect(checkCiPolicy(projectRoot)).resolves.toMatchObject({
@@ -41,13 +48,13 @@ describe("GitHub CI policy", () => {
     expect(() =>
       validateActionPins(
         "fixture.yml",
-        "steps:\n  - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd\n",
+        "steps:\n  - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803\n",
       ),
     ).toThrow("full SHA and version comment");
     expect(() =>
       validateActionPins(
         "fixture.yml",
-        "steps:\n  - uses: actions/checkout@0000000000000000000000000000000000000000 # v6.0.2\n",
+        "steps:\n  - uses: actions/checkout@0000000000000000000000000000000000000000 # v6.1.0\n",
       ),
     ).toThrow("reviewed SHA/version pair");
     expect(() =>
@@ -55,7 +62,7 @@ describe("GitHub CI policy", () => {
         "fixture.yml",
         [
           "steps:",
-          "  - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2",
+          "  - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0",
           "  - uses: docker://alpine:latest",
           "",
         ].join("\n"),
@@ -66,8 +73,8 @@ describe("GitHub CI policy", () => {
         "fixture.yml",
         [
           "steps:",
-          "  - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0",
-          "  - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2",
+          "  - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v5.0.0",
+          "  - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0",
           "",
         ].join("\n"),
       ),
@@ -76,7 +83,7 @@ describe("GitHub CI policy", () => {
 
   it("rejects expanded permissions, secrets, artifacts, and lifecycle commands", () => {
     const checkoutStep = {
-      uses: "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+      uses: "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
       with: { "persist-credentials": false },
     };
     const base = {
@@ -87,7 +94,7 @@ describe("GitHub CI policy", () => {
     expect(() =>
       validateWorkflowSafety(
         "fixture.yml",
-        "uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n",
+        "uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0\n",
         base,
       ),
     ).toThrow("contents: read");
@@ -104,7 +111,7 @@ describe("GitHub CI policy", () => {
       expect(() =>
         validateWorkflowSafety(
           "fixture.yml",
-          `${forbidden}\nuses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n`,
+          `${forbidden}\nuses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0\n`,
           safeObject,
         ),
       ).toThrow("forbidden");
@@ -113,7 +120,7 @@ describe("GitHub CI policy", () => {
 
   it("requires hardened checkout in every job and reserves security-events write for CodeQL", () => {
     const content =
-      "uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n";
+      "uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0\n";
     const workflow = {
       concurrency: { "cancel-in-progress": true, group: "fixture" },
       jobs: {
@@ -130,7 +137,7 @@ describe("GitHub CI policy", () => {
 
     workflow.jobs.fixture.steps = [
       {
-        uses: "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+        uses: "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
       },
     ];
     expect(() =>
@@ -184,15 +191,49 @@ describe("GitHub CI policy", () => {
   });
 
   it("rejects incomplete Dependabot ecosystem coverage", async () => {
-    const source = await readFile(
-      join(projectRoot, ".github/dependabot.yml"),
-      "utf8",
-    );
-    const { parse } = await import("yaml");
-    const config = parse(source);
+    const config = await readDependabotConfig();
     config.updates = config.updates.filter(
       (update) => update["package-ecosystem"] !== "cargo",
     );
     expect(() => validateDependabotConfig(config)).toThrow("cargo");
+  });
+
+  it("rejects unsafe Dependabot version-update policies", async () => {
+    const missingAllow = await readDependabotConfig();
+    delete missingAllow.updates[0].allow;
+    expect(() => validateDependabotConfig(missingAllow)).toThrow(
+      "allow only ordinary minor/patch updates",
+    );
+
+    const allowsMajor = await readDependabotConfig();
+    allowsMajor.updates[1].allow[0]["update-types"].push(
+      "version-update:semver-major",
+    );
+    expect(() => validateDependabotConfig(allowsMajor)).toThrow(
+      "allow only ordinary minor/patch updates",
+    );
+
+    const ignoresMajor = await readDependabotConfig();
+    ignoresMajor.updates[2].ignore = [
+      {
+        "dependency-name": "*",
+        "update-types": ["version-update:semver-major"],
+      },
+    ];
+    expect(() => validateDependabotConfig(ignoresMajor)).toThrow(
+      "avoid ignore rules",
+    );
+
+    const ignoresAllUpdates = await readDependabotConfig();
+    ignoresAllUpdates.updates[0].ignore = [{ "dependency-name": "*" }];
+    expect(() => validateDependabotConfig(ignoresAllUpdates)).toThrow(
+      "avoid ignore rules",
+    );
+
+    const expandedQueue = await readDependabotConfig();
+    expandedQueue.updates[0]["open-pull-requests-limit"] = 3;
+    expect(() => validateDependabotConfig(expandedQueue)).toThrow(
+      "cap ordinary PRs at 2",
+    );
   });
 });

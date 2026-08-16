@@ -51,7 +51,7 @@ impl EffectiveCodexCatalog {
 
 pub const CODEX_MODEL_CATALOG_FILE_NAME: &str = "codex-model-catalog.json";
 const CODEX_BASE_INSTRUCTIONS: &str =
-    include_str!("../../../fixtures/codex-base-instructions-v0.146.0.md");
+    include_str!("../../../fixtures/codex-base-instructions-v0.147.0.md");
 
 #[derive(Debug, Error)]
 pub enum CodexCatalogError {

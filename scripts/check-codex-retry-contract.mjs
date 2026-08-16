@@ -13,15 +13,15 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const EXPECTED_CODEX_VERSION = "codex-cli 0.146.0";
+const EXPECTED_CODEX_VERSION = "codex-cli 0.147.0";
 const EXPECTED_CODEX_SHA256 = new Map([
   [
     "darwin-arm64",
-    "ae1d3ffe6d48aec6a4dc3f50e7eb8e0d11962485a6a9406c5a7012139383da02",
+    "19c4f144c5226a9f17c58e6f0fa854843b0f77a6eb420f40e2745a12f10f5d37",
   ],
   [
     "darwin-x64",
-    "544e2df9e6f09b3f1ceb0405879c83dd099ec015aeed942bb091ff0f29f60dc2",
+    "8080a42da4cef9c4216dace512f29acfe2e526aeeec2a0ce450e5a2b18b84d8a",
   ],
 ]);
 const PROCESS_TIMEOUT_MS = 60_000;
@@ -38,9 +38,9 @@ async function sha256(path) {
 
 async function codexBinaryPath() {
   const packageJson = JSON.parse(await readFile(codexPackageJson, "utf8"));
-  if (packageJson.version !== "0.146.0") {
+  if (packageJson.version !== "0.147.0") {
     throw new Error(
-      `Codex retry contract expected package 0.146.0; found ${packageJson.version ?? "unavailable"}.`,
+      `Codex retry contract expected package 0.147.0; found ${packageJson.version ?? "unavailable"}.`,
     );
   }
   const targets = new Map([
