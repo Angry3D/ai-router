@@ -41,7 +41,7 @@ describe("license and provenance gate", () => {
     expect(report.project).toEqual({
       license: "MIT",
       name: "ai-router",
-      version: "0.1.0",
+      version: "0.1.1",
     });
     expect(report.thirdParty.map((entry) => entry.id)).toEqual([
       "openai-codex-base-instructions",
@@ -94,9 +94,7 @@ describe("license and provenance gate", () => {
     expect(metadataStarted).toBe(false);
 
     resolveCargoProbe("cargo 0.0.0 (fixture)");
-    await expect(audit).rejects.toThrow(
-      "does not match pinned Cargo 1.97.1",
-    );
+    await expect(audit).rejects.toThrow("does not match pinned Cargo 1.97.1");
     expect(metadataStarted).toBe(false);
   });
 

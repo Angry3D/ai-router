@@ -253,9 +253,10 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
     );
   }
 
+  const versionMarker = `\`${tauriConfig.version}\``;
   const readme = files.get("README.md");
   for (const value of [
-    "0.1.0",
+    `当前版本为 ${versionMarker}`,
     "macOS 13",
     "Apple Silicon",
     "22.22.3",
@@ -274,6 +275,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
   }
   const contributing = files.get("CONTRIBUTING.md");
   for (const value of [
+    `项目目前处于 ${versionMarker}`,
     "22.22.3",
     "10.33.2",
     "1.97.1",
@@ -283,6 +285,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
   }
   const support = files.get("SUPPORT.md");
   for (const value of [
+    `AI Router 当前是 ${versionMarker}`,
     "官方 DMG",
     "ad-hoc",
     "Apple 公证",
@@ -292,6 +295,11 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
   ]) {
     assertContains(support, value, "SUPPORT.md");
   }
+  assertContains(
+    files.get("docs/engineering/README.md"),
+    `描述当前 ${versionMarker}`,
+    "docs/engineering/README.md",
+  );
 
   return {
     markdownFiles: MARKDOWN_FILES.length,
