@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildInvocation,
   cleanLegacyArtifacts,
+  RELEASE_BUNDLE_TARGETS,
   resolveLegacyTarget,
   runBuild,
 } from "./manage-build-artifacts.mjs";
@@ -41,13 +42,20 @@ afterEach(async () => {
 describe("macOS build artifact management", () => {
   it("pins the Tauri application binary independently of helper targets", async () => {
     const config = JSON.parse(
-      await readFile(
-        resolve("src-tauri/tauri.conf.json"),
-        "utf8",
-      ),
+      await readFile(resolve("src-tauri/tauri.conf.json"), "utf8"),
     );
 
     expect(config.mainBinaryName).toBe("ai-router-app");
+  });
+
+  it("requires both the updater application archive and DMG for releases", async () => {
+    const config = JSON.parse(
+      await readFile(resolve("src-tauri/tauri.release.conf.json"), "utf8"),
+    );
+
+    expect(RELEASE_BUNDLE_TARGETS).toEqual(["app", "dmg"]);
+    expect(config.bundle.targets).toEqual(["app", "dmg"]);
+    expect(config.bundle.createUpdaterArtifacts).toBe(true);
   });
 
   it("builds production and QA into the canonical workspace target", () => {
@@ -100,7 +108,7 @@ describe("macOS build artifact management", () => {
       "--config",
       releaseConfig,
       "--bundles",
-      "dmg",
+      "app,dmg",
     ]);
   });
 

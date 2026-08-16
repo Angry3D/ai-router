@@ -249,7 +249,7 @@ describe("release signing configuration", () => {
     expect(validateUpdaterPublicKey(publicKey)).toBe(publicKey);
     const template = JSON.stringify({
       bundle: {
-        targets: ["dmg"],
+        targets: ["app", "dmg"],
         createUpdaterArtifacts: true,
         resources: {
           "../LICENSE": "LICENSE",
@@ -265,6 +265,27 @@ describe("release signing configuration", () => {
     expect(rendered.plugins.updater.pubkey).toBe(publicKey);
     expect(JSON.stringify(rendered)).not.toContain(
       "__AI_ROUTER_UPDATER_PUBLIC_KEY__",
+    );
+  });
+
+  it("rejects a DMG-only release configuration before build", () => {
+    const template = JSON.stringify({
+      bundle: {
+        targets: ["dmg"],
+        createUpdaterArtifacts: true,
+        resources: {
+          "../LICENSE": "LICENSE",
+          "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+        },
+        macOS: { signingIdentity: "-" },
+      },
+      plugins: {
+        updater: { pubkey: "__AI_ROUTER_UPDATER_PUBLIC_KEY__" },
+      },
+    });
+
+    expect(() => renderReleaseConfig(template, updaterPublicKey())).toThrow(
+      "distribution contract",
     );
   });
 

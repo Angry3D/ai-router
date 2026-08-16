@@ -7,6 +7,8 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export class BuildArtifactError extends Error {}
 
+export const RELEASE_BUNDLE_TARGETS = ["app", "dmg"];
+
 export function resolveLegacyTarget(
   root,
   candidate = resolve(root, "src-tauri", "target"),
@@ -54,7 +56,10 @@ export function buildInvocation(
     }
     args.push("--config", resolve(releaseConfigPath));
   }
-  args.push("--bundles", mode === "release" ? "dmg" : "app");
+  args.push(
+    "--bundles",
+    mode === "release" ? RELEASE_BUNDLE_TARGETS.join(",") : "app",
+  );
   if (mode === "source") {
     args.push("--no-sign");
   }
