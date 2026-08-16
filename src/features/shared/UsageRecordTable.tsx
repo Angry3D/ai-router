@@ -8,6 +8,7 @@ import type {
   UsageHistoryRowDto,
   UsageTokensDto,
 } from "../../generated";
+import type { UsageRecordColumn } from "./usageRecordColumns";
 import {
   compactToken,
   formatCompactLatency,
@@ -20,27 +21,6 @@ import {
   formatUsageDateTime,
   formatUsagePreviewTime,
 } from "./usageRecordFormatting";
-
-export const USAGE_SETTINGS_COLUMNS = [
-  "route",
-  "model",
-  "state",
-  "tokens",
-  "cost",
-  "latency",
-  "completedAt",
-] as const;
-
-export const USAGE_PREVIEW_COLUMNS = [
-  "request",
-  "totalTokens",
-  "cost",
-  "firstOutputLatency",
-] as const;
-
-export type UsageRecordColumn =
-  | (typeof USAGE_SETTINGS_COLUMNS)[number]
-  | (typeof USAGE_PREVIEW_COLUMNS)[number];
 
 const COLUMN_LABELS: Record<UsageRecordColumn, string> = {
   route: "路由",

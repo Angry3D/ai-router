@@ -1,9 +1,7 @@
 import type { UsageHistoryPageDto } from "../../generated";
 import { AppScrollArea } from "../shared/AppScrollArea";
-import {
-  USAGE_PREVIEW_COLUMNS,
-  UsageRecordTable,
-} from "../shared/UsageRecordTable";
+import { UsageRecordTable } from "../shared/UsageRecordTable";
+import { USAGE_PREVIEW_COLUMNS } from "../shared/usageRecordColumns";
 import type { MenuUsagePreviewPhase } from "./useMenuUsagePreview";
 
 export function MenuUsagePreview({
