@@ -22,6 +22,16 @@ const SECURITY_CHECKS = new Map([
   ["dependency-review", "Security / Dependency review"],
   ["codeql", "Security / CodeQL"],
 ]);
+const DEPENDABOT_ECOSYSTEMS = new Map([
+  ["npm", "09:00"],
+  ["cargo", "09:15"],
+  ["github-actions", "09:30"],
+]);
+const DEPENDABOT_ALLOWED_UPDATE_TYPES = [
+  "version-update:semver-minor",
+  "version-update:semver-patch",
+];
+const DEPENDABOT_GROUP_UPDATE_TYPES = ["minor", "patch"];
 const REQUIRED_JOB_COMMANDS = new Map([
   [
     "node-quality",
@@ -72,22 +82,22 @@ const REQUIRED_JOB_COMMANDS = new Map([
   ],
 ]);
 const REVIEWED_ACTIONS = new Map([
-  ["actions/checkout", ["de0fac2e4500dabe0009e67214ff5f5447ce83dd", "v6.0.2"]],
+  ["actions/checkout", ["d23441a48e516b6c34aea4fa41551a30e30af803", "v6.1.0"]],
   [
     "actions/setup-node",
-    ["6044e13b5dc448c55e2357c09f80417699197238", "v6.2.0"],
+    ["249970729cb0ef3589644e2896645e5dc5ba9c38", "v6.5.0"],
   ],
   [
     "actions/dependency-review-action",
-    ["40c09b7dc99638e5ddb0bfd91c1673effc064d8a", "v4.8.1"],
+    ["2031cfc080254a8a887f58cffee85186f0e49e48", "v4.9.0"],
   ],
   [
     "github/codeql-action/init",
-    ["0d579ffd059c29b07949a3cce3983f0780820c98", "v4.32.6"],
+    ["ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd", "v4.37.7"],
   ],
   [
     "github/codeql-action/analyze",
-    ["0d579ffd059c29b07949a3cce3983f0780820c98", "v4.32.6"],
+    ["ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd", "v4.37.7"],
   ],
 ]);
 const ACTION_PIN =
@@ -548,27 +558,46 @@ export function validateDependabotConfig(config) {
   const ecosystems = new Map(
     config.updates.map((update) => [update["package-ecosystem"], update]),
   );
-  for (const ecosystem of ["npm", "cargo", "github-actions"]) {
+  for (const [ecosystem, scheduleTime] of DEPENDABOT_ECOSYSTEMS) {
     const update = ecosystems.get(ecosystem);
+    const allow = update?.allow;
+    const groups = update?.groups;
+    const group = groups && Object.values(groups)[0];
+    const hasExactAllowPolicy =
+      Array.isArray(allow) &&
+      allow.length === 1 &&
+      allow[0]?.["dependency-name"] === "*" &&
+      Array.isArray(allow[0]?.["update-types"]) &&
+      allow[0]["update-types"].length ===
+        DEPENDABOT_ALLOWED_UPDATE_TYPES.length &&
+      DEPENDABOT_ALLOWED_UPDATE_TYPES.every((updateType) =>
+        allow[0]["update-types"].includes(updateType),
+      );
+    const hasSecurityAffectingIgnoreRules =
+      Array.isArray(update?.ignore) && update.ignore.length > 0;
     if (
       update?.directory !== "/" ||
       update.schedule?.interval !== "weekly" ||
-      typeof update.schedule?.day !== "string" ||
-      typeof update.schedule?.time !== "string" ||
-      typeof update.schedule?.timezone !== "string" ||
-      !Number.isInteger(update["open-pull-requests-limit"]) ||
-      update["open-pull-requests-limit"] <= 0 ||
-      !update.groups ||
-      Object.keys(update.groups).length !== 1 ||
-      !Object.values(update.groups).every(
-        (group) =>
-          Array.isArray(group.patterns) &&
-          group.patterns.length > 0 &&
-          group.patterns.every((pattern) => typeof pattern === "string"),
+      update.schedule?.day !== "monday" ||
+      update.schedule?.time !== scheduleTime ||
+      update.schedule?.timezone !== "Asia/Shanghai" ||
+      update["open-pull-requests-limit"] !== 2 ||
+      !hasExactAllowPolicy ||
+      hasSecurityAffectingIgnoreRules ||
+      !groups ||
+      Object.keys(groups).length !== 1 ||
+      !Array.isArray(group?.patterns) ||
+      group.patterns.length !== 1 ||
+      group.patterns[0] !== "*" ||
+      group?.["applies-to"] !== "version-updates" ||
+      !Array.isArray(group?.["update-types"]) ||
+      group["update-types"].length !== DEPENDABOT_GROUP_UPDATE_TYPES.length ||
+      !DEPENDABOT_GROUP_UPDATE_TYPES.every((updateType) =>
+        group["update-types"].includes(updateType),
       )
     ) {
       fail(
-        `Dependabot ${ecosystem} must be weekly, rooted, bounded, and grouped.`,
+        `Dependabot ${ecosystem} must keep the reviewed weekly schedule, allow only ordinary minor/patch updates, cap ordinary PRs at 2, group those updates, and avoid ignore rules that affect security updates.`,
       );
     }
   }

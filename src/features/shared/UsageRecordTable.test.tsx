@@ -2,11 +2,11 @@ import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import type { CompletionState, UsageHistoryRowDto } from "../../generated";
+import { UsageRecordTable } from "./UsageRecordTable";
 import {
   USAGE_PREVIEW_COLUMNS,
   USAGE_SETTINGS_COLUMNS,
-  UsageRecordTable,
-} from "./UsageRecordTable";
+} from "./usageRecordColumns";
 
 function usageRow(
   overrides: Partial<UsageHistoryRowDto> = {},

@@ -30,10 +30,8 @@ import type {
   UsageStatisticsQueryDto,
   UsageTokensDto,
 } from "../../generated";
-import {
-  USAGE_SETTINGS_COLUMNS,
-  UsageRecordTable,
-} from "../shared/UsageRecordTable";
+import { UsageRecordTable } from "../shared/UsageRecordTable";
+import { USAGE_SETTINGS_COLUMNS } from "../shared/usageRecordColumns";
 import { formatUsageDateTime } from "../shared/usageRecordFormatting";
 import {
   SettingsButton,
