@@ -82,22 +82,22 @@ const REQUIRED_JOB_COMMANDS = new Map([
   ],
 ]);
 const REVIEWED_ACTIONS = new Map([
-  ["actions/checkout", ["de0fac2e4500dabe0009e67214ff5f5447ce83dd", "v6.0.2"]],
+  ["actions/checkout", ["d23441a48e516b6c34aea4fa41551a30e30af803", "v6.1.0"]],
   [
     "actions/setup-node",
-    ["6044e13b5dc448c55e2357c09f80417699197238", "v6.2.0"],
+    ["249970729cb0ef3589644e2896645e5dc5ba9c38", "v6.5.0"],
   ],
   [
     "actions/dependency-review-action",
-    ["40c09b7dc99638e5ddb0bfd91c1673effc064d8a", "v4.8.1"],
+    ["2031cfc080254a8a887f58cffee85186f0e49e48", "v4.9.0"],
   ],
   [
     "github/codeql-action/init",
-    ["0d579ffd059c29b07949a3cce3983f0780820c98", "v4.32.6"],
+    ["ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd", "v4.37.7"],
   ],
   [
     "github/codeql-action/analyze",
-    ["0d579ffd059c29b07949a3cce3983f0780820c98", "v4.32.6"],
+    ["ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd", "v4.37.7"],
   ],
 ]);
 const ACTION_PIN =
