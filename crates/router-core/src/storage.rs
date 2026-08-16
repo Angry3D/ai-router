@@ -30,7 +30,7 @@ use crate::domain::{
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 const GENERAL_BALANCE_SOURCE_HASHES: [&str; 3] = [
     "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507",
@@ -43,6 +43,18 @@ fn is_general_balance_source_hash(source_hash: &str) -> bool {
 }
 
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
+type AppSettingsRow = (
+    i64,
+    bool,
+    bool,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    i64,
+    String,
+    Option<i64>,
+);
 
 #[derive(Clone)]
 pub struct DatabaseExecutor {
@@ -150,6 +162,7 @@ pub struct AppSettingsRecord {
     pub images_generation_route_id: Option<RouteId>,
     pub images_generation_timeout: ImagesGenerationTimeout,
     pub appearance_preference: AppearancePreference,
+    pub last_automatic_update_check_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1556,18 +1569,9 @@ impl DatabaseExecutor {
                 images_generation_route_id,
                 images_generation_timeout_secs,
                 appearance_preference,
-            ): (
-                i64,
-                bool,
-                bool,
-                i64,
-                i64,
-                i64,
-                Option<String>,
-                i64,
-                String,
-            ) = connection.query_row(
-                "SELECT proxy_port, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference FROM app_settings WHERE singleton = 1",
+                last_automatic_update_check_at_ms,
+            ): AppSettingsRow = connection.query_row(
+                "SELECT proxy_port, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
@@ -1580,6 +1584,7 @@ impl DatabaseExecutor {
                         row.get(6)?,
                         row.get(7)?,
                         row.get(8)?,
+                        row.get(9)?,
                     ))
                 },
             )?;
@@ -1598,6 +1603,9 @@ impl DatabaseExecutor {
                 u16::try_from(images_generation_timeout_secs)
                     .map_err(|_| StorageError::Initialization)?,
             )?;
+            if last_automatic_update_check_at_ms.is_some_and(|timestamp| timestamp < 0) {
+                return Err(StorageError::Initialization);
+            }
             if let Some(route_id) = images_generation_route_id.as_deref() {
                 let valid: bool = connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM routes WHERE route_id = ?1)",
@@ -1617,7 +1625,34 @@ impl DatabaseExecutor {
                 images_generation_route_id: images_generation_route_id.map(RouteId::from_string),
                 images_generation_timeout,
                 appearance_preference: AppearancePreference::parse_persisted(&appearance_preference)?,
+                last_automatic_update_check_at_ms,
             })
+        })
+        .await
+    }
+
+    /// Persists the time at which an automatic update check was attempted.
+    ///
+    /// This operational cadence value is intentionally non-critical and does
+    /// not advance the recovery revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for a negative timestamp or a database error
+    /// when the singleton row cannot be updated.
+    pub async fn set_last_automatic_update_check_at_ms(
+        &self,
+        timestamp_ms: i64,
+    ) -> Result<(), StorageError> {
+        if timestamp_ms < 0 {
+            return Err(StorageError::Initialization);
+        }
+        self.call(move |connection| {
+            connection.execute(
+                "UPDATE app_settings SET last_automatic_update_check_at_ms = ?1 WHERE singleton = 1",
+                [timestamp_ms],
+            )?;
+            Ok(())
         })
         .await
     }
@@ -3134,6 +3169,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     if version < 18 {
         migrate_v18(connection)?;
     }
+    if version < 19 {
+        migrate_v19(connection)?;
+    }
     Ok(())
 }
 
@@ -3610,6 +3648,19 @@ fn migrate_v18(connection: &mut Connection) -> Result<(), StorageError> {
         FROM codex_baseline
         WHERE singleton = 1;
         PRAGMA user_version = 18;
+        ",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v19(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "
+        ALTER TABLE app_settings ADD COLUMN last_automatic_update_check_at_ms INTEGER
+            CHECK (last_automatic_update_check_at_ms IS NULL OR last_automatic_update_check_at_ms >= 0);
+        PRAGMA user_version = 19;
         ",
     )?;
     transaction.commit()?;
@@ -4245,7 +4296,7 @@ mod tests {
         is_general_balance_source_hash, materialize_routing_decisions, migrate_v1, migrate_v2,
         migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7, migrate_v8, migrate_v9,
         migrate_v10, migrate_v11, migrate_v12, migrate_v13, migrate_v14, migrate_v15, migrate_v16,
-        migrate_v17, migrate_v18, statistics_attribution, statistics_bucket_windows,
+        migrate_v17, migrate_v18, migrate_v19, statistics_attribution, statistics_bucket_windows,
         validate_balance_query,
     };
     use crate::{
@@ -5575,6 +5626,97 @@ mod tests {
             initial.balance_script_risk_confirmed
         );
         assert_eq!(changed.balance_query_policy, initial.balance_query_policy);
+    }
+
+    #[tokio::test]
+    async fn application_update_cadence_is_non_critical_and_fails_closed() {
+        let (_directory, database) = database();
+        let initial_revision = database.critical_revision().await.expect("revision");
+        assert_eq!(
+            database
+                .app_settings()
+                .await
+                .expect("settings")
+                .last_automatic_update_check_at_ms,
+            None
+        );
+
+        database
+            .set_last_automatic_update_check_at_ms(1_725_000_000_000)
+            .await
+            .expect("persist cadence");
+        assert_eq!(
+            database
+                .app_settings()
+                .await
+                .expect("updated settings")
+                .last_automatic_update_check_at_ms,
+            Some(1_725_000_000_000)
+        );
+        assert_eq!(
+            database
+                .critical_revision()
+                .await
+                .expect("revision unchanged"),
+            initial_revision
+        );
+        assert!(
+            database
+                .set_last_automatic_update_check_at_ms(-1)
+                .await
+                .is_err()
+        );
+
+        database
+            .test_execute(|connection| {
+                connection.pragma_update(None, "ignore_check_constraints", true)?;
+                connection.execute(
+                    "UPDATE app_settings SET last_automatic_update_check_at_ms = -1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("corrupt fixture");
+        assert!(database.app_settings().await.is_err());
+    }
+
+    #[test]
+    fn migration_v19_adds_nullable_application_update_cadence() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_v1(&mut connection).expect("v1");
+        migrate_v2(&mut connection).expect("v2");
+        migrate_v3(&mut connection).expect("v3");
+        migrate_v4(&mut connection).expect("v4");
+        migrate_v5(&mut connection).expect("v5");
+        migrate_v6(&mut connection).expect("v6");
+        migrate_v7(&mut connection).expect("v7");
+        migrate_v8(&mut connection).expect("v8");
+        migrate_v9(&mut connection).expect("v9");
+        migrate_v10(&mut connection).expect("v10");
+        migrate_v11(&mut connection).expect("v11");
+        migrate_v12(&mut connection).expect("v12");
+        migrate_v13(&mut connection).expect("v13");
+        migrate_v14(&mut connection).expect("v14");
+        migrate_v15(&mut connection).expect("v15");
+        migrate_v16(&mut connection).expect("v16");
+        migrate_v17(&mut connection).expect("v17");
+        migrate_v18(&mut connection).expect("v18");
+
+        migrate_v19(&mut connection).expect("v19");
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        let value: Option<i64> = connection
+            .query_row(
+                "SELECT last_automatic_update_check_at_ms FROM app_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cadence");
+        assert_eq!(version, 19);
+        assert_eq!(value, None);
     }
 
     #[tokio::test]

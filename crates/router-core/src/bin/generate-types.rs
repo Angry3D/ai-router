@@ -3,7 +3,9 @@ use std::{env, error::Error, fs, path::PathBuf};
 use router_core::BuildInfoDto;
 use router_core::{
     app_api::{
-        BalanceQueryEditDto, BalanceQuerySettingsDto, BalanceTestInputDto, CodexBaselineSummaryDto,
+        ApplicationUpdateFailureDto, ApplicationUpdateOperationDto, ApplicationUpdateProgressDto,
+        ApplicationUpdateReleaseDto, ApplicationUpdateSnapshotDto, BalanceQueryEditDto,
+        BalanceQuerySettingsDto, BalanceTestInputDto, CodexBaselineSummaryDto,
         CodexImagesMcpRepairPreviewDto, CodexModelDto, CodexModelsActivation,
         CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto, CodexRecoveryUpdatePreviewDto,
         CodexRestartNoticeDto, FallbackStopReasonDto, HistorySummaryDto,
@@ -47,6 +49,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("usage: generate-types <output-directory>")?;
 
     fs::create_dir_all(&output)?;
+    ApplicationUpdateFailureDto::export_all_to(&output)?;
+    ApplicationUpdateOperationDto::export_all_to(&output)?;
+    ApplicationUpdateProgressDto::export_all_to(&output)?;
+    ApplicationUpdateReleaseDto::export_all_to(&output)?;
+    ApplicationUpdateSnapshotDto::export_all_to(&output)?;
     BuildInfoDto::export_all_to(&output)?;
     AppLifecycleIssue::export_all_to(&output)?;
     AppLifecyclePhase::export_all_to(&output)?;
