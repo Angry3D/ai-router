@@ -83,6 +83,15 @@ vi.mock("../../api/ipc", () => ({
   connectCodex: ipc.connectCodex,
   createRecoveryPoint: ipc.createRecoveryPoint,
   deleteRoute: ipc.deleteRoute,
+  getApplicationUpdateSnapshot: vi.fn(async () => ({
+    currentVersion: "0.1.0",
+    operation: "idle",
+    available: null,
+    lastSuccessfulCheckAtMs: null,
+    downloadedBytes: null,
+    totalBytes: null,
+    manualFailure: null,
+  })),
   getBootstrapSnapshot: vi.fn(),
   getMenuSnapshot: vi.fn(),
   getRecoverySnapshot: ipc.getRecoverySnapshot,
@@ -352,7 +361,9 @@ describe("UsageSettings interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "用量" }));
     expect(screen.getByLabelText("时间范围")).toHaveValue("7d");
     expect(screen.getByLabelText("完成状态")).toBeInTheDocument();
-    expect(screen.getByLabelText("路由")).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "路由" }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("模型包含")).toBeInTheDocument();
     const partialCost = await screen.findByText("至少 $0.000028");
     expect(
@@ -513,7 +524,7 @@ describe("UsageSettings interactions", () => {
     fireEvent.change(screen.getByLabelText("完成状态"), {
       target: { value: "failed" },
     });
-    fireEvent.change(screen.getByLabelText("路由"), {
+    fireEvent.change(screen.getByRole("combobox", { name: "路由" }), {
       target: { value: previewRouteEdits[0].routeId },
     });
     fireEvent.change(screen.getByLabelText("模型包含"), {

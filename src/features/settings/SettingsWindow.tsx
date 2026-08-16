@@ -14,6 +14,7 @@ import {
 } from "../../api/ipc";
 import {
   isDatabaseSnapshotBlocked,
+  useApplicationUpdateSnapshot,
   useBootstrapSnapshot,
   useRecoverySnapshot,
   useSettingsSnapshot,
@@ -42,6 +43,7 @@ export function SettingsWindow() {
   );
   const bootstrapReady = bootstrap.isSuccess;
   const settings = useSettingsSnapshot(bootstrapReady && !databaseBlocked);
+  const applicationUpdate = useApplicationUpdateSnapshot(bootstrapReady);
   const recovery = useRecoverySnapshot(bootstrapReady && databaseBlocked);
   const [section, setSection] = useState<SettingsSectionId>(() => {
     if (!import.meta.env.DEV) return "routes";
@@ -203,6 +205,7 @@ export function SettingsWindow() {
             id: "system",
             label: "系统",
             icon: <SettingsIcon aria-hidden="true" size={17} />,
+            hasIndicator: applicationUpdate.data?.available != null,
           },
         ]}
       />
@@ -245,6 +248,7 @@ export function SettingsWindow() {
         <SystemSettings
           key={`${settings.data.balanceQuery.menuDebounceSeconds}-${settings.data.balanceQuery.automaticRefreshMinutes}`}
           snapshot={settings.data}
+          applicationUpdate={applicationUpdate.data ?? null}
         />
       ) : null}
 

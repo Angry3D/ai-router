@@ -27,6 +27,7 @@ const ipc = vi.hoisted(() => ({
   completeMenuShow: vi.fn(),
   dismissCodexRestartNotice: vi.fn(),
   getMenuSnapshot: vi.fn(),
+  getApplicationUpdateSnapshot: vi.fn(),
   getUsageHistory: vi.fn(),
   hideMenu: vi.fn(),
   refreshAllBalances: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock("../../api/ipc", () => ({
   dismissCodexRestartNotice: ipc.dismissCodexRestartNotice,
   getBootstrapSnapshot: vi.fn(),
   getMenuSnapshot: ipc.getMenuSnapshot,
+  getApplicationUpdateSnapshot: ipc.getApplicationUpdateSnapshot,
   getUsageHistory: ipc.getUsageHistory,
   hideMenu: ipc.hideMenu,
   isTauriRuntime: () => true,
@@ -195,6 +197,7 @@ beforeEach(() => {
   ipc.completeMenuShow.mockReset();
   ipc.dismissCodexRestartNotice.mockReset();
   ipc.getMenuSnapshot.mockReset();
+  ipc.getApplicationUpdateSnapshot.mockReset();
   ipc.getUsageHistory.mockReset();
   ipc.hideMenu.mockReset();
   ipc.refreshAllBalances.mockReset();
@@ -227,6 +230,15 @@ beforeEach(() => {
     permit: "route-permit",
   });
   ipc.getMenuSnapshot.mockResolvedValue(menuSnapshot());
+  ipc.getApplicationUpdateSnapshot.mockResolvedValue({
+    currentVersion: "0.1.0",
+    operation: "idle",
+    available: null,
+    lastSuccessfulCheckAtMs: null,
+    downloadedBytes: null,
+    totalBytes: null,
+    manualFailure: null,
+  });
   ipc.getUsageHistory.mockResolvedValue({
     rows: [],
     nextCursor: null,
@@ -245,6 +257,31 @@ beforeEach(() => {
 });
 
 describe("P8 menu interactions", () => {
+  it("adds an accessible fixed-slot indicator without changing the footer command", async () => {
+    ipc.getApplicationUpdateSnapshot.mockResolvedValue({
+      currentVersion: "0.1.0",
+      operation: "idle",
+      available: {
+        version: "0.2.0",
+        notes: "Synthetic update",
+        releaseUrl: "https://github.com/Angry3D/ai-router/releases/tag/v0.2.0",
+      },
+      lastSuccessfulCheckAtMs: 1_725_000_000_000,
+      downloadedBytes: null,
+      totalBytes: null,
+      manualFailure: null,
+    });
+    renderMenu(menuSnapshot());
+
+    const settings = await screen.findByRole("button", {
+      name: "打开设置，有可用更新",
+    });
+    expect(settings).toHaveClass("menu-settings-button");
+    expect(
+      settings.querySelector(".application-update-indicator"),
+    ).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByRole("button", { name: "更新全部余额" })).toBeEnabled();
+  });
   it("disables balance refresh when no route has an enabled script", () => {
     renderMenu(menuSnapshot({ balanceEnabled: false }));
 

@@ -14,10 +14,12 @@ import { queryKeys } from "../../api/query";
 import { useAppearance } from "../appearance/useAppearance";
 import type { AppearancePreference } from "../../generated";
 import type {
+  ApplicationUpdateSnapshotDto,
   BalanceQuerySettingsDto,
   RecoveryHealthKind,
   SettingsSnapshotDto,
 } from "../../generated";
+import { ApplicationUpdateSettings } from "./ApplicationUpdateSettings";
 import {
   SettingsActionGroup,
   SettingsButton,
@@ -44,23 +46,27 @@ const recoveryHealthPresentation: Record<
 
 export function SystemSettings({
   snapshot,
+  applicationUpdate = null,
 }: {
   snapshot: SettingsSnapshotDto;
+  applicationUpdate?: ApplicationUpdateSnapshotDto | null;
 }) {
   return (
     <SettingsPage title="系统" titleId="system-title">
       <AppearanceSettings />
+      <ApplicationUpdateSettings snapshot={applicationUpdate} />
       <ParameterSettings snapshot={snapshot} />
       <DataLogSettings snapshot={snapshot} />
     </SettingsPage>
   );
 }
 
-const appearanceOptions: Array<{ value: AppearancePreference; label: string }> = [
-  { value: "system", label: "跟随系统" },
-  { value: "light", label: "浅色" },
-  { value: "dark", label: "深色" },
-];
+const appearanceOptions: Array<{ value: AppearancePreference; label: string }> =
+  [
+    { value: "system", label: "跟随系统" },
+    { value: "light", label: "浅色" },
+    { value: "dark", label: "深色" },
+  ];
 
 function AppearanceSettings() {
   const { preference, pending, error, setPreference } = useAppearance();

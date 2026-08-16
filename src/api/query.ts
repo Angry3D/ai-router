@@ -9,6 +9,7 @@ import type {
 } from "../generated";
 import {
   getBootstrapSnapshot,
+  getApplicationUpdateSnapshot,
   getMenuSnapshot,
   getRecoverySnapshot,
   getSettingsSnapshot,
@@ -43,6 +44,7 @@ export const queryKeys = {
     ["usage-request-detail", requestId] as const,
   runtimeLogs: ["runtime-logs"] as const,
   recovery: ["recovery"] as const,
+  applicationUpdate: ["application-update"] as const,
 };
 
 const keysByArea: Record<StateArea, ReadonlyArray<readonly unknown[]>> = {
@@ -92,6 +94,7 @@ const keysByArea: Record<StateArea, ReadonlyArray<readonly unknown[]>> = {
     queryKeys.settings,
   ],
   appearance: [queryKeys.bootstrap],
+  application_update: [queryKeys.applicationUpdate],
 };
 
 export function isDatabaseSnapshotBlocked(
@@ -131,6 +134,14 @@ export function useSettingsSnapshot(enabled = true) {
   return useQuery({
     queryKey: queryKeys.settings,
     queryFn: getSettingsSnapshot,
+    enabled: isTauriRuntime() && enabled,
+  });
+}
+
+export function useApplicationUpdateSnapshot(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.applicationUpdate,
+    queryFn: getApplicationUpdateSnapshot,
     enabled: isTauriRuntime() && enabled,
   });
 }
@@ -222,11 +233,12 @@ export function useRouterStateSync(view: "menu" | "settings") {
       if (!isTauriRuntime()) return;
       const keys =
         view === "menu"
-          ? [queryKeys.bootstrap]
+          ? [queryKeys.bootstrap, queryKeys.applicationUpdate]
           : [
               queryKeys.bootstrap,
               queryKeys.settings,
               queryKeys.recovery,
+              queryKeys.applicationUpdate,
               queryKeys.usageHistory,
               queryKeys.usageStatistics,
               queryKeys.usageRouteOptions,

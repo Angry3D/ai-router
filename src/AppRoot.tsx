@@ -50,6 +50,10 @@ function DevelopmentPreviewData({
       queryClient.setQueryData(queryKeys.bootstrap, bootstrap);
       queryClient.setQueryData(queryKeys.menu, fixtures.previewMenuSnapshot);
       queryClient.setQueryData(queryKeys.settings, settings);
+      queryClient.setQueryData(
+        queryKeys.applicationUpdate,
+        fixtures.previewApplicationUpdateSnapshot(),
+      );
       if (mode === "required") {
         queryClient.setQueryData(
           queryKeys.recovery,

@@ -56,6 +56,9 @@
   --switch-shadow: rgb(0 0 0 / 24%);
   --usage-output: #7d4cc2;
   --latency-warning: #c77900;
+  --application-update-indicator: #d94841;
+  --application-update-progress: #007aff;
+  --application-update-indicator-ring: #ffffff;
 }
 
 :root[data-theme="dark"] {
@@ -105,6 +108,9 @@
   --switch-track: #545458;
   --usage-output: #bf8cff;
   --latency-warning: #ff9f0a;
+  --application-update-indicator: #ff6961;
+  --application-update-progress: #0a84ff;
+  --application-update-indicator-ring: #1c1c1e;
 }
 
 * {
@@ -997,6 +1003,10 @@ body[data-view="settings"] .app-variant-badge {
   color: var(--text);
 }
 
+.menu-settings-button {
+  position: relative;
+}
+
 .menu-footer-actions .icon-button:hover,
 .menu-footer-actions .icon-button:focus-visible {
   background: transparent;
@@ -1051,6 +1061,32 @@ body[data-view="settings"] .app-variant-badge {
   background: transparent;
   border: 0;
   border-radius: 6px;
+}
+
+.settings-nav-icon {
+  position: relative;
+  display: inline-grid;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  place-items: center;
+}
+
+.application-update-indicator {
+  position: absolute;
+  top: -1px;
+  right: -2px;
+  width: 6px;
+  height: 6px;
+  background: var(--application-update-indicator);
+  border: 1px solid var(--application-update-indicator-ring);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.menu-settings-button > .application-update-indicator {
+  top: 3px;
+  right: 3px;
 }
 
 .settings-nav-item:hover {
@@ -2014,6 +2050,109 @@ body[data-view="settings"] .app-variant-badge {
 
 .settings-section > .settings-action-group {
   margin-top: 4px;
+}
+
+.application-update-notes {
+  display: grid;
+  grid-template-columns: var(--settings-label-width) minmax(0, 1fr);
+  gap: var(--settings-field-gap);
+  margin: 4px 0 8px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.application-update-notes-content {
+  min-width: 0;
+}
+
+.application-update-notes p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+
+.application-update-notes p.is-expanded {
+  display: block;
+}
+
+.application-update-notes-toggle {
+  padding: 2px 0;
+  margin-top: 2px;
+  color: var(--blue);
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.application-update-notes-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.application-update-progress {
+  min-height: 32px;
+  margin: 8px 0 8px
+    calc(var(--settings-label-width) + var(--settings-field-gap));
+}
+
+.application-update-progress > div {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  background: var(--surface-hover);
+  border-radius: 3px;
+}
+
+.application-update-progress > div > span {
+  display: block;
+  height: 100%;
+  background: var(--application-update-progress);
+  border-radius: inherit;
+}
+
+.application-update-progress > div.is-indeterminate > span {
+  width: 35%;
+  animation: application-update-progress 1.2s ease-in-out infinite;
+}
+
+.application-update-progress p {
+  min-height: 18px;
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.application-update-actions,
+.application-update-error {
+  margin-left: calc(var(--settings-label-width) + var(--settings-field-gap));
+}
+
+.application-update-actions {
+  flex-wrap: wrap;
+}
+
+.application-update-error {
+  margin-top: 6px;
+  margin-bottom: 6px;
+  color: var(--red);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+@keyframes application-update-progress {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
 }
 
 .codex-config-conflict-message {
