@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import semver from "semver";
 
-import { runBuild } from "./manage-build-artifacts.mjs";
+import { RELEASE_BUNDLE_TARGETS, runBuild } from "./manage-build-artifacts.mjs";
 import { checkVersions } from "./manage-version.mjs";
 
 const SCRIPT_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -209,7 +209,8 @@ export function renderReleaseConfig(template, publicKey) {
   }
   const parsed = JSON.parse(rendered);
   if (
-    JSON.stringify(parsed.bundle?.targets) !== JSON.stringify(["dmg"]) ||
+    JSON.stringify(parsed.bundle?.targets) !==
+      JSON.stringify(RELEASE_BUNDLE_TARGETS) ||
     parsed.bundle?.createUpdaterArtifacts !== true ||
     parsed.bundle?.resources?.["../LICENSE"] !== "LICENSE" ||
     parsed.bundle?.resources?.["../THIRD_PARTY_NOTICES.md"] !==
