@@ -23,11 +23,11 @@ the supported product matrix; Rust quality and native source builds run on the
 Apple Silicon runner.
 
 Do not require `Native / Source build` for every pull request. It runs for
-non-documentation pushes to `main` and can be dispatched manually. Before the
-first public release, retain one successful run for the final source revision;
-the run summary records the revision, runner, tool versions, and source-build
-command. The workflow uses `pnpm tauri:source:build`, which disables signing,
-and does not upload the application bundle.
+non-documentation pushes to `main` and can be dispatched manually. Retain one
+successful run for each release source revision; the summary records the
+revision, runner, tool versions, and source-build command. The workflow uses
+`pnpm tauri:source:build`, which disables signing and updater artifacts, and
+does not upload the application bundle.
 
 ## Repository ruleset
 
@@ -84,10 +84,44 @@ it, validate the five non-Code-Security checks there and validate both dependenc
 review and CodeQL immediately after public visibility (or in an entitled private
 staging repository) before making the seven-check ruleset active.
 
-## Source-only release boundary
+## Protected stable releases
 
-No first-release workflow receives signing, notarization, publishing, or
-release secrets. CI does not upload an installer or application bundle, create
-a GitHub Release, launch either app identity, read local application-support
-data, or control `/Applications/AI Router.app`. A future binary distribution
-workflow requires a separate security and provenance design.
+Create a `v*` tag ruleset that blocks tag deletion, force updates, and moving an
+existing tag. Restrict tag creation to maintainers after the source commit has
+passed the `main` ruleset. Stable tags use exact `vMAJOR.MINOR.PATCH`; the
+workflow additionally rejects prerelease/build metadata and any mismatch among
+tag, ref, version, checkout, and target commit.
+
+Create an environment named `release` with required reviewers and deployment
+branch/tag rules limited to protected `v*` tags. Store exactly these environment
+secrets:
+
+- `AI_ROUTER_UPDATER_PUBLIC_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+The public key is not confidential, but keeping all three values at the same
+reviewed environment boundary prevents source/QA builds from accidentally
+becoming official updater builds. Keep a separately encrypted and tested
+offline private-key backup. No repository, organization, or pull-request secret
+with the same names is part of the supported release path.
+
+`.github/workflows/release.yml` is push-tag-only. It defaults to
+`contents: read`; its single protected job receives only `contents: write`,
+`id-token: write`, and `attestations: write`. Checkout credentials remain
+disabled. The job creates or repairs only an unpublished draft, uploads and
+downloads the complete five-asset inventory, attests the verified bytes, and
+publishes only as its final step. A published release or changed tag/commit is
+immutable and fails closed; corrections use a higher patch version.
+
+Ordinary CI, source-build, and security workflows keep their no-secret and
+no-publication policy. They do not upload an installer or application bundle,
+create a GitHub Release, launch either app identity, read local
+application-support data, or control `/Applications/AI Router.app`. The release
+job also builds only inside the workspace and never installs, launches, quits,
+or replaces the production application.
+
+Run `pnpm ci:policy` after every workflow or release-command change. The checker
+validates ordinary workflows separately from the exact allowlisted release
+workflow, including triggers, environment, permissions, secrets, action pins,
+commands, attestation path, and draft-publication order.

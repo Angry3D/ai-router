@@ -38,7 +38,7 @@ body:
     attributes:
       label: 当前项目边界
       options:
-        - label: 我理解当前仅支持 macOS 13+ Apple Silicon、简体中文和源码构建。
+        - label: 我理解当前仅支持 macOS 13+ Apple Silicon、简体中文、官方 DMG 和源码构建。
           required: true
         - label: 我确认本建议不含真实 API Key、完整配置、数据库或原始日志。
           required: true

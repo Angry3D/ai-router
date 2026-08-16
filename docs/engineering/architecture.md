@@ -30,7 +30,8 @@ user-configured upstream Responses APIs
 - `app_api.rs`、`state.rs` 和其他带 `TS` 导出的 Rust 类型构成 IPC 契约。
 
 `src-tauri/` 是桌面组合边界。它可以创建服务、映射安全错误、发布状态事件、管理托盘/窗口并调用
-macOS API，但不应拥有 SQL 或复制核心路由规则。
+macOS API，但不应拥有 SQL 或复制核心路由规则。`application_update.rs` 是 Tauri updater 的唯一
+应用边界：它拥有远端元数据校验、pending update、单操作 gate、进度、安装与 graceful restart 意图。
 
 `src/` 按功能组织菜单、设置和共享展示组件。`src/api/ipc.ts` 集中命令调用，`src/api/query.ts`
 管理 React Query 快照和状态失效。`src/generated/` 来自 Rust，不能手工修改。
@@ -39,7 +40,8 @@ macOS API，但不应拥有 SQL 或复制核心路由规则。
 
 写操作先通过 Rust 校验并在需要时原子持久化，再更新内存路由快照，最后发布带 revision 的状态区域
 事件。React 收到事件后只失效相关查询。界面本地状态可以保存输入草稿和交互状态，但不能成为路由、
-恢复或连接状态的持久权威。
+恢复、连接或应用更新状态的持久权威。高频更新下载进度只走 typed channel；稳定状态边界才发布
+`StateArea::ApplicationUpdate`，并只失效更新 snapshot。
 
 错误在 core 中保持具体分类，到 `src-tauri` 才映射成稳定 `code`、安全中文消息、可重试标记和可选
 字段名。IPC 不返回 SQL、文件绝对路径、TOML、原始上游 body 或凭据。

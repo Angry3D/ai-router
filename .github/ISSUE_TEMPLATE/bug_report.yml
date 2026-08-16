@@ -43,6 +43,7 @@ body:
     attributes:
       label: 运行方式
       options:
+        - 官方 GitHub Release DMG
         - 从源码构建的 AI Router.app
         - pnpm tauri:qa:dev
         - 从源码构建的 AI Router QA.app

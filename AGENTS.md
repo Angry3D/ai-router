@@ -9,7 +9,8 @@
 - `crates/router-core/` 负责领域模型、SQLite、路由、回退、恢复与共享 DTO；
   `src-tauri/` 负责桌面组合、IPC 与 macOS 生命周期；`src/` 负责 React 界面。
 - 本地代理只监听 loopback。不要把监听地址改成局域网或公网地址，也不要扩大 Tauri 权限。
-- 首次公开版本只提供源码，不维护 Windows/Linux、签名、公证、App Store 或自动更新路径。
+- 官方稳定版本提供 Apple Silicon DMG 和经过项目 updater 密钥认证的应用内更新；不维护
+  Windows/Linux、Developer ID 签名、Apple 公证、App Store 或静默更新路径。
 
 ## 修改规则
 
@@ -27,6 +28,8 @@
 - 测试使用合成数据、临时目录和本地监听器，不访问真实上游服务。
 - 不自动退出、重启、替换或重新启动 `AI Router.app` / `com.relax.airouter`。需要原生生命周期
   验证时只使用 `AI Router QA.app` / `com.relax.airouter.qa` 和隔离数据。
+- 不提交或打印 updater 私钥和密码。发布配置只能从受保护的 GitHub `release` environment
+  临时注入公钥，失败发布必须停留在 draft。
 - 更改 Codex 配置投影、数据库恢复、回退并发、流式响应或原生生命周期前，先阅读对应的
   [工程契约](./docs/engineering/README.md)，并保持失败关闭和有界诊断。
 

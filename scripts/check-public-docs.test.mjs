@@ -15,7 +15,7 @@ const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 describe("public documentation contract", () => {
   it("accepts the repository public documentation surface", async () => {
     await expect(checkPublicDocs(PROJECT_ROOT)).resolves.toMatchObject({
-      requiredFiles: 17,
+      requiredFiles: 19,
     });
   });
 

@@ -54,6 +54,7 @@ Codex 配置、SQLite 数据库、原始请求/响应、完整运行日志或用
 | 生成类型与协议   | `pnpm contracts:check`、`pnpm check:codex-retries`             |
 | 依赖或第三方内容 | `pnpm license:public:check`                                    |
 | 生产源码包       | `pnpm tauri:prod:build`                                        |
+| 发布脚本/工作流  | 聚焦脚本测试、`pnpm ci:policy`、发布工程契约                   |
 
 完整前端和 Rust 基线命令是：
 
@@ -81,6 +82,16 @@ cargo test --workspace
 - 修改应用或托盘 SVG 来源后运行 `pnpm icons:generate`，保留生成的 PNG/ICNS 与来源记录。
 - 修改版本时先运行 `pnpm version:sync`，再运行 `pnpm version:check` 并审查所有变更。
 - 修改第三方 fixture、图标或定价快照时更新相邻来源记录、声明和许可证策略。
+
+## 发布边界
+
+普通贡献者和 pull request workflow 不接触 updater 签名密钥，也不创建或修改 GitHub Release。
+`pnpm tauri:prod:build` 与 `pnpm tauri:source:build` 只生成无官方更新凭据的 `.app`；可分发的 DMG、
+updater 归档与签名只由受保护的 tag workflow 构建。不要在本地命令、测试、日志、PR 或 Issue 中
+传入真实 `TAURI_SIGNING_PRIVATE_KEY`、其密码或其他 release environment 值。
+
+发布行为的修改必须覆盖 tag/ref/version 绑定、draft-only 修复、资产清单、ad-hoc bundle 签名、updater
+签名、校验和与 provenance，并同步 [稳定版本发布操作](./docs/engineering/releasing.md)。
 
 ## 原生验证安全
 

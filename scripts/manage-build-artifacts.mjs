@@ -31,8 +31,14 @@ export function buildInvocation(
   root = projectRoot,
   baseEnvironment = process.env,
   platform = process.platform,
+  releaseConfigPath,
 ) {
-  if (mode !== "production" && mode !== "qa" && mode !== "source") {
+  if (
+    mode !== "production" &&
+    mode !== "qa" &&
+    mode !== "source" &&
+    mode !== "release"
+  ) {
     throw new BuildArtifactError(`Unknown app build mode: ${mode}`);
   }
 
@@ -40,7 +46,15 @@ export function buildInvocation(
   if (mode === "qa") {
     args.push("--config", "src-tauri/tauri.qa.conf.json");
   }
-  args.push("--bundles", "app");
+  if (mode === "release") {
+    if (!releaseConfigPath) {
+      throw new BuildArtifactError(
+        "Release builds require a generated updater configuration.",
+      );
+    }
+    args.push("--config", resolve(releaseConfigPath));
+  }
+  args.push("--bundles", mode === "release" ? "dmg" : "app");
   if (mode === "source") {
     args.push("--no-sign");
   }
@@ -57,8 +71,22 @@ export function buildInvocation(
   };
 }
 
-export function runBuild(mode, { root = projectRoot, spawnImpl = spawn } = {}) {
-  const invocation = buildInvocation(mode, root);
+export function runBuild(
+  mode,
+  {
+    root = projectRoot,
+    spawnImpl = spawn,
+    releaseConfigPath,
+    baseEnvironment = process.env,
+  } = {},
+) {
+  const invocation = buildInvocation(
+    mode,
+    root,
+    baseEnvironment,
+    process.platform,
+    releaseConfigPath,
+  );
   return new Promise((resolvePromise, reject) => {
     const child = spawnImpl(invocation.command, invocation.args, {
       cwd: invocation.cwd,

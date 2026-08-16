@@ -17,4 +17,5 @@
 - [ ] 已检查生成文件、锁文件、版本和第三方来源是否需要同步。
 - [ ] 没有提交真实 API Key、Authorization header、完整配置（包括 Codex 配置）、SQLite 数据库、原始请求/响应、原始日志、恢复点或用户绝对路径。
 - [ ] 原生自动化只针对 `AI Router QA.app` / `com.relax.airouter.qa`，没有控制生产应用。
+- [ ] PR 不读取 release environment 或 updater 私钥，也不创建、发布或修改 GitHub Release。
 - [ ] 用户可见或支持边界变化已同步 README、SUPPORT 或工程文档。
