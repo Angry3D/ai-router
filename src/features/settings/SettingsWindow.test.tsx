@@ -27,6 +27,7 @@ const ipc = vi.hoisted(() => ({
   createRecoveryPoint: vi.fn(),
   deleteRoute: vi.fn(),
   getRecoverySnapshot: vi.fn(),
+  getApplicationUpdateSnapshot: vi.fn(),
   getRouteEdit: vi.fn(),
   getSettingsSnapshot: vi.fn(),
   getUsageHistory: vi.fn(),
@@ -49,8 +50,7 @@ const ipc = vi.hoisted(() => ({
   tauriRuntime: false,
   listeners: {
     navigation: undefined as
-      | ((event: SettingsNavigationEvent) => void)
-      | undefined,
+      ((event: SettingsNavigationEvent) => void) | undefined,
     close: undefined as (() => void) | undefined,
   },
 }));
@@ -66,6 +66,7 @@ vi.mock("../../api/ipc", () => ({
   getBootstrapSnapshot: vi.fn(),
   getMenuSnapshot: vi.fn(),
   getRecoverySnapshot: ipc.getRecoverySnapshot,
+  getApplicationUpdateSnapshot: ipc.getApplicationUpdateSnapshot,
   getRouteEdit: ipc.getRouteEdit,
   getSettingsSnapshot: ipc.getSettingsSnapshot,
   getUsageHistory: ipc.getUsageHistory,
@@ -189,6 +190,7 @@ beforeEach(() => {
   ipc.connectCodex.mockReset();
   ipc.createRecoveryPoint.mockReset();
   ipc.getRecoverySnapshot.mockReset();
+  ipc.getApplicationUpdateSnapshot.mockReset();
   ipc.getRouteEdit.mockReset();
   ipc.getSettingsSnapshot.mockReset();
   ipc.getUsageHistory.mockReset();

@@ -1,9 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   AppLifecycleSnapshot,
   AppearancePreference,
+  ApplicationUpdateProgressDto,
+  ApplicationUpdateSnapshotDto,
   BalanceDisplaySnapshot,
   BalanceQuerySettingsDto,
   BalanceRefreshBatchState,
@@ -42,6 +44,12 @@ export const IPC_COMMANDS = {
   getBootstrapSnapshot: "get_bootstrap_snapshot",
   getMenuSnapshot: "get_menu_snapshot",
   getSettingsSnapshot: "get_settings_snapshot",
+  getApplicationUpdateSnapshot: "get_application_update_snapshot",
+  checkApplicationUpdate: "check_application_update",
+  downloadAndInstallApplicationUpdate:
+    "download_and_install_application_update",
+  openApplicationUpdateRelease: "open_application_update_release",
+  restartForApplicationUpdate: "restart_for_application_update",
   getUsageHistory: "get_usage_history",
   getUsageStatistics: "get_usage_statistics",
   getUsageRouteOptions: "get_usage_route_options",
@@ -130,6 +138,42 @@ export async function getMenuSnapshot(): Promise<MenuSnapshotDto> {
 
 export async function getSettingsSnapshot(): Promise<SettingsSnapshotDto> {
   return invoke<SettingsSnapshotDto>(IPC_COMMANDS.getSettingsSnapshot);
+}
+
+export async function getApplicationUpdateSnapshot(): Promise<ApplicationUpdateSnapshotDto> {
+  if (import.meta.env.DEV && !isTauriRuntime()) {
+    const { previewApplicationUpdateSnapshot } =
+      await import("../previewFixtures");
+    return structuredClone(previewApplicationUpdateSnapshot());
+  }
+  return invoke<ApplicationUpdateSnapshotDto>(
+    IPC_COMMANDS.getApplicationUpdateSnapshot,
+  );
+}
+
+export async function checkApplicationUpdate(): Promise<ApplicationUpdateSnapshotDto> {
+  return invoke<ApplicationUpdateSnapshotDto>(
+    IPC_COMMANDS.checkApplicationUpdate,
+  );
+}
+
+export async function downloadAndInstallApplicationUpdate(
+  onProgress: (progress: ApplicationUpdateProgressDto) => void,
+): Promise<ApplicationUpdateSnapshotDto> {
+  const channel = new Channel<ApplicationUpdateProgressDto>();
+  channel.onmessage = onProgress;
+  return invoke<ApplicationUpdateSnapshotDto>(
+    IPC_COMMANDS.downloadAndInstallApplicationUpdate,
+    { onProgress: channel },
+  );
+}
+
+export async function openApplicationUpdateRelease(): Promise<void> {
+  return invoke<void>(IPC_COMMANDS.openApplicationUpdateRelease);
+}
+
+export async function restartForApplicationUpdate(): Promise<void> {
+  return invoke<void>(IPC_COMMANDS.restartForApplicationUpdate);
 }
 
 export async function getUsageHistory(

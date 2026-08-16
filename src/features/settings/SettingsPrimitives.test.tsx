@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { Route } from "lucide-react";
+import { Route, Settings } from "lucide-react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -25,6 +25,12 @@ describe("Settings visual primitives", () => {
         items={[
           { id: "routes", label: "路由", icon: <Route aria-hidden="true" /> },
           { id: "codex", label: "Codex", icon: <span aria-hidden="true" /> },
+          {
+            id: "system",
+            label: "系统",
+            icon: <Settings aria-hidden="true" />,
+            hasIndicator: true,
+          },
         ]}
       />,
     );
@@ -36,6 +42,9 @@ describe("Settings visual primitives", () => {
     expect(screen.getByRole("button", { name: "Codex" })).not.toHaveAttribute(
       "aria-current",
     );
+    expect(
+      screen.getByRole("button", { name: "系统，有可用更新" }),
+    ).toContainElement(document.querySelector(".application-update-indicator"));
     fireEvent.click(screen.getByRole("button", { name: "Codex" }));
     expect(onSelect).toHaveBeenCalledWith("codex");
     expect(screen.getByText("版本 0.1.1")).toBeInTheDocument();

@@ -1,4 +1,5 @@
 import type {
+  ApplicationUpdateSnapshotDto,
   BootstrapSnapshotDto,
   DatabaseStartupIssue,
   MenuSnapshotDto,
@@ -13,6 +14,76 @@ import type {
   UsageStatisticsDto,
   UsageStatisticsQueryDto,
 } from "./generated";
+
+const previewUpdateAvailable = {
+  version: "0.2.0",
+  notes:
+    "新增经过签名校验的应用内更新，并改进菜单栏状态同步。\n修复设置窗口在较小尺寸下的布局问题。",
+  releaseUrl: "https://github.com/Angry3D/ai-router/releases/tag/v0.2.0",
+};
+
+export function previewApplicationUpdateSnapshot(): ApplicationUpdateSnapshotDto {
+  const state = new URLSearchParams(window.location.search).get("update");
+  const base: ApplicationUpdateSnapshotDto = {
+    currentVersion: "0.1.0",
+    operation: "idle",
+    available: null,
+    lastSuccessfulCheckAtMs: null,
+    downloadedBytes: null,
+    totalBytes: null,
+    manualFailure: null,
+  };
+  switch (state) {
+    case "checking":
+      return { ...base, operation: "checking" };
+    case "available":
+      return {
+        ...base,
+        available: previewUpdateAvailable,
+        lastSuccessfulCheckAtMs: previewNow,
+      };
+    case "downloading":
+      return {
+        ...base,
+        operation: "downloading",
+        available: previewUpdateAvailable,
+        lastSuccessfulCheckAtMs: previewNow,
+        downloadedBytes: 31_457_280,
+        totalBytes: 52_428_800,
+      };
+    case "installing":
+      return {
+        ...base,
+        operation: "installing",
+        available: previewUpdateAvailable,
+        downloadedBytes: 52_428_800,
+        totalBytes: 52_428_800,
+      };
+    case "failure":
+      return {
+        ...base,
+        available: previewUpdateAvailable,
+        lastSuccessfulCheckAtMs: previewNow,
+        manualFailure: {
+          code: "update_offline",
+          message: "暂时无法连接更新服务，请稍后重试。",
+          retryable: true,
+        },
+      };
+    case "restart-ready":
+      return {
+        ...base,
+        operation: "restart_ready",
+        available: previewUpdateAvailable,
+        downloadedBytes: 52_428_800,
+        totalBytes: 52_428_800,
+      };
+    case "current":
+      return { ...base, lastSuccessfulCheckAtMs: previewNow };
+    default:
+      return base;
+  }
+}
 
 const workRouteId = "preview-work" as RouteId;
 const personalRouteId = "preview-personal" as RouteId;

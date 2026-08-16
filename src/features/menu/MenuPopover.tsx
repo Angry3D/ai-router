@@ -32,6 +32,7 @@ import {
   isDatabaseSnapshotBlocked,
   queryKeys,
   useBootstrapSnapshot,
+  useApplicationUpdateSnapshot,
   useMenuSnapshot,
 } from "../../api/query";
 import { appVariant } from "../../appVariant";
@@ -339,6 +340,7 @@ function MenuConfirmDialog({
 }
 
 export function MenuPopover() {
+  const applicationUpdate = useApplicationUpdateSnapshot();
   const shellRef = useRef<HTMLElement>(null);
   const routeScrollerRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
@@ -946,13 +948,23 @@ export function MenuPopover() {
           </button>
           <div className="menu-footer-actions">
             <button
-              className="icon-button"
+              className="icon-button menu-settings-button"
               type="button"
-              aria-label="打开设置"
+              aria-label={
+                applicationUpdate.data?.available
+                  ? "打开设置，有可用更新"
+                  : "打开设置"
+              }
               title="设置"
               onClick={() => void showSettingsWindow("routes")}
             >
               <Settings aria-hidden="true" size={17} />
+              {applicationUpdate.data?.available ? (
+                <span
+                  className="application-update-indicator"
+                  aria-hidden="true"
+                />
+              ) : null}
             </button>
             <button
               className="icon-button"

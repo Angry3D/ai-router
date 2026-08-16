@@ -25,6 +25,7 @@ const ipc = vi.hoisted(() => ({
   createRecoveryPoint: vi.fn(),
   deleteRoute: vi.fn(),
   getRecoverySnapshot: vi.fn(),
+  getApplicationUpdateSnapshot: vi.fn(),
   getRouteEdit: vi.fn(),
   getSettingsSnapshot: vi.fn(),
   getUsageHistory: vi.fn(),
@@ -62,6 +63,7 @@ vi.mock("../../api/ipc", () => ({
   getBootstrapSnapshot: vi.fn(),
   getMenuSnapshot: vi.fn(),
   getRecoverySnapshot: ipc.getRecoverySnapshot,
+  getApplicationUpdateSnapshot: ipc.getApplicationUpdateSnapshot,
   getRouteEdit: ipc.getRouteEdit,
   getSettingsSnapshot: ipc.getSettingsSnapshot,
   getUsageHistory: ipc.getUsageHistory,
@@ -166,6 +168,7 @@ beforeEach(() => {
   ipc.connectCodex.mockReset();
   ipc.createRecoveryPoint.mockReset();
   ipc.getRecoverySnapshot.mockReset();
+  ipc.getApplicationUpdateSnapshot.mockReset();
   ipc.getRouteEdit.mockReset();
   ipc.getSettingsSnapshot.mockReset();
   ipc.getUsageHistory.mockReset();
@@ -349,7 +352,14 @@ describe("SystemSettings interactions", () => {
       screen
         .getAllByRole("heading", { level: 3 })
         .map((heading) => heading.textContent),
-    ).toEqual(["外观", "余额查询", "数据库恢复", "请求记录", "运行日志"]);
+    ).toEqual([
+      "外观",
+      "应用更新",
+      "余额查询",
+      "数据库恢复",
+      "请求记录",
+      "运行日志",
+    ]);
     expect(screen.getByText("已保护")).toBeInTheDocument();
     const openLogs = screen.getByRole("button", { name: "打开日志目录" });
     const clearLogs = screen.getByRole("button", { name: "清除日志" });

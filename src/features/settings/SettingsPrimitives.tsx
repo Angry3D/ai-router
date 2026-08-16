@@ -40,6 +40,7 @@ export function SettingsSidebar({
     id: SettingsSectionId;
     label: string;
     icon: ReactNode;
+    hasIndicator?: boolean;
   }>;
   onSelect: (section: SettingsSectionId) => void;
   version: string | null;
@@ -65,10 +66,21 @@ export function SettingsSidebar({
           )}
           type="button"
           key={item.id}
+          aria-label={
+            item.hasIndicator ? `${item.label}，有可用更新` : item.label
+          }
           aria-current={activeSection === item.id ? "page" : undefined}
           onClick={() => onSelect(item.id)}
         >
-          {item.icon}
+          <span className="settings-nav-icon">
+            {item.icon}
+            {item.hasIndicator ? (
+              <span
+                className="application-update-indicator"
+                aria-hidden="true"
+              />
+            ) : null}
+          </span>
           {item.label}
         </button>
       ))}
