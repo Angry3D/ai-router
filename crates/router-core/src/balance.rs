@@ -1462,7 +1462,7 @@ mod tests {
 
     #[test]
     fn legacy_general_v1_source_hash_is_stable() {
-        let hash = format!("{:x}", Sha256::digest(LEGACY_GENERAL_V1_SOURCE.as_bytes()));
+        let hash = hex::encode(Sha256::digest(LEGACY_GENERAL_V1_SOURCE.as_bytes()));
         assert_eq!(
             hash,
             "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507"

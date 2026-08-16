@@ -45,7 +45,7 @@ impl EffectiveCodexCatalog {
             Self::Original => b"ai-router:codex-original-catalog:v1".to_vec(),
             Self::Custom(models) => generate_codex_model_catalog(models)?,
         };
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        Ok(hex::encode(Sha256::digest(bytes)))
     }
 }
 
@@ -347,7 +347,9 @@ fn set_permissions(_path: &Path, _mode: u32) -> Result<(), std::io::Error> {
 mod tests {
     use std::fs;
 
-    use super::{CodexCatalogError, LocalCodexCatalog, generate_codex_model_catalog};
+    use super::{
+        CodexCatalogError, EffectiveCodexCatalog, LocalCodexCatalog, generate_codex_model_catalog,
+    };
     use crate::storage::CodexModelRecord;
 
     fn models() -> Vec<CodexModelRecord> {
@@ -363,6 +365,16 @@ mod tests {
                 context_window: None,
             },
         ]
+    }
+
+    #[test]
+    fn original_catalog_fingerprint_is_stable() {
+        assert_eq!(
+            EffectiveCodexCatalog::Original
+                .fingerprint()
+                .expect("original catalog fingerprint"),
+            "6fef9a6e1caaade06fd3e1f31a7a5b858e5be8aa4916ac5ac381553abdfa67eb"
+        );
     }
 
     #[test]
