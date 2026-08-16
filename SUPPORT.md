@@ -8,7 +8,7 @@ AI Router 当前是 `0.1.0` 早期个人维护项目，首次公开发布仅提�
 - macOS 13 或更高版本、Apple Silicon；
 - 按 [README](./README.md) 使用 Node `22.22.3`、pnpm `10.33.2`、Rust `1.97.1` 和锁文件构建；
 - Codex CLI/App 与 OpenAI Responses API 兼容上游；自动兼容性证据固定为
-  `codex-cli 0.146.0`；
+  `codex-cli 0.147.0`；
 - 使用项目原始源码和未修改的生产/QA 配置。
 
 Windows、Linux、Intel Mac、其他语言、广域网代理、多人共享网关、官方二进制、签名、公证、App

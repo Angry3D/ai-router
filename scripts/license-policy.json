@@ -70,27 +70,27 @@
     {
       "id": "openai-codex-base-instructions",
       "name": "OpenAI Codex base instructions",
-      "version": "rust-v0.146.0",
+      "version": "rust-v0.147.0",
       "license": "Apache-2.0",
       "upstream": "https://github.com/openai/codex",
       "noticeMarker": "<!-- provenance:openai-codex-base-instructions -->",
       "localPaths": [
-        "fixtures/codex-base-instructions-v0.146.0.md",
-        "fixtures/codex-base-instructions-v0.146.0.provenance.json",
+        "fixtures/codex-base-instructions-v0.147.0.md",
+        "fixtures/codex-base-instructions-v0.147.0.provenance.json",
         "third-party/licenses/Apache-2.0.txt"
       ],
       "sourceRecord": {
-        "path": "fixtures/codex-base-instructions-v0.146.0.provenance.json",
+        "path": "fixtures/codex-base-instructions-v0.147.0.provenance.json",
         "requiredStrings": [
           "https://github.com/openai/codex",
-          "rust-v0.146.0",
+          "rust-v0.147.0",
           "codex-rs/protocol/src/prompts/base_instructions/default.md",
           "Apache-2.0",
           "modifications"
         ]
       },
       "hashes": {
-        "fixtures/codex-base-instructions-v0.146.0.md": "294602e3502bb0ff840a82cd1d08ac526125a6cdf763e1f883e8d74f47cc2a8d",
+        "fixtures/codex-base-instructions-v0.147.0.md": "ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807",
         "third-party/licenses/Apache-2.0.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
       }
     },

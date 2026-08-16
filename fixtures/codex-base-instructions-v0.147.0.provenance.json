@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "localPath": "fixtures/codex-base-instructions-v0.146.0.md",
-  "sha256": "294602e3502bb0ff840a82cd1d08ac526125a6cdf763e1f883e8d74f47cc2a8d",
+  "localPath": "fixtures/codex-base-instructions-v0.147.0.md",
+  "sha256": "ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807",
   "upstreamRepository": "https://github.com/openai/codex",
-  "upstreamRef": "rust-v0.146.0",
+  "upstreamRef": "rust-v0.147.0",
   "upstreamPath": "codex-rs/protocol/src/prompts/base_instructions/default.md",
   "license": "Apache-2.0",
   "licenseFile": "third-party/licenses/Apache-2.0.txt",
