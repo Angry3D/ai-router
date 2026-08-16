@@ -1510,6 +1510,9 @@ mod tests {
             Some(1)
         );
         assert_eq!(list_json["result"]["tools"][0]["name"], "generate_image");
+        assert!(list_json["result"].get("resultType").is_none());
+        assert!(list_json["result"].get("ttlMs").is_none());
+        assert!(list_json["result"].get("cacheScope").is_none());
 
         let call = router
             .oneshot(
