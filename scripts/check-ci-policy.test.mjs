@@ -14,6 +14,13 @@ import {
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+async function readDependabotConfig() {
+  const { parse } = await import("yaml");
+  return parse(
+    await readFile(join(projectRoot, ".github/dependabot.yml"), "utf8"),
+  );
+}
+
 describe("GitHub CI policy", () => {
   it("accepts the repository workflows and Dependabot configuration", async () => {
     await expect(checkCiPolicy(projectRoot)).resolves.toMatchObject({
@@ -184,15 +191,49 @@ describe("GitHub CI policy", () => {
   });
 
   it("rejects incomplete Dependabot ecosystem coverage", async () => {
-    const source = await readFile(
-      join(projectRoot, ".github/dependabot.yml"),
-      "utf8",
-    );
-    const { parse } = await import("yaml");
-    const config = parse(source);
+    const config = await readDependabotConfig();
     config.updates = config.updates.filter(
       (update) => update["package-ecosystem"] !== "cargo",
     );
     expect(() => validateDependabotConfig(config)).toThrow("cargo");
+  });
+
+  it("rejects unsafe Dependabot version-update policies", async () => {
+    const missingAllow = await readDependabotConfig();
+    delete missingAllow.updates[0].allow;
+    expect(() => validateDependabotConfig(missingAllow)).toThrow(
+      "allow only ordinary minor/patch updates",
+    );
+
+    const allowsMajor = await readDependabotConfig();
+    allowsMajor.updates[1].allow[0]["update-types"].push(
+      "version-update:semver-major",
+    );
+    expect(() => validateDependabotConfig(allowsMajor)).toThrow(
+      "allow only ordinary minor/patch updates",
+    );
+
+    const ignoresMajor = await readDependabotConfig();
+    ignoresMajor.updates[2].ignore = [
+      {
+        "dependency-name": "*",
+        "update-types": ["version-update:semver-major"],
+      },
+    ];
+    expect(() => validateDependabotConfig(ignoresMajor)).toThrow(
+      "avoid ignore rules",
+    );
+
+    const ignoresAllUpdates = await readDependabotConfig();
+    ignoresAllUpdates.updates[0].ignore = [{ "dependency-name": "*" }];
+    expect(() => validateDependabotConfig(ignoresAllUpdates)).toThrow(
+      "avoid ignore rules",
+    );
+
+    const expandedQueue = await readDependabotConfig();
+    expandedQueue.updates[0]["open-pull-requests-limit"] = 3;
+    expect(() => validateDependabotConfig(expandedQueue)).toThrow(
+      "cap ordinary PRs at 2",
+    );
   });
 });
