@@ -3477,7 +3477,7 @@ fn migrate_v12(connection: &mut Connection) -> Result<(), StorageError> {
             .collect::<Result<Vec<_>, _>>()?
     };
     for (route_id, enabled, source, updated_at_ms) in rows {
-        let source_hash = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let source_hash = hex::encode(Sha256::digest(source.as_bytes()));
         let (mode, custom_source) = if is_general_balance_source_hash(&source_hash) {
             (BalanceQueryMode::GeneralV1, "")
         } else {
