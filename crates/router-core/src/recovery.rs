@@ -996,6 +996,10 @@ fn sanitize_point(
     ensure_table_inventory(&connection)?;
     let transaction = connection.transaction()?;
     transaction.execute("DELETE FROM proxy_requests", [])?;
+    transaction.execute(
+        "UPDATE app_settings SET last_automatic_update_check_at_ms = NULL WHERE singleton = 1",
+        [],
+    )?;
     let critical_revision: i64 = transaction.query_row(
         "SELECT critical_revision FROM recovery_revision WHERE singleton = 1",
         [],
@@ -1152,10 +1156,10 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         [],
         |row| row.get(0),
     )?;
-    let settings: (i64, i64, i64, i64, Option<String>, i64) = connection.query_row(
-        "SELECT proxy_port, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs FROM app_settings WHERE singleton = 1",
+    let settings: (i64, i64, i64, i64, Option<String>, i64, Option<i64>) = connection.query_row(
+        "SELECT proxy_port, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, last_automatic_update_check_at_ms FROM app_settings WHERE singleton = 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
     )?;
     let policy_valid = u16::try_from(settings.1)
         .ok()
@@ -1262,6 +1266,7 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         || !(1..=65_535).contains(&settings.0)
         || !policy_valid
         || !images_settings_valid
+        || settings.6.is_some_and(|timestamp| timestamp < 0)
         || !balance_queries_valid
         || !codex_models_valid
         || !notice_valid
@@ -2375,6 +2380,10 @@ mod tests {
     async fn point_preserves_critical_state_and_removes_history_rows_and_raw_bytes() {
         let (_root, _primary, database, manager) = setup();
         seed_critical_and_history(&database).await;
+        database
+            .set_last_automatic_update_check_at_ms(1_725_000_000_000)
+            .await
+            .expect("update cadence");
 
         let point = manager.create_point(&database).await.expect("point");
         let bytes = fs::read(&point.path).expect("point bytes");
@@ -2384,6 +2393,14 @@ mod tests {
                 .any(|window| { window == EXCLUDED_SENTINEL.as_bytes() })
         );
         let connection = Connection::open(&point.path).expect("point opens");
+        let update_cadence: Option<i64> = connection
+            .query_row(
+                "SELECT last_automatic_update_check_at_ms FROM app_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sanitized update cadence");
+        assert_eq!(update_cadence, None);
         let counts: (i64, i64, i64, i64, i64, i64, i64) = connection
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM routes), (SELECT COUNT(*) FROM secrets), (SELECT COUNT(*) FROM codex_baseline), (SELECT COUNT(*) FROM codex_recovery_config), (SELECT COUNT(*) FROM codex_models), (SELECT COUNT(*) FROM proxy_requests), (SELECT COUNT(*) FROM upstream_attempts)",

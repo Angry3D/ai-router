@@ -909,6 +909,62 @@ pub struct SettingsSnapshotDto {
     pub recovery: RecoveryHealthDto,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ApplicationUpdateOperationDto {
+    Idle,
+    Checking,
+    Downloading,
+    Installing,
+    RestartReady,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ApplicationUpdateReleaseDto {
+    pub version: String,
+    pub notes: String,
+    pub release_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ApplicationUpdateFailureDto {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ApplicationUpdateSnapshotDto {
+    pub current_version: String,
+    pub operation: ApplicationUpdateOperationDto,
+    pub available: Option<ApplicationUpdateReleaseDto>,
+    #[ts(type = "number | null")]
+    pub last_successful_check_at_ms: Option<i64>,
+    #[ts(type = "number | null")]
+    pub downloaded_bytes: Option<u64>,
+    #[ts(type = "number | null")]
+    pub total_bytes: Option<u64>,
+    pub manual_failure: Option<ApplicationUpdateFailureDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ApplicationUpdateProgressDto {
+    pub operation: ApplicationUpdateOperationDto,
+    #[ts(type = "number | null")]
+    pub downloaded_bytes: Option<u64>,
+    #[ts(type = "number | null")]
+    pub total_bytes: Option<u64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]

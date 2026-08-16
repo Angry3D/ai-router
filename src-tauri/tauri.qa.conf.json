@@ -8,7 +8,8 @@
     "beforeBuildCommand": "pnpm build:qa"
   },
   "bundle": {
-    "icon": ["icons/app-icon-qa.icns"]
+    "icon": ["icons/app-icon-qa.icns"],
+    "targets": ["app"]
   },
   "app": {
     "windows": [
@@ -40,5 +41,11 @@
         "visible": false
       }
     ]
+  },
+  "plugins": {
+    "updater": {
+      "active": false,
+      "dangerousInsecureTransportProtocol": true
+    }
   }
 }

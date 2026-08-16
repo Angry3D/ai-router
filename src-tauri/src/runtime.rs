@@ -345,6 +345,10 @@ impl DesktopLifecycleServices {
             .ok_or_else(|| ipc_error("database_unavailable", "数据库尚未就绪。", true))
     }
 
+    pub async fn application_update_database(&self) -> Option<DatabaseExecutor> {
+        self.database.lock().await.clone()
+    }
+
     async fn recovery_for_ipc(&self) -> Result<Arc<RecoveryCoordinator>, IpcErrorDto> {
         self.recovery
             .lock()

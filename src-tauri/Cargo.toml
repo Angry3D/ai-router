@@ -18,15 +18,22 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 log = "0.4"
+minisign-verify = "=0.2.5"
 router-core = { path = "../crates/router-core" }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "=2.11.5", features = ["macos-private-api", "image-png", "tray-icon"] }
 tauri-plugin-log = "=2.9.0"
+tauri-plugin-opener = "=2.5.4"
 tauri-plugin-positioner = { version = "=2.3.3", features = ["tray-icon"] }
 tauri-plugin-single-instance = "=2.4.3"
+tauri-plugin-updater = "=2.10.1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 unicode-segmentation = "1.13"
+url = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }

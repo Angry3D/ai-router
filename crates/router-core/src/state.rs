@@ -30,6 +30,7 @@ pub enum StateArea {
     RuntimeLogs,
     Recovery,
     Appearance,
+    ApplicationUpdate,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

@@ -1,3 +1,4 @@
+mod application_update;
 mod popover;
 mod runtime;
 
@@ -6,11 +7,13 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use application_update::{APPLICATION_UPDATE_RESTART_REQUEST_CODE, ApplicationUpdateCoordinator};
 use popover::{
     MenuPopoverController, complete_menu_show, handle_tray_event, handle_window_event, hide_menu,
     hide_settings_window, initial_tray_title, menu_frontend_ready, set_menu_usage_preview,
     update_tray_status,
 };
+use router_core::app_api::{ApplicationUpdateProgressDto, ApplicationUpdateSnapshotDto};
 use router_core::lifecycle::{AppCoordinator, AppLifecycleIssue, AppLifecyclePhase};
 use router_core::qa_acceptance::QaAcceptanceRoot;
 use router_core::state::{
@@ -35,7 +38,7 @@ use runtime::{
     start_over_database, test_balance_query, update_appearance_preference,
     update_balance_query_settings, update_images_generation_settings,
 };
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, ipc::Channel};
 
 const STATE_CHANGED_EVENT: &str = "router-state-changed";
 
@@ -134,6 +137,54 @@ fn get_bootstrap_snapshot(state: State<'_, Arc<AppRuntimeState>>) -> BootstrapSn
     state.bootstrap_snapshot()
 }
 
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command state injection requires State<T> by value"
+)]
+fn get_application_update_snapshot(
+    coordinator: State<'_, Arc<ApplicationUpdateCoordinator>>,
+) -> ApplicationUpdateSnapshotDto {
+    coordinator.snapshot()
+}
+
+#[tauri::command]
+async fn check_application_update(
+    coordinator: State<'_, Arc<ApplicationUpdateCoordinator>>,
+) -> Result<ApplicationUpdateSnapshotDto, router_core::state::IpcErrorDto> {
+    coordinator.check_manual().await
+}
+
+#[tauri::command]
+async fn download_and_install_application_update(
+    coordinator: State<'_, Arc<ApplicationUpdateCoordinator>>,
+    on_progress: Channel<ApplicationUpdateProgressDto>,
+) -> Result<ApplicationUpdateSnapshotDto, router_core::state::IpcErrorDto> {
+    coordinator.download_and_install(on_progress).await
+}
+
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command state injection requires State<T> by value"
+)]
+fn open_application_update_release(
+    coordinator: State<'_, Arc<ApplicationUpdateCoordinator>>,
+) -> Result<(), router_core::state::IpcErrorDto> {
+    coordinator.open_release()
+}
+
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command state injection requires State<T> by value"
+)]
+fn restart_for_application_update(
+    coordinator: State<'_, Arc<ApplicationUpdateCoordinator>>,
+) -> Result<(), router_core::state::IpcErrorDto> {
+    coordinator.request_restart()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the desktop application event loop.
 ///
@@ -157,6 +208,16 @@ pub fn run() {
             |app, _arguments, _working_directory| activate_existing_instance(app),
         ))
         .plugin(tauri_plugin_positioner::init())
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .target("darwin-aarch64")
+                .build(),
+        )
         .plugin(runtime_log_bootstrap_plugin(acceptance_log_dir.clone()))
         .plugin(runtime_log_plugin(acceptance_log_dir))
         .on_tray_icon_event(handle_tray_event)
@@ -164,6 +225,11 @@ pub fn run() {
         .setup(move |app| setup_application(app, acceptance_root.as_ref()))
         .invoke_handler(tauri::generate_handler![
             get_bootstrap_snapshot,
+            get_application_update_snapshot,
+            check_application_update,
+            download_and_install_application_update,
+            open_application_update_release,
+            restart_for_application_update,
             get_menu_snapshot,
             get_settings_snapshot,
             get_usage_history,
@@ -216,6 +282,10 @@ pub fn run() {
         ])
         .build(context)
         .expect("failed to build AI Router");
+    run_event_loop(app);
+}
+
+fn run_event_loop(app: tauri::App) {
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {
         #[cfg(target_os = "macos")]
@@ -233,7 +303,11 @@ pub fn run() {
                         .state::<RuntimeLogController>()
                         .log_fixed(log::Level::Error, "code=shutdown_budget_exhausted");
                 }
-                app_handle.exit(code.unwrap_or(0));
+                if code == Some(APPLICATION_UPDATE_RESTART_REQUEST_CODE) {
+                    app_handle.request_restart();
+                } else {
+                    app_handle.exit(code.unwrap_or(0));
+                }
             });
         }
         _ => {}
@@ -288,7 +362,13 @@ fn setup_application(
         diagnostics,
     );
     app.manage(services.clone());
-    let coordinator = AppCoordinator::new(services, runtime_state);
+    let update_coordinator = ApplicationUpdateCoordinator::new(
+        app.handle().clone(),
+        runtime_state.clone(),
+        acceptance_root.is_some() && profile.is_isolated(),
+    );
+    app.manage(update_coordinator.clone());
+    let coordinator = AppCoordinator::new(services.clone(), runtime_state);
     app.manage(coordinator.clone());
     let app_handle = app.handle().clone();
     tauri::async_runtime::spawn(async move {
@@ -309,6 +389,9 @@ fn setup_application(
             app_handle
                 .state::<RuntimeLogController>()
                 .log_fixed(log::Level::Error, "code=balance_startup_failed");
+        }
+        if snapshot.phase == AppLifecyclePhase::Running {
+            update_coordinator.start_automatic_scheduler(services);
         }
     });
     Ok(())
@@ -338,5 +421,13 @@ mod tests {
             StateArea::CodexConnection,
             StateArea::RequestHistorySummary,
         ])));
+    }
+
+    #[test]
+    fn application_update_restart_uses_an_interceptable_exit_intent() {
+        assert_ne!(
+            APPLICATION_UPDATE_RESTART_REQUEST_CODE,
+            tauri::RESTART_EXIT_CODE
+        );
     }
 }
