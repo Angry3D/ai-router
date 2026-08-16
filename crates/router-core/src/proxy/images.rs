@@ -10,8 +10,8 @@ use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
 };
@@ -318,7 +318,7 @@ impl ImageMcpServer {
         let data = first_valid_image(&response.body).ok_or_else(|| {
             McpError::internal_error("image generation returned an invalid result", None)
         })?;
-        Ok(CallToolResult::success(vec![Content::image(
+        Ok(CallToolResult::success(vec![ContentBlock::image(
             data,
             "image/png",
         )]))
@@ -336,20 +336,14 @@ impl ServerHandler for ImageMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         let tool = self.tool.clone();
-        async move {
-            Ok(ListToolsResult {
-                tools: vec![(*tool).clone()],
-                next_cursor: None,
-                meta: None,
-            })
-        }
+        async move { Ok(ListToolsResult::with_all_items(vec![(*tool).clone()])) }
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         if request.name.as_ref() != "generate_image" {
             return Err(McpError::invalid_params("unknown tool", None));
         }
@@ -359,7 +353,7 @@ impl ServerHandler for ImageMcpServer {
         let args: GenerateImageArgs =
             serde_json::from_value(serde_json::Value::Object(arguments.into_iter().collect()))
                 .map_err(|_| McpError::invalid_params("invalid tool arguments", None))?;
-        self.generate_image(args).await
+        self.generate_image(args).await.map(Into::into)
     }
 }
 
