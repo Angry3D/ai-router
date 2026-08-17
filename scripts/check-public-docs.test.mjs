@@ -8,6 +8,7 @@ import {
   validateMarkdownLinks,
   validatePublicText,
   validateSensitiveWarning,
+  validateVersionIndependentProjectClaims,
 } from "./check-public-docs.mjs";
 
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -51,5 +52,23 @@ describe("public documentation contract", () => {
     expect(() =>
       validateSensitiveWarning("template.md", "不要提交 API Key。"),
     ).toThrow("完整配置");
+  });
+
+  it("requires stable project claims without a live patch version", () => {
+    const files = new Map([
+      [
+        "README.md",
+        "项目仍处于早期开发阶段。下载入口为 GitHub Releases。未来版本可以是 9.9.9。",
+      ],
+      ["CONTRIBUTING.md", "项目仍处于早期阶段。"],
+      ["SUPPORT.md", "AI Router 是早期个人维护项目。"],
+      ["docs/engineering/README.md", "本文描述当前产品和发布边界。"],
+    ]);
+
+    expect(() => validateVersionIndependentProjectClaims(files)).not.toThrow();
+    files.set("README.md", "下载入口为 GitHub Releases。");
+    expect(() => validateVersionIndependentProjectClaims(files)).toThrow(
+      "项目仍处于早期开发阶段",
+    );
   });
 });

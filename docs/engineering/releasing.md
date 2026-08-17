@@ -28,6 +28,11 @@ pnpm version:sync
 pnpm version:check
 ```
 
+`version:sync` 只把该值投影到 `package.json`、根 `Cargo.toml`，以及 `Cargo.lock` 中
+`ai-router-app`、`router-core` 两个本地 workspace package；不要再手工修改这些投影。
+同步会保留其他字节和依赖版本。审查完整 diff，确认只有上述版本字段变化，再由
+`version:check` 对所有投影做关系校验。
+
 合并并确认 required checks 后，在该不可变提交创建完全相同的 `v<version>` tag。workflow 会再次比较
 repository、`GITHUB_REF`、tag、应用版本、checkout `HEAD` 和 tag commit；prerelease、build metadata、
 移动 tag 或版本漂移全部失败关闭。

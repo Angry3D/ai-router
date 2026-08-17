@@ -165,6 +165,11 @@ export function validateLicensePolicy(policy) {
       "License policy must use schemaVersion 1 and contain every policy section.",
     );
   }
+  if (Object.hasOwn(policy.project, "version")) {
+    throw new LicenseAuditError(
+      "License policy project.version must be derived from the Tauri manifest.",
+    );
+  }
 
   for (const key of [
     "javascriptAllowedIdentifiers",
@@ -336,6 +341,12 @@ export async function checkProjectMetadata(projectRoot, policy) {
       ),
     ]);
   const expected = policy.project;
+  const applicationVersion = tauriConfig.version;
+  if (typeof applicationVersion !== "string" || !applicationVersion) {
+    throw new LicenseAuditError(
+      "Tauri configuration must declare an application version.",
+    );
+  }
 
   if (
     !license.startsWith("MIT License\n") ||
@@ -355,10 +366,10 @@ export async function checkProjectMetadata(projectRoot, policy) {
   }
   if (
     packageJson.name !== expected.name ||
-    packageJson.version !== expected.version
+    packageJson.version !== applicationVersion
   ) {
     throw new LicenseAuditError(
-      "package.json project name/version does not match license policy.",
+      "package.json project name/version is inconsistent with Tauri and license policy.",
     );
   }
   if (
@@ -376,10 +387,6 @@ export async function checkProjectMetadata(projectRoot, policy) {
       "The application package must remain private to prevent npm publication.",
     );
   }
-  if (tauriConfig.version !== expected.version) {
-    throw new LicenseAuditError("Tauri version does not match license policy.");
-  }
-
   const workspacePackage = section(
     cargoToml,
     "workspace.package",
@@ -390,7 +397,7 @@ export async function checkProjectMetadata(projectRoot, policy) {
     homepage: expected.repository,
     license: expected.license,
     repository: expected.repository,
-    version: expected.version,
+    version: applicationVersion,
   };
   for (const [key, value] of Object.entries(expectedCargoFields)) {
     if (tomlString(workspacePackage, key) !== value) {
@@ -433,7 +440,7 @@ export async function checkProjectMetadata(projectRoot, policy) {
   return {
     license: expected.license,
     project: expected.name,
-    version: expected.version,
+    version: applicationVersion,
     notice,
   };
 }
