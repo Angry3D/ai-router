@@ -1764,12 +1764,56 @@ pub(crate) fn decode_supported(
     Ok(body)
 }
 
+/// Decodes an MCP image response without geometric `Vec` growth invalidating
+/// its reviewed single-call allocation budget.
+pub(crate) fn decode_supported_exact(
+    mut body: Vec<u8>,
+    encodings: &[String],
+    limit: usize,
+) -> Result<Vec<u8>, DecodeError> {
+    if encodings.iter().any(|encoding| {
+        !matches!(
+            encoding.as_str(),
+            "gzip" | "x-gzip" | "deflate" | "br" | "zstd" | "zst"
+        )
+    }) {
+        return Err(DecodeError::Unsupported);
+    }
+    for encoding in encodings.iter().rev() {
+        body = match encoding.as_str() {
+            "gzip" | "x-gzip" => read_bounded_exact(GzDecoder::new(body.as_slice()), limit)?,
+            "deflate" => decode_deflate_exact(&body, limit)?,
+            "br" => read_bounded_exact(brotli::Decompressor::new(body.as_slice(), 4096), limit)?,
+            "zstd" | "zst" => {
+                let decoder = zstd::stream::read::Decoder::new(body.as_slice())
+                    .map_err(|_| DecodeError::Invalid)?;
+                read_bounded_exact(decoder, limit)?
+            }
+            _ => return Err(DecodeError::Unsupported),
+        };
+    }
+    if body.len() > limit {
+        return Err(DecodeError::TooLarge);
+    }
+    Ok(body)
+}
+
 fn decode_deflate(body: &[u8], limit: usize) -> Result<Vec<u8>, DecodeError> {
     match read_bounded(ZlibDecoder::new(body), limit) {
         Ok(decoded) => Ok(decoded),
         Err(DecodeError::TooLarge) => Err(DecodeError::TooLarge),
         Err(DecodeError::Invalid | DecodeError::Unsupported) => {
             read_bounded(DeflateDecoder::new(body), limit)
+        }
+    }
+}
+
+fn decode_deflate_exact(body: &[u8], limit: usize) -> Result<Vec<u8>, DecodeError> {
+    match read_bounded_exact(ZlibDecoder::new(body), limit) {
+        Ok(decoded) => Ok(decoded),
+        Err(DecodeError::TooLarge) => Err(DecodeError::TooLarge),
+        Err(DecodeError::Invalid | DecodeError::Unsupported) => {
+            read_bounded_exact(DeflateDecoder::new(body), limit)
         }
     }
 }
@@ -1782,6 +1826,30 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, DecodeError>
         .map_err(|_| DecodeError::Invalid)?;
     if decoded.len() > limit {
         return Err(DecodeError::TooLarge);
+    }
+    Ok(decoded)
+}
+
+fn read_bounded_exact(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, DecodeError> {
+    const CHUNK_BYTES: usize = 64 * 1024;
+
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(limit)
+        .map_err(|_| DecodeError::TooLarge)?;
+    let mut chunk = vec![0_u8; CHUNK_BYTES].into_boxed_slice();
+    loop {
+        let remaining_with_probe = limit.saturating_sub(decoded.len()).saturating_add(1);
+        let read = reader
+            .read(&mut chunk[..remaining_with_probe.min(CHUNK_BYTES)])
+            .map_err(|_| DecodeError::Invalid)?;
+        if read == 0 {
+            break;
+        }
+        if decoded.len().saturating_add(read) > limit {
+            return Err(DecodeError::TooLarge);
+        }
+        decoded.extend_from_slice(&chunk[..read]);
     }
     Ok(decoded)
 }
@@ -3331,6 +3399,30 @@ mod tests {
         assert!(matches!(
             decode_supported(gzip, &["gzip".to_owned()], original.len() - 1),
             Err(DecodeError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn exact_capacity_decoder_preserves_supported_encoding_and_limit_semantics() {
+        use std::io::Write;
+
+        let original = br#"{"data":[{"b64_json":"AQ=="}]}"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(original).expect("gzip write");
+        let gzip = encoder.finish().expect("gzip finish");
+
+        assert_eq!(
+            decode_supported_exact(gzip.clone(), &["gzip".to_owned()], 1024)
+                .expect("exact-capacity gzip decode"),
+            original
+        );
+        assert!(matches!(
+            decode_supported_exact(gzip, &["gzip".to_owned()], original.len() - 1),
+            Err(DecodeError::TooLarge)
+        ));
+        assert!(matches!(
+            decode_supported_exact(original.to_vec(), &["compress".to_owned()], 1024),
+            Err(DecodeError::Unsupported)
         ));
     }
 

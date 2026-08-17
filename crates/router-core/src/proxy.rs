@@ -1,6 +1,7 @@
 use std::{
     io::Read,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -30,7 +31,7 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
-    sync::{oneshot, watch},
+    sync::{Semaphore, oneshot, watch},
     task::JoinHandle,
 };
 use ts_rs::TS;
@@ -234,6 +235,8 @@ pub struct ProxyIngressState {
     wire_limit: usize,
     decoded_limit: usize,
     images: ImagesGenerationService,
+    mcp_image_asset_root: Option<PathBuf>,
+    mcp_image_permit: Arc<Semaphore>,
 }
 
 impl ProxyIngressState {
@@ -249,6 +252,8 @@ impl ProxyIngressState {
             diagnostics: Arc::new(NoopRuntimeDiagnosticSink),
             wire_limit: MAX_REQUEST_WIRE_BYTES,
             decoded_limit: MAX_REQUEST_DECODED_BYTES,
+            mcp_image_asset_root: None,
+            mcp_image_permit: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -270,6 +275,12 @@ impl ProxyIngressState {
     pub fn with_routing_store(mut self, routing: RoutingSnapshotStore) -> Self {
         self.images = ImagesGenerationService::new(routing.clone());
         self.routing = routing;
+        self
+    }
+
+    #[must_use]
+    pub fn with_mcp_image_asset_root(mut self, root: PathBuf) -> Self {
+        self.mcp_image_asset_root = Some(root);
         self
     }
 
@@ -315,8 +326,16 @@ pub struct LocalErrorBodyDto {
 
 pub fn build_proxy_router(state: ProxyIngressState) -> Router {
     let images = state.images.clone();
+    let asset_root = state.mcp_image_asset_root.clone();
+    let image_permit = Arc::clone(&state.mcp_image_permit);
     let mcp_service = StreamableHttpService::new(
-        move || Ok(images::ImageMcpServer::new(images.clone())),
+        move || {
+            Ok(images::ImageMcpServer::new(
+                images.clone(),
+                asset_root.clone(),
+                Arc::clone(&image_permit),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
@@ -1072,12 +1091,29 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request as HttpRequest, Uri},
     };
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use futures_util::stream::poll_fn;
+    use tempfile::TempDir;
     use tower::ServiceExt;
 
     use super::*;
 
     const TOKEN: &str = "local-gateway-token";
+
+    fn valid_png_fixture() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("PNG header");
+            writer
+                .write_image_data(&[0x12, 0x34, 0x56, 0xff])
+                .expect("PNG pixels");
+            writer.finish().expect("PNG end");
+        }
+        bytes
+    }
 
     #[test]
     fn reasoning_effort_projection_trims_bounds_and_ignores_absent_values() {
@@ -1405,7 +1441,11 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     async fn images_http_and_mcp_surfaces_share_gateway_auth_and_stay_fail_closed() {
         let upstream = Arc::new(RecordingUpstream::default());
-        let router = build_proxy_router(ProxyIngressState::new(TOKEN, upstream.clone()));
+        let temporary = TempDir::new().expect("temporary app data");
+        let router = build_proxy_router(
+            ProxyIngressState::new(TOKEN, upstream.clone())
+                .with_mcp_image_asset_root(temporary.path().join("mcp-images")),
+        );
 
         let unauthorized_images = router
             .clone()
@@ -1539,6 +1579,142 @@ mod tests {
             "images_generation_disabled"
         );
         assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn images_http_and_mcp_streamable_call_returns_only_local_asset_text_json() {
+        let png = valid_png_fixture();
+        let png_base64 = STANDARD.encode(&png);
+        let upstream_body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "data": [{"b64_json": png_base64.clone()}]
+            }))
+            .expect("PNG response"),
+        );
+        let image_upstream = ProxyServerHandle::start(
+            0,
+            Router::new().route(
+                "/openai/v1/images/generations",
+                post(move || {
+                    let response = upstream_body.clone();
+                    async move {
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            response,
+                        )
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("loopback image upstream");
+        let image_route = Arc::new(RouteSnapshot {
+            route_id: RouteId::new(),
+            name: "Image route".to_owned(),
+            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
+                .expect("image base URL"),
+            api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
+            service_tier_policy: ServiceTierPolicy::Passthrough,
+        });
+        let routing = RoutingSnapshotStore::new(RoutingSnapshot {
+            active: None,
+            participants: Vec::new(),
+            enabled: false,
+            selection_generation: 0,
+            config_revision: 0,
+            images_generation_enabled: true,
+            images_route: Some(image_route),
+            images_generation_timeout: Duration::from_mins(10),
+        });
+        let temporary = TempDir::new().expect("temporary app data");
+        let asset_root = temporary.path().join("mcp-images");
+        let router = build_proxy_router(
+            ProxyIngressState::new(TOKEN, Arc::new(RecordingUpstream::default()))
+                .with_routing_store(routing)
+                .with_mcp_image_asset_root(asset_root.clone()),
+        );
+
+        let initialize = router
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+                    ))
+                    .expect("initialize request"),
+            )
+            .await
+            .expect("initialize response");
+        assert_eq!(initialize.status(), StatusCode::OK);
+        let session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("MCP session ID")
+            .to_owned();
+        let _ = mcp_sse_json(initialize).await;
+
+        let call = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header("mcp-session-id", session_id)
+                    .header("mcp-protocol-version", "2025-06-18")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"private prompt"}}}"#,
+                    ))
+                    .expect("call request"),
+            )
+            .await
+            .expect("call response");
+        assert_eq!(call.status(), StatusCode::OK);
+        let call_json = mcp_sse_json(call).await;
+        let result = &call_json["result"];
+        assert_eq!(result["content"].as_array().map(Vec::len), Some(1));
+        assert_eq!(result["content"][0]["type"], "text");
+        assert!(result.get("structuredContent").is_none());
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("asset JSON text");
+        let asset: serde_json::Value = serde_json::from_str(text).expect("asset JSON");
+        assert_eq!(asset.as_object().map(serde_json::Map::len), Some(8));
+        assert_eq!(asset["status"], "success");
+        assert_eq!(asset["mimeType"], "image/png");
+        assert_eq!(asset["width"], 1);
+        assert_eq!(asset["height"], 1);
+        assert_eq!(asset["bytes"], png.len());
+        assert_eq!(asset["sha256"], hex::encode(Sha256::digest(&png)));
+        let path = std::path::PathBuf::from(asset["path"].as_str().expect("asset path"));
+        assert!(path.is_absolute());
+        assert_eq!(
+            path.parent(),
+            Some(asset_root.canonicalize().expect("root").as_path())
+        );
+        assert_eq!(std::fs::read(path).expect("published PNG"), png);
+        let serialized = serde_json::to_string(result).expect("serialized result");
+        for forbidden in [
+            "\"type\":\"image\"",
+            png_base64.as_str(),
+            "data:",
+            "![",
+            "https://",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        image_upstream.shutdown().await;
     }
 
     #[tokio::test]

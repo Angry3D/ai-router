@@ -4,7 +4,6 @@ use axum::{
     body::Bytes,
     http::{HeaderMap, HeaderValue, StatusCode, header},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use rmcp::{
     ErrorData as McpError,
@@ -19,13 +18,20 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use self::asset::{
+    AdmittedAssetRoot, ImageAssetErrorKind, MCP_JSON_RESPONSE_LIMIT, PublicationFault,
+    process_image_response,
+};
+
 use super::{
     RoutingSnapshotStore,
     upstream::{
-        DecodeError, connection_nominated_headers, decode_supported, filtered_response_headers,
-        remove_request_header, response_encodings,
+        DecodeError, connection_nominated_headers, decode_supported, decode_supported_exact,
+        filtered_response_headers, remove_request_header, response_encodings,
     },
 };
+
+mod asset;
 
 const DEFAULT_RESPONSE_LIMIT: usize = 200 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 1024 * 1024;
@@ -46,6 +52,7 @@ struct ImagesGenerationConfig {
     body_timeout: Duration,
     response_wire_limit: usize,
     response_decoded_limit: usize,
+    exact_response_capacity: bool,
 }
 
 impl Default for ImagesGenerationConfig {
@@ -54,6 +61,7 @@ impl Default for ImagesGenerationConfig {
             body_timeout: Duration::from_mins(10),
             response_wire_limit: DEFAULT_RESPONSE_LIMIT,
             response_decoded_limit: DEFAULT_RESPONSE_LIMIT,
+            exact_response_capacity: false,
         }
     }
 }
@@ -146,6 +154,13 @@ impl ImagesGenerationService {
         }
     }
 
+    fn with_mcp_response_limits(mut self, wire_limit: usize, decoded_limit: usize) -> Self {
+        self.config.response_wire_limit = wire_limit;
+        self.config.response_decoded_limit = decoded_limit;
+        self.config.exact_response_capacity = true;
+        self
+    }
+
     /// Forwards one bounded request through the dedicated image route.
     ///
     /// # Errors
@@ -201,7 +216,11 @@ impl ImagesGenerationService {
         let source_headers = upstream.headers().clone();
         let wire = tokio::time::timeout(
             self.config.body_timeout,
-            collect_wire(upstream, self.config.response_wire_limit),
+            collect_wire(
+                upstream,
+                self.config.response_wire_limit,
+                self.config.exact_response_capacity,
+            ),
         )
         .await
         .map_err(|_| {
@@ -214,16 +233,20 @@ impl ImagesGenerationService {
         }
         let encodings = response_encodings(&source_headers);
         let transformed = !encodings.is_empty();
-        let body = decode_supported(wire, &encodings, self.config.response_decoded_limit).map_err(
-            |error| {
+        let decode = if self.config.exact_response_capacity {
+            decode_supported_exact
+        } else {
+            decode_supported
+        };
+        let body =
+            decode(wire, &encodings, self.config.response_decoded_limit).map_err(|error| {
                 ImagesGenerationFailure::new(match error {
                     DecodeError::TooLarge => ImagesGenerationFailureKind::ResponseTooLarge,
                     DecodeError::Unsupported | DecodeError::Invalid => {
                         ImagesGenerationFailureKind::InvalidEncoding
                     }
                 })
-            },
-        )?;
+            })?;
         Ok(ImagesGenerationResponse {
             status,
             headers: filtered_response_headers(&source_headers, transformed),
@@ -261,8 +284,14 @@ fn build_upstream_headers(client: &HeaderMap, api_key: &[u8]) -> Result<HeaderMa
 async fn collect_wire(
     response: reqwest::Response,
     limit: usize,
+    exact_capacity: bool,
 ) -> Result<Vec<u8>, ImagesGenerationFailure> {
     let mut wire = Vec::new();
+    if exact_capacity {
+        wire.try_reserve_exact(limit).map_err(|_| {
+            ImagesGenerationFailure::new(ImagesGenerationFailureKind::ResponseTooLarge)
+        })?;
+    }
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| {
@@ -281,15 +310,32 @@ async fn collect_wire(
 #[derive(Clone)]
 pub struct ImageMcpServer {
     service: ImagesGenerationService,
+    asset_root: Option<std::path::PathBuf>,
+    image_permit: Arc<tokio::sync::Semaphore>,
+    publication_fault: PublicationFault,
     tool: Arc<Tool>,
 }
 
 impl ImageMcpServer {
-    pub fn new(service: ImagesGenerationService) -> Self {
+    pub(super) fn new(
+        service: ImagesGenerationService,
+        asset_root: Option<std::path::PathBuf>,
+        image_permit: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
         Self {
-            service,
+            service: service
+                .with_mcp_response_limits(MCP_JSON_RESPONSE_LIMIT, MCP_JSON_RESPONSE_LIMIT),
+            asset_root,
+            image_permit,
+            publication_fault: PublicationFault::default(),
             tool: Arc::new(generate_image_tool()),
         }
+    }
+
+    #[cfg(test)]
+    fn with_publication_fault(mut self, publication_fault: PublicationFault) -> Self {
+        self.publication_fault = publication_fault;
+        self
     }
 
     async fn generate_image(&self, args: GenerateImageArgs) -> Result<CallToolResult, McpError> {
@@ -310,18 +356,37 @@ impl ImageMcpServer {
         }
         let body = mcp_request_body(args)
             .map_err(|_| McpError::internal_error("image request construction failed", None))?;
+        let permit = Arc::clone(&self.image_permit)
+            .acquire_owned()
+            .await
+            .map_err(|_| image_asset_error(ImageAssetErrorKind::StorageUnavailable))?;
+        let asset_root = self
+            .asset_root
+            .clone()
+            .ok_or_else(|| image_asset_error(ImageAssetErrorKind::StorageUnavailable))?;
+        let admitted_root =
+            tokio::task::spawn_blocking(move || AdmittedAssetRoot::admit(asset_root))
+                .await
+                .map_err(|_| image_asset_error(ImageAssetErrorKind::StorageUnavailable))?
+                .map_err(image_asset_error)?;
         let response = self
             .service
             .forward(Bytes::from(body), &HeaderMap::new())
             .await
             .map_err(|error| mcp_forwarding_error(&error))?;
-        let data = first_valid_image(&response.body).ok_or_else(|| {
-            McpError::internal_error("image generation returned an invalid result", None)
-        })?;
-        Ok(CallToolResult::success(vec![ContentBlock::image(
-            data,
-            "image/png",
-        )]))
+        let fault = self.publication_fault;
+        let asset = tokio::task::spawn_blocking(move || {
+            // A cancelled MCP future cannot release the shared memory permit
+            // while its non-cancellable blocking publication is still running.
+            let _permit = permit;
+            process_image_response(response.body, &admitted_root, fault)
+        })
+        .await
+        .map_err(|_| image_asset_error(ImageAssetErrorKind::WriteFailed))?
+        .map_err(image_asset_error)?;
+        let text = serde_json::to_string(&asset)
+            .map_err(|_| image_asset_error(ImageAssetErrorKind::WriteFailed))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 }
 
@@ -429,31 +494,22 @@ fn image_size_is_supported(value: Option<&str>) -> bool {
         .is_some_and(|pixels| (MIN_IMAGE_PIXELS..=MAX_IMAGE_PIXELS).contains(&pixels))
 }
 
-#[derive(Deserialize)]
-struct ImagesResponse {
-    data: Vec<ImagesResponseItem>,
-}
-
-#[derive(Deserialize)]
-struct ImagesResponseItem {
-    b64_json: Option<String>,
-}
-
-fn first_valid_image(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<ImagesResponse>(body)
-        .ok()?
-        .data
-        .into_iter()
-        .filter_map(|item| item.b64_json)
-        .find(|data| !data.is_empty() && STANDARD.decode(data).is_ok())
-}
-
 fn mcp_forwarding_error(error: &ImagesGenerationFailure) -> McpError {
     McpError::internal_error(
         "image generation failed",
         Some(json!({
             "code": error.kind.code(),
             "requestId": &error.request_id,
+        })),
+    )
+}
+
+fn image_asset_error(kind: ImageAssetErrorKind) -> McpError {
+    McpError::internal_error(
+        kind.message(),
+        Some(json!({
+            "code": kind.code(),
+            "requestId": Uuid::new_v4().to_string(),
         })),
     )
 }
@@ -477,13 +533,17 @@ fn generate_image_tool() -> Tool {
     let schema: JsonObject = schema.as_object().cloned().unwrap_or_default();
     Tool::new(
         Cow::Borrowed("generate_image"),
-        Cow::Borrowed("Generate one PNG image from a text prompt."),
+        Cow::Borrowed(
+            "Generate one PNG image, save it locally, and return its path and metadata as JSON.",
+        ),
         Arc::new(schema),
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -499,6 +559,9 @@ mod tests {
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+    use tempfile::TempDir;
+    use tokio::sync::Semaphore;
 
     use super::*;
     use crate::{
@@ -506,12 +569,71 @@ mod tests {
         proxy::{ProxyServerHandle, RouteSnapshot, RoutingSnapshot},
     };
 
+    fn valid_png_fixture() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("PNG header");
+            writer
+                .write_image_data(&[0x12, 0x34, 0x56, 0xff])
+                .expect("PNG pixels");
+            writer.finish().expect("PNG end");
+        }
+        bytes
+    }
+
+    fn valid_png_response() -> Bytes {
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "data": [{"b64_json": STANDARD.encode(valid_png_fixture())}]
+            }))
+            .expect("PNG response"),
+        )
+    }
+
+    fn mcp_adapter(
+        service: ImagesGenerationService,
+        asset_root: Option<PathBuf>,
+    ) -> ImageMcpServer {
+        ImageMcpServer::new(service, asset_root, Arc::new(Semaphore::new(1)))
+    }
+
+    fn default_generate_args() -> GenerateImageArgs {
+        GenerateImageArgs {
+            prompt: "private prompt sentinel".to_owned(),
+            size: None,
+            quality: None,
+            background: None,
+        }
+    }
+
+    fn asset_error_code(error: &McpError) -> Option<&str> {
+        error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(Value::as_str)
+    }
+
+    fn returned_asset_path(result: &CallToolResult) -> PathBuf {
+        let serialized = serde_json::to_value(result).expect("serialized MCP result");
+        let text = serialized["content"][0]["text"]
+            .as_str()
+            .expect("text asset result");
+        let asset: Value = serde_json::from_str(text).expect("asset JSON");
+        PathBuf::from(asset["path"].as_str().expect("asset path"))
+    }
+
     #[derive(Clone)]
     struct MockImagesUpstream {
         status: StatusCode,
         response: Bytes,
         response_header_delay: Duration,
         calls: Arc<AtomicUsize>,
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
         captures: Arc<Mutex<Vec<(String, HeaderMap, Bytes)>>>,
     }
 
@@ -520,6 +642,8 @@ mod tests {
         request: Request,
     ) -> impl IntoResponse {
         state.calls.fetch_add(1, Ordering::AcqRel);
+        let in_flight = state.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        state.max_in_flight.fetch_max(in_flight, Ordering::AcqRel);
         let path = request.uri().path().to_owned();
         let headers = request.headers().clone();
         let body = axum::body::to_bytes(request.into_body(), 4 * 1024 * 1024)
@@ -531,6 +655,7 @@ mod tests {
             .expect("capture lock")
             .push((path, headers, body));
         tokio::time::sleep(state.response_header_delay).await;
+        state.in_flight.fetch_sub(1, Ordering::AcqRel);
         (state.status, state.response)
     }
 
@@ -589,6 +714,8 @@ mod tests {
             response,
             response_header_delay,
             calls: Arc::new(AtomicUsize::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            max_in_flight: Arc::new(AtomicUsize::new(0)),
             captures: Arc::new(Mutex::new(Vec::new())),
         };
         let server = ProxyServerHandle::start(
@@ -835,17 +962,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_adapter_fixes_payload_and_returns_one_large_png_block() {
-        let image_data = STANDARD.encode(vec![11_u8; 800_000]);
-        let response = serde_json::to_vec(&json!({"data": [{"b64_json": image_data}]}))
+    async fn mcp_adapter_fixes_payload_and_returns_one_local_png_text_result() {
+        let png = valid_png_fixture();
+        let image_data = STANDARD.encode(&png);
+        let response = serde_json::to_vec(&json!({"data": [{"b64_json": image_data.clone()}]}))
             .expect("response fixture");
         let (server, mock) = start_mock(StatusCode::OK, Bytes::from(response)).await;
         let selected = route(
             &format!("http://{}/openai/v1", server.address()),
             "selected-image-key",
         );
-        let adapter =
-            ImageMcpServer::new(ImagesGenerationService::new(routing(true, Some(selected))));
+        let temporary = TempDir::new().expect("temporary app data");
+        let asset_root = temporary.path().join("mcp-images");
+        let adapter = mcp_adapter(
+            ImagesGenerationService::new(routing(true, Some(selected))),
+            Some(asset_root.clone()),
+        );
         let result = adapter
             .generate_image(GenerateImageArgs {
                 prompt: "line one\nline two".to_owned(),
@@ -857,14 +989,66 @@ mod tests {
             .expect("MCP image result");
         let result: Value = serde_json::to_value(result).expect("serialized MCP result");
         assert_eq!(result["content"].as_array().map(Vec::len), Some(1));
-        assert_eq!(result["content"][0]["type"], "image");
-        assert_eq!(result["content"][0]["mimeType"], "image/png");
-        assert!(
-            result["content"][0]["data"]
-                .as_str()
-                .is_some_and(|data| data.len() > 1024 * 1024)
+        assert_eq!(result["content"][0]["type"], "text");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("text JSON result");
+        let asset: Value = serde_json::from_str(text).expect("asset JSON");
+        assert_eq!(asset.as_object().map(serde_json::Map::len), Some(8));
+        assert_eq!(asset["status"], "success");
+        assert_eq!(asset["mimeType"], "image/png");
+        assert_eq!(asset["width"], 1);
+        assert_eq!(asset["height"], 1);
+        assert_eq!(asset["bytes"], png.len());
+        assert_eq!(asset["sha256"], hex::encode(Sha256::digest(&png)));
+        let asset_id = asset["assetId"].as_str().expect("asset ID");
+        Uuid::parse_str(asset_id).expect("UUID asset ID");
+        let path = PathBuf::from(asset["path"].as_str().expect("asset path"));
+        assert!(path.is_absolute());
+        let expected_file_name = format!("{asset_id}.png");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(expected_file_name.as_str())
         );
+        let canonical_root = asset_root.canonicalize().expect("canonical root");
+        assert_eq!(path.parent(), Some(canonical_root.as_path()));
+        assert_eq!(std::fs::read(&path).expect("published PNG"), png);
+        assert_eq!(
+            std::fs::metadata(&asset_root)
+                .expect("asset root metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("asset metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        let expected_text = format!(
+            r#"{{"status":"success","path":{},"mimeType":"image/png","width":1,"height":1,"bytes":{},"sha256":"{}","assetId":"{}"}}"#,
+            serde_json::to_string(path.to_str().expect("UTF-8 path")).expect("JSON path"),
+            png.len(),
+            hex::encode(Sha256::digest(&png)),
+            asset_id,
+        );
+        assert_eq!(text, expected_text);
         assert!(result.get("structuredContent").is_none());
+        let serialized = serde_json::to_string(&result).expect("serialized MCP result");
+        for forbidden in [
+            "\"type\":\"image\"",
+            image_data.as_str(),
+            "data:",
+            "![",
+            "https://",
+            "http://",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
 
         {
             let captures = mock.captures.lock().expect("capture lock");
@@ -882,15 +1066,342 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_adapter_forwards_omitted_auto_and_arbitrary_supported_sizes() {
-        let response = Bytes::from_static(br#"{"data":[{"b64_json":"AQ=="}]}"#);
+    async fn mcp_adapter_requires_safe_storage_before_upstream_contact() {
+        let response = valid_png_response();
         let (server, mock) = start_mock(StatusCode::OK, response).await;
         let selected = route(
             &format!("http://{}/openai/v1", server.address()),
             "selected-image-key",
         );
-        let adapter =
-            ImageMcpServer::new(ImagesGenerationService::new(routing(true, Some(selected))));
+        let service = ImagesGenerationService::new(routing(true, Some(selected)));
+
+        let missing = mcp_adapter(service.clone(), None)
+            .generate_image(default_generate_args())
+            .await
+            .expect_err("missing storage config");
+        assert_eq!(
+            asset_error_code(&missing),
+            Some("image_asset_storage_unavailable")
+        );
+
+        let temporary = TempDir::new().expect("temporary app data");
+        let non_directory = temporary.path().join("not-a-directory");
+        std::fs::write(&non_directory, b"not a directory").expect("non-directory root");
+        let real_root = temporary.path().join("real-root");
+        std::fs::create_dir(&real_root).expect("real root");
+        let linked_root = temporary.path().join("linked-root");
+        std::os::unix::fs::symlink(&real_root, &linked_root).expect("root symlink");
+        for unsafe_root in [
+            PathBuf::from("relative/mcp-images"),
+            temporary
+                .path()
+                .join("unsafe")
+                .join("..")
+                .join("mcp-images"),
+            non_directory,
+            linked_root,
+        ] {
+            let error = mcp_adapter(service.clone(), Some(unsafe_root))
+                .generate_image(default_generate_args())
+                .await
+                .expect_err("unsafe storage root");
+            assert_eq!(
+                asset_error_code(&error),
+                Some("image_asset_storage_unavailable")
+            );
+        }
+        assert_eq!(mock.calls.load(Ordering::Acquire), 0);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_rejects_invalid_image_results_without_publishing_files() {
+        let valid_png = valid_png_fixture();
+        let mut truncated_png = valid_png.clone();
+        truncated_png.truncate(truncated_png.len() - 8);
+        let cases = [
+            (
+                "not canonical base64".to_owned(),
+                "image_result_invalid_base64",
+            ),
+            (STANDARD.encode(b"not a PNG"), "image_result_invalid_png"),
+            (STANDARD.encode(truncated_png), "image_result_invalid_png"),
+        ];
+
+        for (encoded, expected_code) in cases {
+            let response = Bytes::from(
+                serde_json::to_vec(&json!({"data":[{"b64_json": encoded}]}))
+                    .expect("image response"),
+            );
+            let (server, mock) = start_mock(StatusCode::OK, response).await;
+            let selected = route(
+                &format!("http://{}/openai/v1", server.address()),
+                "selected-image-key",
+            );
+            let temporary = TempDir::new().expect("temporary app data");
+            let asset_root = temporary.path().join("mcp-images");
+            let error = mcp_adapter(
+                ImagesGenerationService::new(routing(true, Some(selected))),
+                Some(asset_root.clone()),
+            )
+            .generate_image(default_generate_args())
+            .await
+            .expect_err("invalid image result");
+            assert_eq!(asset_error_code(&error), Some(expected_code));
+            assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+            assert_eq!(
+                std::fs::read_dir(&asset_root).expect("asset root").count(),
+                0
+            );
+            server.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_publication_and_cleanup_failures_are_safe() {
+        let png_base64 = STANDARD.encode(valid_png_fixture());
+        let response = Bytes::from(
+            serde_json::to_vec(&json!({"data":[{"b64_json": png_base64.clone()}]}))
+                .expect("PNG response"),
+        );
+        let (server, mock) = start_mock(StatusCode::OK, response).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let service = ImagesGenerationService::new(routing(true, Some(selected)));
+
+        let temporary = TempDir::new().expect("temporary app data");
+        let asset_root = temporary.path().join("mcp-images");
+        let error = mcp_adapter(service.clone(), Some(asset_root.clone()))
+            .with_publication_fault(PublicationFault::at(asset::PublicationStage::AfterLink))
+            .generate_image(default_generate_args())
+            .await
+            .expect_err("publication failure");
+        assert_eq!(asset_error_code(&error), Some("image_asset_write_failed"));
+        assert_eq!(error.message, "The generated image could not be saved.");
+        assert_eq!(
+            std::fs::read_dir(&asset_root).expect("asset root").count(),
+            0
+        );
+
+        let cleanup_temporary = TempDir::new().expect("cleanup app data");
+        let cleanup_root = cleanup_temporary.path().join("mcp-images");
+        let cleanup_error = mcp_adapter(service, Some(cleanup_root.clone()))
+            .with_publication_fault(PublicationFault::with_cleanup_failure(
+                asset::PublicationStage::AfterCreate,
+            ))
+            .generate_image(default_generate_args())
+            .await
+            .expect_err("cleanup operation failure");
+        assert_eq!(
+            asset_error_code(&cleanup_error),
+            Some("image_asset_write_failed")
+        );
+        let serialized = serde_json::to_string(&cleanup_error).expect("serialized safe error");
+        for forbidden in [
+            "private prompt sentinel",
+            png_base64.as_str(),
+            cleanup_root.to_string_lossy().as_ref(),
+            "assetId",
+            ".png",
+            ".tmp",
+            "Operation not permitted",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        let orphan = std::fs::read_dir(&cleanup_root)
+            .expect("cleanup root")
+            .next()
+            .expect("private orphan")
+            .expect("orphan entry")
+            .path();
+        assert_eq!(
+            std::fs::metadata(orphan)
+                .expect("orphan metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        assert_eq!(mock.calls.load(Ordering::Acquire), 2);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_shared_permit_serializes_distinct_sessions() {
+        let response = valid_png_response();
+        let (server, mock) =
+            start_mock_with_delay(StatusCode::OK, response, Duration::from_millis(80)).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let service = ImagesGenerationService::new(routing(true, Some(selected)));
+        let temporary = TempDir::new().expect("temporary app data");
+        let asset_root = temporary.path().join("mcp-images");
+        let permit = Arc::new(Semaphore::new(1));
+        let first = ImageMcpServer::new(
+            service.clone(),
+            Some(asset_root.clone()),
+            Arc::clone(&permit),
+        );
+        let second = ImageMcpServer::new(service, Some(asset_root), permit);
+
+        let (first_result, second_result) = tokio::join!(
+            first.generate_image(default_generate_args()),
+            second.generate_image(default_generate_args()),
+        );
+        let first_result = first_result.expect("first MCP asset");
+        let second_result = second_result.expect("second MCP asset");
+        let first_path = returned_asset_path(&first_result);
+        let second_path = returned_asset_path(&second_result);
+        assert_ne!(first_path, second_path);
+        assert!(first_path.is_file());
+        assert!(second_path.is_file());
+        assert_eq!(mock.calls.load(Ordering::Acquire), 2);
+        assert_eq!(mock.max_in_flight.load(Ordering::Acquire), 1);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_cancellation_keeps_permit_until_blocking_publication_finishes() {
+        let response = valid_png_response();
+        let (server, mock) = start_mock(StatusCode::OK, response).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let service = ImagesGenerationService::new(routing(true, Some(selected)));
+        let temporary = TempDir::new().expect("temporary app data");
+        let asset_root = temporary.path().join("mcp-images");
+        let permit = Arc::new(Semaphore::new(1));
+        let first = ImageMcpServer::new(
+            service.clone(),
+            Some(asset_root.clone()),
+            Arc::clone(&permit),
+        )
+        .with_publication_fault(PublicationFault::with_delay(
+            asset::PublicationStage::AfterCreate,
+            Duration::from_millis(250),
+        ));
+        let second = ImageMcpServer::new(service, Some(asset_root.clone()), permit);
+
+        let first_call =
+            tokio::spawn(async move { first.generate_image(default_generate_args()).await });
+        for _ in 0..500 {
+            let entry_exists = std::fs::read_dir(&asset_root)
+                .ok()
+                .is_some_and(|mut entries| entries.next().is_some());
+            if entry_exists {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+        assert!(
+            std::fs::read_dir(&asset_root)
+                .expect("asset root")
+                .next()
+                .is_some(),
+            "blocking publication did not reach the injected pause"
+        );
+
+        first_call.abort();
+        assert!(
+            first_call
+                .await
+                .expect_err("cancelled first MCP call")
+                .is_cancelled()
+        );
+        let second_call =
+            tokio::spawn(async move { second.generate_image(default_generate_args()).await });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            mock.calls.load(Ordering::Acquire),
+            1,
+            "cancelled caller released the permit before blocking publication ended"
+        );
+
+        second_call
+            .await
+            .expect("second MCP task")
+            .expect("second MCP asset");
+        assert_eq!(mock.calls.load(Ordering::Acquire), 2);
+        assert_eq!(mock.max_in_flight.load(Ordering::Acquire), 1);
+        assert_eq!(
+            std::fs::read_dir(asset_root).expect("asset root").count(),
+            2
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_rejects_root_replacement_after_upstream_wait() {
+        let response = valid_png_response();
+        let (server, mock) =
+            start_mock_with_delay(StatusCode::OK, response, Duration::from_millis(150)).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let temporary = TempDir::new().expect("temporary app data");
+        let asset_root = temporary.path().join("mcp-images");
+        let displaced_root = temporary.path().join("displaced-mcp-images");
+        let adapter = mcp_adapter(
+            ImagesGenerationService::new(routing(true, Some(selected))),
+            Some(asset_root.clone()),
+        );
+        let call =
+            tokio::spawn(async move { adapter.generate_image(default_generate_args()).await });
+        for _ in 0..200 {
+            if mock.calls.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+        std::fs::rename(&asset_root, &displaced_root).expect("displace admitted root");
+        std::fs::create_dir(&asset_root).expect("replacement root");
+        std::fs::set_permissions(&asset_root, std::fs::Permissions::from_mode(0o700))
+            .expect("private replacement root");
+
+        let error = call
+            .await
+            .expect("MCP call task")
+            .expect_err("replaced root");
+        assert_eq!(
+            asset_error_code(&error),
+            Some("image_asset_storage_unavailable")
+        );
+        assert_eq!(
+            std::fs::read_dir(&asset_root)
+                .expect("replacement root")
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_dir(&displaced_root)
+                .expect("displaced root")
+                .count(),
+            0
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_forwards_omitted_auto_and_arbitrary_supported_sizes() {
+        let response = valid_png_response();
+        let (server, mock) = start_mock(StatusCode::OK, response).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let temporary = TempDir::new().expect("temporary app data");
+        let adapter = mcp_adapter(
+            ImagesGenerationService::new(routing(true, Some(selected))),
+            Some(temporary.path().join("mcp-images")),
+        );
         let supported_sizes = [
             None,
             Some("auto"),
@@ -946,8 +1457,10 @@ mod tests {
             &format!("http://{}/openai/v1", server.address()),
             "selected-image-key",
         );
-        let adapter =
-            ImageMcpServer::new(ImagesGenerationService::new(routing(true, Some(selected))));
+        let adapter = mcp_adapter(
+            ImagesGenerationService::new(routing(true, Some(selected))),
+            None,
+        );
 
         for (size, case) in [
             ("", "empty"),
@@ -984,6 +1497,12 @@ mod tests {
     fn mcp_schema_and_option_validation_are_stable() {
         let tool = generate_image_tool();
         assert_eq!(tool.name.as_ref(), "generate_image");
+        assert_eq!(
+            tool.description.as_deref(),
+            Some(
+                "Generate one PNG image, save it locally, and return its path and metadata as JSON."
+            )
+        );
         assert_eq!(tool.input_schema["required"], json!(["prompt"]));
         let size = &tool.input_schema["properties"]["size"];
         assert!(size.get("enum").is_none());
@@ -1013,5 +1532,23 @@ mod tests {
             Some("unsupported"),
             &["auto", "low", "medium", "high"]
         ));
+
+        let adapter = mcp_adapter(
+            ImagesGenerationService::new(RoutingSnapshotStore::default()),
+            None,
+        );
+        assert_eq!(
+            adapter.service.config.response_wire_limit,
+            MCP_JSON_RESPONSE_LIMIT
+        );
+        assert_eq!(
+            adapter.service.config.response_decoded_limit,
+            MCP_JSON_RESPONSE_LIMIT
+        );
+        assert!(adapter.service.config.exact_response_capacity);
+        let direct = ImagesGenerationService::new(RoutingSnapshotStore::default());
+        assert_eq!(direct.config.response_wire_limit, DEFAULT_RESPONSE_LIMIT);
+        assert_eq!(direct.config.response_decoded_limit, DEFAULT_RESPONSE_LIMIT);
+        assert!(!direct.config.exact_response_capacity);
     }
 }

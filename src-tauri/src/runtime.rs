@@ -2678,7 +2678,8 @@ impl AppLifecycleServices for DesktopLifecycleServices {
             .with_request_transition_sink(transition_sink);
         let ingress = ProxyIngressState::new(&gateway_token, Arc::new(forwarder))
             .with_runtime_sinks(history.clone(), self.diagnostics.clone())
-            .with_routing_store(self.routing.clone());
+            .with_routing_store(self.routing.clone())
+            .with_mcp_image_asset_root(self.app_data_dir.join("mcp-images"));
         let summaries = routes
             .iter()
             .map(|route| {
