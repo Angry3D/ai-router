@@ -33,6 +33,9 @@ afterEach(async () => {
 
 describe("license and provenance gate", () => {
   it("accepts the repository project metadata and required provenance bindings", async () => {
+    const tauriConfig = JSON.parse(
+      await readFile(join(projectRoot, "src-tauri", "tauri.conf.json"), "utf8"),
+    );
     const report = await runLicenseAudit({
       projectRoot,
       skipDependencies: true,
@@ -41,13 +44,27 @@ describe("license and provenance gate", () => {
     expect(report.project).toEqual({
       license: "MIT",
       name: "ai-router",
-      version: "0.1.3",
+      version: tauriConfig.version,
     });
     expect(report.thirdParty.map((entry) => entry.id)).toEqual([
       "openai-codex-base-instructions",
       "lucide-icons",
       "openai-pricing-snapshots",
     ]);
+  });
+
+  it("rejects a live application version in the license policy", async () => {
+    const policy = JSON.parse(
+      await readFile(
+        join(projectRoot, "scripts", "license-policy.json"),
+        "utf8",
+      ),
+    );
+    policy.project.version = "9.9.9";
+
+    expect(() => validateLicensePolicy(policy)).toThrow(
+      "project.version must be derived from the Tauri manifest",
+    );
   });
 
   it("validates the Cargo probe before starting metadata", async () => {
