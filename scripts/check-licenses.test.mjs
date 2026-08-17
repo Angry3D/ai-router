@@ -41,7 +41,7 @@ describe("license and provenance gate", () => {
     expect(report.project).toEqual({
       license: "MIT",
       name: "ai-router",
-      version: "0.1.2",
+      version: "0.1.3",
     });
     expect(report.thirdParty.map((entry) => entry.id)).toEqual([
       "openai-codex-base-instructions",
