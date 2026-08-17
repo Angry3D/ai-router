@@ -6,6 +6,7 @@ import type {
   ReactNode,
   TextareaHTMLAttributes,
 } from "react";
+import { GithubFilled } from "@ant-design/icons";
 import { CircleHelp } from "lucide-react";
 import { forwardRef, useId, useState } from "react";
 
@@ -33,6 +34,8 @@ export function SettingsSidebar({
   activeSection,
   items,
   onSelect,
+  onOpenRepository,
+  isRepositoryPending,
   version,
 }: {
   activeSection: SettingsSectionId;
@@ -43,6 +46,8 @@ export function SettingsSidebar({
     hasIndicator?: boolean;
   }>;
   onSelect: (section: SettingsSectionId) => void;
+  onOpenRepository: () => void;
+  isRepositoryPending: boolean;
   version: string | null;
 }) {
   return (
@@ -84,9 +89,21 @@ export function SettingsSidebar({
           {item.label}
         </button>
       ))}
-      <p className="settings-nav-version">
-        {appVersionLabel(version, appVariant)}
-      </p>
+      <div className="settings-nav-footer">
+        <p className="settings-nav-version">
+          {appVersionLabel(version, appVariant)}
+        </p>
+        <button
+          className="settings-github-link"
+          type="button"
+          aria-label="打开 GitHub 项目"
+          title="打开 GitHub 项目"
+          disabled={isRepositoryPending}
+          onClick={onOpenRepository}
+        >
+          <GithubFilled aria-hidden="true" />
+        </button>
+      </div>
     </nav>
   );
 }

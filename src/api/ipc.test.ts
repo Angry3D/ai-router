@@ -1,4 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const tauri = vi.hoisted(() => ({
+  invoke: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  Channel: class {
+    onmessage = undefined;
+  },
+  invoke: tauri.invoke,
+}));
 
 import {
   IPC_COMMANDS,
@@ -6,7 +17,12 @@ import {
   getUsageRequestDetail,
   getUsageRouteOptions,
   normalizeIpcError,
+  openProjectRepository,
 } from "./ipc";
+
+beforeEach(() => {
+  tauri.invoke.mockReset();
+});
 
 describe("IPC error normalization", () => {
   it("uses a safe fallback for unknown errors", () => {
@@ -30,6 +46,18 @@ describe("IPC error normalization", () => {
       field: "name",
     });
     expect(normalized.message).toHaveLength(512);
+  });
+});
+
+describe("project repository command", () => {
+  it("invokes the fixed no-argument native command", async () => {
+    tauri.invoke.mockResolvedValueOnce(undefined);
+
+    await openProjectRepository();
+
+    expect(IPC_COMMANDS.openProjectRepository).toBe("open_project_repository");
+    expect(tauri.invoke).toHaveBeenCalledOnce();
+    expect(tauri.invoke).toHaveBeenCalledWith("open_project_repository");
   });
 });
 

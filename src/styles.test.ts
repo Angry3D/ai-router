@@ -9,6 +9,42 @@ const htmlEntrypoints = ["menu.html", "settings.html"].map((file) => ({
 }));
 
 describe("cross-window style isolation", () => {
+  it("keeps the Settings repository link circular and geometry-stable", () => {
+    const footerRule =
+      styles.match(/\.settings-nav-footer \{([^}]*)\}/u)?.[1] ?? "";
+    const versionRule =
+      styles.match(/\.settings-nav-version \{([^}]*)\}/u)?.[1] ?? "";
+    const buttonRule =
+      styles.match(/\.settings-github-link \{([^}]*)\}/u)?.[1] ?? "";
+    const iconRule =
+      styles.match(/\.settings-github-link \.anticon \{([^}]*)\}/u)?.[1] ?? "";
+    const hoverRule =
+      styles.match(
+        /\.settings-github-link:hover:not\(:disabled\) \{([^}]*)\}/u,
+      )?.[1] ?? "";
+    const focusRule =
+      styles.match(/\.settings-github-link:focus-visible \{([^}]*)\}/u)?.[1] ??
+      "";
+
+    expect(footerRule).toContain("display: flex;");
+    expect(footerRule).toContain("min-width: 0;");
+    expect(footerRule).toContain("align-items: center;");
+    expect(footerRule).toContain("gap: 8px;");
+    expect(footerRule).toContain("margin: auto 8px 0;");
+    expect(versionRule).toContain("min-width: 0;");
+    expect(versionRule).toContain("flex: 1 1 auto;");
+    expect(versionRule).toContain("margin: 0;");
+    expect(buttonRule).toContain("width: 24px;");
+    expect(buttonRule).toContain("height: 24px;");
+    expect(buttonRule).toContain("flex: 0 0 24px;");
+    expect(buttonRule).toContain("background: transparent;");
+    expect(buttonRule).toContain("border-radius: 50%;");
+    expect(iconRule).toContain("font-size: 18px;");
+    expect(hoverRule).toContain("background: transparent;");
+    expect(focusRule).toContain("background: transparent;");
+    expect(focusRule).toContain("outline: 2px solid var(--blue);");
+  });
+
   it("constrains Settings page scroll areas to the available grid row", () => {
     const pageRule = styles.match(/\.settings-page \{([^}]*)\}/u)?.[1] ?? "";
     const rootRule =
