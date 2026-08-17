@@ -10,7 +10,13 @@ const bootstrap = {
   revision: 0,
   routes: [],
   activeRouteId: null,
-  fallback: { enabled: false, participantCount: 0, activePosition: null, hasNext: false },
+  fallback: {
+    enabled: false,
+    participantCount: 0,
+    configRevision: 0,
+    activePosition: null,
+    hasNext: false,
+  },
   proxyStatus: "running" as const,
   lifecycle: { phase: "running" as const, issue: null },
   appearancePreference: "system" as const,
@@ -29,7 +35,13 @@ function renderWithData(view: "menu" | "settings") {
   client.setQueryData<SettingsSnapshotDto>(queryKeys.settings, {
     routes: [],
     activeRouteId: null,
-    fallback: { enabled: false, participantCount: 0, activePosition: null, hasNext: false },
+    fallback: {
+      enabled: false,
+      participantCount: 0,
+      configRevision: 0,
+      activePosition: null,
+      hasNext: false,
+    },
     proxyPort: 32189,
     imagesGeneration: { enabled: false, routeId: null, timeoutSecs: 600 },
     codexStatus: "not_connected",
@@ -46,7 +58,11 @@ function renderWithData(view: "menu" | "settings") {
       retentionDays: 365,
     },
     metadataFailure: { droppedRecords: 0, writeFailures: 0, lastError: null },
-    recovery: { kind: "protected", latestSuccessAtMs: null, validPointCount: 1 },
+    recovery: {
+      kind: "protected",
+      latestSuccessAtMs: null,
+      validPointCount: 1,
+    },
   });
   return render(
     <QueryClientProvider client={client}>
@@ -59,15 +75,23 @@ describe("P0 application routes", () => {
   it("renders the empty menu route", () => {
     renderWithData("menu");
 
-    expect(screen.getByRole("main", { name: "AI Router 菜单" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "还没有路由" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("main", { name: "AI Router 菜单" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "还没有路由" }),
+    ).toBeInTheDocument();
   });
 
   it("renders the empty settings route", () => {
     renderWithData("settings");
 
-    expect(screen.getByRole("main", { name: "AI Router 设置" })).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: "设置分区" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("main", { name: "AI Router 设置" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("navigation", { name: "设置分区" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "路由" })).toBeInTheDocument();
   });
 });

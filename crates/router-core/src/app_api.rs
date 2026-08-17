@@ -644,6 +644,16 @@ pub struct RouteSaveInputDto {
     pub retry_token: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ReorderRoutesAndFallbackInputDto {
+    pub ordered_route_ids: Vec<RouteId>,
+    pub participant_count: u32,
+    #[ts(type = "number")]
+    pub expected_config_revision: u64,
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]

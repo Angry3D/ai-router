@@ -17,10 +17,11 @@ use router_core::{
         CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto, CodexRecoveryUpdatePreviewDto,
         CodexRestartNoticeDto, HistorySummaryDto, ImagesGenerationSettingsDto, MenuSnapshotDto,
         MetadataFailureDto, RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
-        ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
-        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, SettingsSnapshotDto,
-        UpdateImagesGenerationSettingsInputDto, UsageHistoryPageDto, UsageHistoryQueryDto,
-        UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsDto, UsageStatisticsQueryDto,
+        ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
+        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
+        RouteSaveResultDto, SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
+        UsageHistoryPageDto, UsageHistoryQueryDto, UsageRequestDetailDto, UsageRouteOptionDto,
+        UsageStatisticsDto, UsageStatisticsQueryDto,
     },
     balance::{
         BalanceCoordinator, BalanceDisplaySnapshot, BalanceExecutor, BalanceQueryConfig,
@@ -35,7 +36,7 @@ use router_core::{
     },
     domain::{
         ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, CodexModelValidationError,
-        ImagesGenerationTimeout, ReachabilityResult, RouteId, RouteMoveDirection, ValidationError,
+        ImagesGenerationTimeout, ReachabilityResult, RouteId, ValidationError,
     },
     lifecycle::{
         AppCoordinator, AppLifecycleIssue, AppLifecyclePhase, AppLifecycleServices,
@@ -434,6 +435,7 @@ impl DesktopLifecycleServices {
         Ok(mutation)
     }
 
+    #[cfg(test)]
     async fn refresh_fallback_projection(
         &self,
         database: &DatabaseExecutor,
@@ -1306,6 +1308,7 @@ impl DesktopLifecycleServices {
         self.refresh_route_projection(&database).await
     }
 
+    #[cfg(test)]
     pub async fn set_fallback_participant_count(
         &self,
         participant_count: u32,
@@ -1410,17 +1413,34 @@ impl DesktopLifecycleServices {
             .await
     }
 
-    pub async fn move_route(
+    pub async fn reorder_routes_and_fallback(
         &self,
-        route_id: RouteId,
-        direction: RouteMoveDirection,
+        input: ReorderRoutesAndFallbackInputDto,
     ) -> Result<MutationResultDto, IpcErrorDto> {
         let database = self.database_for_ipc().await?;
         let _routing_write = self.routing_write_gate.lock().await;
-        database
-            .move_route(route_id, direction)
+        let changed = database
+            .reorder_routes_and_fallback(
+                input.ordered_route_ids,
+                input.participant_count,
+                input.expected_config_revision,
+            )
             .await
             .map_err(map_storage_error)?;
+        if !changed {
+            let durable_revision = database
+                .routing_state()
+                .await
+                .map_err(map_storage_error)?
+                .fallback
+                .config_revision;
+            if self.routing.load().config_revision != durable_revision {
+                return self.refresh_route_projection(&database).await;
+            }
+            return Ok(MutationResultDto {
+                revision: self.runtime_state.bootstrap_snapshot().revision,
+            });
+        }
         self.refresh_route_projection(&database).await
     }
 
@@ -2569,6 +2589,7 @@ fn fallback_state(snapshot: &RoutingSnapshot) -> Result<FallbackStateDto, IpcErr
     Ok(FallbackStateDto {
         enabled: snapshot.enabled,
         participant_count,
+        config_revision: snapshot.config_revision,
         active_position,
         has_next: active_index.is_some() && snapshot.participants.len() > 1,
     })
@@ -3070,16 +3091,6 @@ pub async fn set_fallback_enabled(
 }
 
 #[tauri::command]
-pub async fn set_fallback_participant_count(
-    services: State<'_, Arc<DesktopLifecycleServices>>,
-    participant_count: u32,
-) -> Result<MutationResultDto, IpcErrorDto> {
-    services
-        .set_fallback_participant_count(participant_count)
-        .await
-}
-
-#[tauri::command]
 pub async fn update_balance_query_settings(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     input: BalanceQuerySettingsDto,
@@ -3106,12 +3117,11 @@ pub async fn update_images_generation_settings(
 }
 
 #[tauri::command]
-pub async fn move_route(
+pub async fn reorder_routes_and_fallback(
     services: State<'_, Arc<DesktopLifecycleServices>>,
-    route_id: RouteId,
-    direction: RouteMoveDirection,
+    input: ReorderRoutesAndFallbackInputDto,
 ) -> Result<MutationResultDto, IpcErrorDto> {
-    services.move_route(route_id, direction).await
+    services.reorder_routes_and_fallback(input).await
 }
 
 #[tauri::command]
@@ -3354,6 +3364,14 @@ fn map_storage_error(error: StorageError) -> IpcErrorDto {
             "Fallback 参与数量无效。",
             "participantCount",
         ),
+        StorageError::StaleRoutingConfiguration => ipc_error(
+            "routing_configuration_stale",
+            "路由配置已更新，请重试。",
+            true,
+        ),
+        StorageError::InvalidRoutePermutation => {
+            ipc_error("route_order_invalid", "路由顺序无效。", false)
+        }
         StorageError::InvalidImagesGenerationRoute => ipc_field_error(
             "images_generation_route_invalid",
             "请选择已存在的图片路由。",
@@ -3757,6 +3775,21 @@ mod tests {
         assert_eq!(overflow.message, "数据库操作失败。");
         assert!(overflow.retryable);
         assert_eq!(overflow.field, None);
+    }
+
+    #[test]
+    fn route_reorder_errors_map_to_stable_safe_ipc_categories() {
+        let stale = map_storage_error(StorageError::StaleRoutingConfiguration);
+        assert_eq!(stale.code, "routing_configuration_stale");
+        assert_eq!(stale.message, "路由配置已更新，请重试。");
+        assert!(stale.retryable);
+        assert_eq!(stale.field, None);
+
+        let invalid = map_storage_error(StorageError::InvalidRoutePermutation);
+        assert_eq!(invalid.code, "route_order_invalid");
+        assert_eq!(invalid.message, "路由顺序无效。");
+        assert!(!invalid.retryable);
+        assert_eq!(invalid.field, None);
     }
 
     fn codex_model(model_id: &str) -> CodexModelDto {
@@ -5650,6 +5683,274 @@ mod tests {
                 StateArea::ImagesGeneration,
             ]
         );
+
+        services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn atomic_route_reorder_publishes_once_and_rejects_stale_candidates() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let database = services.database().await.expect("database");
+        let mut route_ids = Vec::new();
+        for name in ["A", "B", "C"] {
+            route_ids.push(create_fallback_test_route(&database, name).await);
+        }
+        services
+            .refresh_route_projection(&database)
+            .await
+            .expect("initial projection");
+        events.0.lock().expect("event sink lock").clear();
+        let before = runtime.bootstrap_snapshot();
+        let candidate = vec![
+            route_ids[2].clone(),
+            route_ids[0].clone(),
+            route_ids[1].clone(),
+        ];
+
+        let changed = services
+            .reorder_routes_and_fallback(ReorderRoutesAndFallbackInputDto {
+                ordered_route_ids: candidate.clone(),
+                participant_count: 2,
+                expected_config_revision: before.fallback.config_revision,
+            })
+            .await
+            .expect("atomic reorder");
+        let after = runtime.bootstrap_snapshot();
+        assert_eq!(changed.revision, after.revision);
+        assert_eq!(
+            after
+                .routes
+                .iter()
+                .map(|route| route.route_id.clone())
+                .collect::<Vec<_>>(),
+            candidate
+        );
+        assert_eq!(after.fallback.participant_count, 2);
+        assert_eq!(
+            after.fallback.config_revision,
+            before.fallback.config_revision + 1
+        );
+        let published = services.routing.load();
+        assert_eq!(published.config_revision, after.fallback.config_revision);
+        assert_eq!(
+            published
+                .participants
+                .iter()
+                .map(|route| route.route_id.clone())
+                .collect::<Vec<_>>(),
+            candidate[..2]
+        );
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
+        assert_eq!(
+            events.0.lock().expect("event sink lock")[0].areas,
+            vec![
+                StateArea::Routes,
+                StateArea::Route,
+                StateArea::Fallback,
+                StateArea::ImagesGeneration,
+            ]
+        );
+
+        let no_op = services
+            .reorder_routes_and_fallback(ReorderRoutesAndFallbackInputDto {
+                ordered_route_ids: candidate.clone(),
+                participant_count: 2,
+                expected_config_revision: after.fallback.config_revision,
+            })
+            .await
+            .expect("published no-op");
+        assert_eq!(no_op.revision, changed.revision);
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
+
+        let stale = services
+            .reorder_routes_and_fallback(ReorderRoutesAndFallbackInputDto {
+                ordered_route_ids: route_ids.clone(),
+                participant_count: 3,
+                expected_config_revision: before.fallback.config_revision,
+            })
+            .await
+            .expect_err("stale candidate");
+        assert_eq!(stale.code, "routing_configuration_stale");
+        assert_eq!(runtime.bootstrap_snapshot(), after);
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
+
+        services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn atomic_route_reorder_noop_repairs_an_unpublished_commit() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let database = services.database().await.expect("database");
+        let mut route_ids = Vec::new();
+        for name in ["A", "B", "C"] {
+            route_ids.push(create_fallback_test_route(&database, name).await);
+        }
+        services
+            .refresh_route_projection(&database)
+            .await
+            .expect("initial projection");
+        events.0.lock().expect("event sink lock").clear();
+        let published_revision = services.routing.load().config_revision;
+        let repair_candidate = vec![
+            route_ids[1].clone(),
+            route_ids[2].clone(),
+            route_ids[0].clone(),
+        ];
+
+        assert!(
+            database
+                .reorder_routes_and_fallback(repair_candidate.clone(), 1, published_revision,)
+                .await
+                .expect("unpublished durable reorder")
+        );
+        let durable = database.routing_state().await.expect("durable routing");
+        assert_ne!(
+            services.routing.load().config_revision,
+            durable.fallback.config_revision
+        );
+        let repaired = services
+            .reorder_routes_and_fallback(ReorderRoutesAndFallbackInputDto {
+                ordered_route_ids: repair_candidate.clone(),
+                participant_count: 1,
+                expected_config_revision: durable.fallback.config_revision,
+            })
+            .await
+            .expect("repair unpublished projection");
+
+        let repaired_snapshot = runtime.bootstrap_snapshot();
+        assert_eq!(repaired.revision, repaired_snapshot.revision);
+        assert_eq!(
+            repaired_snapshot
+                .routes
+                .iter()
+                .map(|route| route.route_id.clone())
+                .collect::<Vec<_>>(),
+            repair_candidate
+        );
+        assert_eq!(repaired_snapshot.fallback.participant_count, 1);
+        assert_eq!(
+            repaired_snapshot.fallback.config_revision,
+            durable.fallback.config_revision
+        );
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
+
+        services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_runtime_reorders_publish_only_the_revision_winner() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let database = services.database().await.expect("database");
+        let mut route_ids = Vec::new();
+        for name in ["A", "B", "C"] {
+            route_ids.push(create_fallback_test_route(&database, name).await);
+        }
+        services
+            .refresh_route_projection(&database)
+            .await
+            .expect("initial projection");
+        events.0.lock().expect("event sink lock").clear();
+        let expected_revision = runtime.bootstrap_snapshot().fallback.config_revision;
+        let first_candidate = vec![
+            route_ids[1].clone(),
+            route_ids[0].clone(),
+            route_ids[2].clone(),
+        ];
+        let second_candidate = vec![
+            route_ids[2].clone(),
+            route_ids[1].clone(),
+            route_ids[0].clone(),
+        ];
+
+        let (first_result, second_result) = tokio::join!(
+            services.reorder_routes_and_fallback(ReorderRoutesAndFallbackInputDto {
+                ordered_route_ids: first_candidate.clone(),
+                participant_count: 2,
+                expected_config_revision: expected_revision,
+            }),
+            services.reorder_routes_and_fallback(ReorderRoutesAndFallbackInputDto {
+                ordered_route_ids: second_candidate.clone(),
+                participant_count: 2,
+                expected_config_revision: expected_revision,
+            })
+        );
+        let results = [&first_result, &second_result];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .filter(|error| error.code == "routing_configuration_stale")
+                .count(),
+            1
+        );
+
+        let durable_order = database
+            .list_routes()
+            .await
+            .expect("durable routes")
+            .into_iter()
+            .map(|route| route.route_id)
+            .collect::<Vec<_>>();
+        assert!(durable_order == first_candidate || durable_order == second_candidate);
+        assert_eq!(
+            runtime
+                .bootstrap_snapshot()
+                .routes
+                .into_iter()
+                .map(|route| route.route_id)
+                .collect::<Vec<_>>(),
+            durable_order
+        );
+        let durable_routing = database.routing_state().await.expect("durable routing");
+        assert_eq!(
+            services.routing.load().config_revision,
+            durable_routing.fallback.config_revision
+        );
+        assert_eq!(
+            durable_routing.fallback.config_revision,
+            expected_revision + 1
+        );
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
 
         services.close_database().await;
     }

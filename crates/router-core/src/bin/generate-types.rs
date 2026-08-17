@@ -10,12 +10,12 @@ use router_core::{
         CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto, CodexRecoveryUpdatePreviewDto,
         CodexRestartNoticeDto, FallbackStopReasonDto, HistorySummaryDto,
         ImagesGenerationSettingsDto, MenuSnapshotDto, MetadataFailureDto, RecoveryCandidateDto,
-        RecoveryHealthDto, RecoverySnapshotDto, ReplaceCodexModelsResult,
-        RouteActivationPreviewDto, RouteActivationResultDto, RouteCatalogMode, RouteEditDto,
-        RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto, SettingsSnapshotDto,
-        UpdateImagesGenerationSettingsInputDto, UsageAttemptDto, UsageCostDto, UsageCostStateDto,
-        UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto,
-        UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
+        RecoveryHealthDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
+        ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
+        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto,
+        SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto, UsageAttemptDto, UsageCostDto,
+        UsageCostStateDto, UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto,
+        UsageHistoryQueryDto, UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
         UsageStatisticsAttributionDimensionDto, UsageStatisticsAttributionDto,
         UsageStatisticsAttributionMetricDto, UsageStatisticsBucketDto, UsageStatisticsDto,
         UsageStatisticsGranularityDto, UsageStatisticsQueryDto, UsageStatisticsTokensDto,
@@ -79,6 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     RecoveryHealthDto::export_all_to(&output)?;
     RecoverySnapshotDto::export_all_to(&output)?;
     ReplaceCodexModelsResult::export_all_to(&output)?;
+    ReorderRoutesAndFallbackInputDto::export_all_to(&output)?;
     RouteEditDto::export_all_to(&output)?;
     RouteActivationPreviewDto::export_all_to(&output)?;
     RouteActivationResultDto::export_all_to(&output)?;

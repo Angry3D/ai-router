@@ -56,6 +56,7 @@ export type { RecoveryCandidateDto } from "./RecoveryCandidateDto";
 export type { RecoveryHealthDto } from "./RecoveryHealthDto";
 export type { RecoveryHealthKind } from "./RecoveryHealthKind";
 export type { RecoverySnapshotDto } from "./RecoverySnapshotDto";
+export type { ReorderRoutesAndFallbackInputDto } from "./ReorderRoutesAndFallbackInputDto";
 export type { ReplaceCodexModelsResult } from "./ReplaceCodexModelsResult";
 export type { RouteActivationPreviewDto } from "./RouteActivationPreviewDto";
 export type { RouteActivationResultDto } from "./RouteActivationResultDto";
