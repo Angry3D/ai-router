@@ -13,6 +13,7 @@ AI Router 不提供账户或云同步。数据主要位于当前 macOS 用户目
 | 应用数据     | `~/Library/Application Support/com.relax.airouter/`               |
 | 主数据库     | 应用数据目录下的 `router.sqlite3`                                 |
 | 恢复点       | 应用数据目录下的 `recovery/`                                      |
+| MCP 图片资产 | 应用数据目录下的 `mcp-images/<assetId>.png`                       |
 | 派生模型目录 | 应用数据目录下的 `codex-model-catalog.json`（存在自定义模型时）   |
 | 运行日志     | `~/Library/Logs/com.relax.airouter/`                              |
 | Codex 配置   | `~/.codex/config.toml`（由 Codex 所有，AI Router 只做受保护投影） |
@@ -35,6 +36,10 @@ API Key 和 gateway token 以原始字节保存在 SQLite 中。数据库、WAL�
 请求历史不保存原始请求 body、提示词、完整响应、Authorization header 或任意上游 header。费用是
 根据带日期的本地价格快照计算的估算，不是账单或当前价格承诺。
 
+图片 MCP 会将成功生成并验证的 PNG 作为本地资产写入 `mcp-images/`，再只返回文件路径、实际尺寸、
+字节数和 SHA-256。PNG、上游 Base64 和原始响应不进入 SQLite、恢复点或运行日志。该目录保存的是
+用户本机上的生成结果，不是数据库状态，也不等同于备份。
+
 运行日志每条最多 8 KiB，单文件最多 2 MiB，最多十个文件/20 MiB，并保留最多七天。日志只应包含
 固定 code、安全组件名和有界计数；即使如此，分享前仍要人工检查，并且不能直接上传完整日志。
 
@@ -55,7 +60,8 @@ fsync 和替换前竞态检查。
 和一个隔离的损坏主库。
 
 恢复点包含路由密钥、gateway token、Codex 基线/断开目标和自定义模型，因此同样是敏感文件。它们
-不包含请求/尝试历史、Usage 行、日志、余额缓存、外部 `config.toml` 文件或派生模型 JSON。
+不包含请求/尝试历史、Usage 行、日志、余额缓存、外部 `config.toml` 文件、派生模型 JSON 或
+`mcp-images/` 图片资产。
 
 正常设置只允许查看保护状态和手动创建恢复点。主数据库缺失、损坏或领域无效时，启动进入独立恢复
 流程，只有通过当前 schema 和完整校验的候选才能恢复。恢复和“重新开始”都不会读取或写入
@@ -66,6 +72,9 @@ fsync 和替换前竞态检查。
 备份整个应用数据目录会同时备份凭据和 Codex 配置快照，应使用加密存储并限制访问。不要在应用运行时
 只复制 `router.sqlite3` 而忽略 WAL；优先完全退出应用后备份整个目录。手工编辑数据库、恢复点或
 `config.toml` 可能破坏 fingerprint 和恢复所有权，请先保留原件。
+
+`mcp-images/` 中的 PNG 只是本地生成资产。除非用户另行将这些文件纳入自己的备份方案，否则文件损坏、
+删除或应用数据目录丢失后无法依赖 SQLite 恢复点找回。
 
 公开问题报告只提供合成复现、版本、稳定错误码和必要的有界字段。数据库、恢复点、完整配置、完整日志
 和真实请求内容只能通过 [安全政策](../../SECURITY.md) 中约定的私下渠道讨论，而且通常不需要上传。
