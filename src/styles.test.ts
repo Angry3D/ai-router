@@ -261,13 +261,17 @@ describe("cross-window style isolation", () => {
       styles.match(/\.fallback-boundary-rail \{([^}]*)\}/u)?.[1] ?? "";
     const focusRule =
       styles.match(/\.fallback-boundary:focus-visible \{([^}]*)\}/u)?.[1] ?? "";
-    const detachedSensorRule =
+    const sourcePlaceholderRule =
       styles.match(
-        /\.fallback-boundary\.is-detached-sensor \{([^}]*)\}/u,
+        /\.fallback-boundary-slot\.is-source-placeholder \.fallback-boundary \{([^}]*)\}/u,
       )?.[1] ?? "";
-    const dragPreviewRule =
-      styles.match(/\.fallback-boundary\.is-drag-preview \{([^}]*)\}/u)?.[1] ??
+    const dragOverlayRule =
+      styles.match(/\.fallback-boundary\.is-drag-overlay \{([^}]*)\}/u)?.[1] ??
       "";
+    const routeHandleRule =
+      styles.match(/\.settings-route-drag-handle \{([^}]*)\}/u)?.[1] ?? "";
+    const routeSelectRule =
+      styles.match(/\.settings-route-select \{([^}]*)\}/u)?.[1] ?? "";
 
     expect(boundaryRule).toContain("display: flex;");
     expect(boundaryRule).toContain("height: 29px;");
@@ -283,25 +287,13 @@ describe("cross-window style isolation", () => {
     expect(railRule).toContain("pointer-events: none;");
     expect(focusRule).toContain("color: var(--blue);");
     expect(focusRule).toContain("box-shadow: inset 0 0 0 2px var(--blue);");
-    expect(detachedSensorRule).toContain("position: fixed;");
-    expect(detachedSensorRule).toContain("opacity: 0;");
-    expect(detachedSensorRule).not.toContain("display: none;");
-    expect(dragPreviewRule).toContain("pointer-events: none;");
-    expect(styles).toContain(
-      ".fallback-boundary:not(.is-suppressing-hover):hover",
-    );
-    expect(styles).toContain(
-      ".fallback-boundary:not(.is-suppressing-hover):hover\n  .fallback-boundary-rail::before",
-    );
-    expect(styles).toContain(
-      ".fallback-boundary:not(.is-suppressing-hover):hover\n  .fallback-boundary-rail::after",
-    );
-    expect(styles).not.toContain(
-      ".fallback-boundary:hover .fallback-boundary-rail::before",
-    );
-    expect(styles).not.toContain(
-      ".fallback-boundary:hover .fallback-boundary-rail::after",
-    );
+    expect(sourcePlaceholderRule).toContain("opacity: 0.24;");
+    expect(dragOverlayRule).toContain("pointer-events: none;");
+    expect(routeHandleRule).toContain("touch-action: none;");
+    expect(routeHandleRule).toContain("cursor: grab;");
+    expect(routeHandleRule).toContain("margin-left: 8px;");
+    expect(routeHandleRule).not.toContain("margin-right:");
+    expect(routeSelectRule).toContain("padding: 8px 8px 8px 4px;");
     expect(routeViewportRule).toContain("height: 100%;");
     expect(routeViewportRule).not.toContain("overflow: hidden;");
     expect(routeViewportContentRule).toContain("display: flex !important;");

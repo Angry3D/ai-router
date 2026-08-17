@@ -58,6 +58,8 @@ pub struct RouteSummaryDto {
 pub struct FallbackStateDto {
     pub enabled: bool,
     pub participant_count: u32,
+    #[ts(type = "number")]
+    pub config_revision: u64,
     pub active_position: Option<u32>,
     pub has_next: bool,
 }

@@ -148,6 +148,7 @@ export const previewMenuSnapshot: MenuSnapshotDto = {
     fallback: {
       enabled: true,
       participantCount: 4,
+      configRevision: 7,
       activePosition: 1,
       hasNext: true,
     },
@@ -244,6 +245,7 @@ export const previewSettingsSnapshot: SettingsSnapshotDto = {
   fallback: {
     enabled: true,
     participantCount: 3,
+    configRevision: 7,
     activePosition: 1,
     hasNext: true,
   },
@@ -308,6 +310,7 @@ export const previewLongRoutesSettingsSnapshot: SettingsSnapshotDto = {
   fallback: {
     enabled: true,
     participantCount: 5,
+    configRevision: 7,
     activePosition: 1,
     hasNext: true,
   },
@@ -335,6 +338,7 @@ export const previewRecoveryRequiredBootstrap: BootstrapSnapshotDto = {
   fallback: {
     enabled: false,
     participantCount: 0,
+    configRevision: 7,
     activePosition: null,
     hasNext: false,
   },

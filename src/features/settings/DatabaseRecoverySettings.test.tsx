@@ -37,13 +37,12 @@ const ipc = vi.hoisted(() => ({
   getUsageHistory: vi.fn(),
   getUsageRequestDetail: vi.fn(),
   getUsageRouteOptions: vi.fn(),
-  moveRoute: vi.fn(),
+  reorderRoutesAndFallback: vi.fn(),
   restoreCodex: vi.fn(),
   restoreRecoveryPoint: vi.fn(),
   retryDatabaseStartup: vi.fn(),
   saveRoute: vi.fn(),
   setFallbackEnabled: vi.fn(),
-  setFallbackParticipantCount: vi.fn(),
   startOverDatabase: vi.fn(),
   testBalanceQuery: vi.fn(),
   updateBalanceQuerySettings: vi.fn(),
@@ -94,7 +93,7 @@ vi.mock("../../api/ipc", () => ({
     return vi.fn();
   }),
   listenStateChanged: vi.fn(async () => vi.fn()),
-  moveRoute: ipc.moveRoute,
+  reorderRoutesAndFallback: ipc.reorderRoutesAndFallback,
   normalizeIpcError: () => ({
     code: "test",
     message: "测试失败",
@@ -109,7 +108,6 @@ vi.mock("../../api/ipc", () => ({
   retryDatabaseStartup: ipc.retryDatabaseStartup,
   saveRoute: ipc.saveRoute,
   setFallbackEnabled: ipc.setFallbackEnabled,
-  setFallbackParticipantCount: ipc.setFallbackParticipantCount,
   startOverDatabase: ipc.startOverDatabase,
   testBalanceQuery: ipc.testBalanceQuery,
   updateBalanceQuerySettings: ipc.updateBalanceQuerySettings,
@@ -150,10 +148,9 @@ beforeEach(() => {
   ipc.getUsageHistory.mockReset();
   ipc.getUsageRequestDetail.mockReset();
   ipc.getUsageRouteOptions.mockReset();
-  ipc.moveRoute.mockReset();
+  ipc.reorderRoutesAndFallback.mockReset();
   ipc.saveRoute.mockReset();
   ipc.setFallbackEnabled.mockReset();
-  ipc.setFallbackParticipantCount.mockReset();
   ipc.deleteRoute.mockReset();
   ipc.restoreCodex.mockReset();
   ipc.restoreRecoveryPoint.mockReset();
@@ -179,9 +176,8 @@ beforeEach(() => {
       retryToken: null,
     },
   });
-  ipc.moveRoute.mockResolvedValue({ revision: 14 });
+  ipc.reorderRoutesAndFallback.mockResolvedValue({ revision: 14 });
   ipc.setFallbackEnabled.mockResolvedValue({ revision: 15 });
-  ipc.setFallbackParticipantCount.mockResolvedValue({ revision: 16 });
   ipc.updateBalanceQuerySettings.mockResolvedValue({ revision: 17 });
   ipc.updateImagesGenerationSettings.mockResolvedValue({ revision: 18 });
   ipc.createRecoveryPoint.mockResolvedValue(previewSettingsSnapshot.recovery);

@@ -100,6 +100,7 @@ function bootstrap(
     fallback: {
       enabled: false,
       participantCount: 1,
+      configRevision: 1,
       activePosition: null,
       hasNext: false,
     },
@@ -626,6 +627,7 @@ describe("P8 menu interactions", () => {
       initial.bootstrap.fallback = {
         enabled,
         participantCount: 3,
+        configRevision: 1,
         activePosition: enabled ? 1 : null,
         hasNext: enabled,
       };
@@ -633,6 +635,7 @@ describe("P8 menu interactions", () => {
       refreshed.bootstrap.fallback = {
         enabled: nextEnabled,
         participantCount: 3,
+        configRevision: 2,
         activePosition: nextEnabled ? 1 : null,
         hasNext: nextEnabled,
       };
@@ -659,6 +662,7 @@ describe("P8 menu interactions", () => {
     initial.bootstrap.fallback = {
       enabled: false,
       participantCount: 3,
+      configRevision: 1,
       activePosition: null,
       hasNext: false,
     };
@@ -666,6 +670,7 @@ describe("P8 menu interactions", () => {
     refreshed.bootstrap.fallback = {
       enabled: true,
       participantCount: 3,
+      configRevision: 2,
       activePosition: 1,
       hasNext: true,
     };
@@ -701,6 +706,7 @@ describe("P8 menu interactions", () => {
     snapshot.bootstrap.fallback = {
       enabled: false,
       participantCount: 3,
+      configRevision: 1,
       activePosition: null,
       hasNext: false,
     };
@@ -725,6 +731,7 @@ describe("P8 menu interactions", () => {
     snapshot.bootstrap.fallback = {
       enabled: false,
       participantCount: 1,
+      configRevision: 1,
       activePosition: null,
       hasNext: false,
     };
@@ -744,6 +751,7 @@ describe("P8 menu interactions", () => {
     snapshot.bootstrap.fallback = {
       enabled: true,
       participantCount: 1,
+      configRevision: 1,
       activePosition: null,
       hasNext: false,
     };
@@ -759,6 +767,7 @@ describe("P8 menu interactions", () => {
     snapshot.bootstrap.fallback = {
       enabled: true,
       participantCount: 3,
+      configRevision: 1,
       activePosition: null,
       hasNext: false,
     };
@@ -789,6 +798,7 @@ describe("P8 menu interactions", () => {
       snapshot.bootstrap.fallback = {
         enabled,
         participantCount,
+        configRevision: 1,
         activePosition: enabled ? 1 : null,
         hasNext: enabled,
       };
@@ -814,6 +824,7 @@ describe("P8 menu interactions", () => {
     snapshot.bootstrap.fallback = {
       enabled: false,
       participantCount: 0,
+      configRevision: 1,
       activePosition: null,
       hasNext: false,
     };
@@ -834,6 +845,7 @@ describe("P8 menu interactions", () => {
       snapshot.bootstrap.fallback = {
         enabled: false,
         participantCount,
+        configRevision: 1,
         activePosition: null,
         hasNext: false,
       };
@@ -853,6 +865,7 @@ describe("P8 menu interactions", () => {
     snapshot.bootstrap.fallback = {
       enabled: false,
       participantCount: 2,
+      configRevision: 1,
       activePosition: null,
       hasNext: false,
     };

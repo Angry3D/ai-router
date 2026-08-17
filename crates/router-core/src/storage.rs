@@ -574,6 +574,10 @@ pub enum StorageError {
     UsageStatisticsOverflow,
     #[error("invalid fallback participant count")]
     InvalidFallbackParticipantCount,
+    #[error("routing configuration is stale")]
+    StaleRoutingConfiguration,
+    #[error("invalid route permutation")]
+    InvalidRoutePermutation,
     #[error("a capable image generation route is required")]
     InvalidImagesGenerationRoute,
     #[error("balance script risk confirmation is required")]
@@ -1341,6 +1345,90 @@ impl DatabaseExecutor {
             transaction.execute(
                 "UPDATE fallback_config SET config_revision = config_revision + 1, updated_at_ms = ?1 WHERE singleton = 1",
                 [timestamp],
+            )?;
+            let revision = mark_critical_change(&transaction)?;
+            transaction.commit()?;
+            Ok((true, Some(revision)))
+        })
+        .await
+    }
+
+    /// Atomically replaces route order and the fallback participant boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StaleRoutingConfiguration` when the expected revision is no
+    /// longer current, `InvalidRoutePermutation` when the candidate is not an
+    /// exact permutation of durable routes, or an executor/transaction error.
+    pub async fn reorder_routes_and_fallback(
+        &self,
+        ordered_route_ids: Vec<RouteId>,
+        participant_count: u32,
+        expected_config_revision: u64,
+    ) -> Result<bool, StorageError> {
+        self.call_critical(move |connection| {
+            let transaction = connection.transaction()?;
+            let fallback = read_fallback_config(&transaction)?;
+            if fallback.record.config_revision != expected_config_revision {
+                return Err(StorageError::StaleRoutingConfiguration);
+            }
+
+            let mut statement = transaction
+                .prepare("SELECT route_id FROM routes ORDER BY sort_order, created_at_ms")?;
+            let current_route_ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+
+            if ordered_route_ids.len() != current_route_ids.len()
+                || u64::from(participant_count) > fallback.route_count
+            {
+                return Err(StorageError::InvalidRoutePermutation);
+            }
+            let mut submitted_ids =
+                std::collections::HashSet::with_capacity(ordered_route_ids.len());
+            for route_id in &ordered_route_ids {
+                if !submitted_ids.insert(route_id.as_str()) {
+                    return Err(StorageError::InvalidRoutePermutation);
+                }
+            }
+            if !current_route_ids
+                .iter()
+                .all(|route_id| submitted_ids.contains(route_id.as_str()))
+            {
+                return Err(StorageError::InvalidRoutePermutation);
+            }
+
+            let order_changed = ordered_route_ids
+                .iter()
+                .map(RouteId::as_str)
+                .ne(current_route_ids.iter().map(String::as_str));
+            let boundary_changed = participant_count != fallback.record.participant_count;
+            if !order_changed && !boundary_changed {
+                transaction.commit()?;
+                return Ok((false, None));
+            }
+
+            let timestamp = now_millis();
+            for (sort_order, route_id) in ordered_route_ids.iter().enumerate() {
+                let sort_order =
+                    i64::try_from(sort_order).map_err(|_| StorageError::InvalidRoutePermutation)?;
+                if transaction.execute(
+                    "UPDATE routes SET sort_order = ?1, updated_at_ms = ?2 WHERE route_id = ?3",
+                    params![sort_order, timestamp, route_id.as_str()],
+                )? != 1
+                {
+                    return Err(StorageError::InvalidRoutePermutation);
+                }
+            }
+            transaction.execute(
+                "UPDATE fallback_config
+                 SET participant_count = ?1,
+                     enabled = CASE WHEN ?1 < 2 THEN 0 ELSE enabled END,
+                     config_revision = config_revision + 1,
+                     updated_at_ms = ?2
+                 WHERE singleton = 1",
+                params![participant_count, timestamp],
             )?;
             let revision = mark_critical_change(&transaction)?;
             transaction.commit()?;
@@ -5077,6 +5165,22 @@ mod tests {
         }
     }
 
+    async fn reorder_routes(
+        database: &DatabaseExecutor,
+        ordered_route_ids: Vec<RouteId>,
+        participant_count: u32,
+        expected_config_revision: u64,
+    ) -> bool {
+        database
+            .reorder_routes_and_fallback(
+                ordered_route_ids,
+                participant_count,
+                expected_config_revision,
+            )
+            .await
+            .expect("route reorder")
+    }
+
     #[tokio::test]
     async fn migration_has_recovery_tables_and_required_pragmas() {
         let (_directory, database) = database();
@@ -6228,6 +6332,306 @@ mod tests {
         assert_eq!(
             after.fallback.config_revision,
             before.fallback.config_revision + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_route_and_fallback_reorder_updates_each_revision_once_and_noops() {
+        let (_directory, database) = database();
+        let first = database
+            .create_route(route("First", "first-key"))
+            .await
+            .expect("first");
+        let second = database
+            .create_route(route("Second", "second-key"))
+            .await
+            .expect("second");
+        let third = database
+            .create_route(route("Third", "third-key"))
+            .await
+            .expect("third");
+        database.set_fallback_enabled(true).await.expect("enable");
+        let before = database.routing_state().await.expect("routing before");
+        let critical_before = database.critical_revision().await.expect("critical before");
+
+        let order_only = vec![
+            third.route_id.clone(),
+            first.route_id.clone(),
+            second.route_id.clone(),
+        ];
+        let revision = before.fallback.config_revision;
+        assert!(reorder_routes(&database, order_only.clone(), 3, revision).await);
+        let after_order = database.routing_state().await.expect("after order");
+        assert_eq!(after_order.fallback.participant_count, 3);
+        assert!(after_order.fallback.enabled);
+        assert_eq!(
+            after_order.fallback.config_revision,
+            before.fallback.config_revision + 1
+        );
+        assert_eq!(
+            database.critical_revision().await.expect("critical order"),
+            critical_before + 1
+        );
+
+        let revision = after_order.fallback.config_revision;
+        assert!(reorder_routes(&database, order_only.clone(), 1, revision).await);
+        let after_boundary = database.routing_state().await.expect("after boundary");
+        assert_eq!(after_boundary.fallback.participant_count, 1);
+        assert!(!after_boundary.fallback.enabled);
+        assert_eq!(
+            after_boundary.fallback.config_revision,
+            after_order.fallback.config_revision + 1
+        );
+
+        let combined = vec![second.route_id, third.route_id, first.route_id];
+        let revision = after_boundary.fallback.config_revision;
+        assert!(reorder_routes(&database, combined.clone(), 2, revision).await);
+        let after_combined = database.routing_state().await.expect("after combined");
+        assert_eq!(after_combined.fallback.participant_count, 2);
+        assert!(!after_combined.fallback.enabled);
+        assert_eq!(
+            after_combined.fallback.config_revision,
+            after_boundary.fallback.config_revision + 1
+        );
+        assert_eq!(
+            database
+                .list_routes()
+                .await
+                .expect("ordered routes")
+                .into_iter()
+                .map(|route| route.route_id)
+                .collect::<Vec<_>>(),
+            combined
+        );
+        let critical_after = database
+            .critical_revision()
+            .await
+            .expect("critical combined");
+        assert_eq!(critical_after, critical_before + 3);
+
+        let revision = after_combined.fallback.config_revision;
+        assert!(!reorder_routes(&database, combined, 2, revision).await);
+        assert_eq!(
+            database.critical_revision().await.expect("critical no-op"),
+            critical_after
+        );
+        assert_eq!(
+            database
+                .routing_state()
+                .await
+                .expect("routing no-op")
+                .fallback
+                .config_revision,
+            after_combined.fallback.config_revision
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_route_and_fallback_reorder_rejects_stale_or_invalid_candidates() {
+        let (_directory, database) = database();
+        let first = database
+            .create_route(route("First", "first-key"))
+            .await
+            .expect("first");
+        let second = database
+            .create_route(route("Second", "second-key"))
+            .await
+            .expect("second");
+        let third = database
+            .create_route(route("Third", "third-key"))
+            .await
+            .expect("third");
+        let route_ids = vec![
+            first.route_id.clone(),
+            second.route_id.clone(),
+            third.route_id.clone(),
+        ];
+        let before = database.routing_state().await.expect("routing before");
+        let critical_before = database.critical_revision().await.expect("critical before");
+
+        let invalid_candidates = [
+            (vec![first.route_id.clone(), second.route_id.clone()], 2),
+            (
+                vec![
+                    first.route_id.clone(),
+                    first.route_id.clone(),
+                    third.route_id.clone(),
+                ],
+                2,
+            ),
+            (
+                vec![
+                    first.route_id.clone(),
+                    second.route_id.clone(),
+                    RouteId::from_string("unknown-route".to_owned()),
+                ],
+                2,
+            ),
+            (route_ids.clone(), 4),
+        ];
+        for (candidate, participant_count) in invalid_candidates {
+            assert!(matches!(
+                database
+                    .reorder_routes_and_fallback(
+                        candidate,
+                        participant_count,
+                        before.fallback.config_revision,
+                    )
+                    .await,
+                Err(StorageError::InvalidRoutePermutation)
+            ));
+        }
+
+        assert!(matches!(
+            database
+                .reorder_routes_and_fallback(
+                    vec![third.route_id, second.route_id, first.route_id],
+                    2,
+                    before.fallback.config_revision + 1,
+                )
+                .await,
+            Err(StorageError::StaleRoutingConfiguration)
+        ));
+        assert_eq!(
+            database
+                .list_routes()
+                .await
+                .expect("unchanged routes")
+                .into_iter()
+                .map(|route| route.route_id)
+                .collect::<Vec<_>>(),
+            route_ids
+        );
+        assert_eq!(
+            database.routing_state().await.expect("unchanged routing"),
+            before
+        );
+        assert_eq!(
+            database
+                .critical_revision()
+                .await
+                .expect("unchanged critical"),
+            critical_before
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_route_and_fallback_reorder_rolls_back_on_sql_failure() {
+        let (_directory, database) = database();
+        let first = database
+            .create_route(route("First", "first-key"))
+            .await
+            .expect("first");
+        let second = database
+            .create_route(route("Second", "second-key"))
+            .await
+            .expect("second");
+        let before_routes = database.list_routes().await.expect("routes before");
+        let before_routing = database.routing_state().await.expect("routing before");
+        let critical_before = database.critical_revision().await.expect("critical before");
+        database
+            .test_execute(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_route_reorder
+                     BEFORE UPDATE OF sort_order ON routes
+                     BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("failure trigger");
+
+        assert!(matches!(
+            database
+                .reorder_routes_and_fallback(
+                    vec![second.route_id, first.route_id],
+                    1,
+                    before_routing.fallback.config_revision,
+                )
+                .await,
+            Err(StorageError::Database(_))
+        ));
+        assert_eq!(
+            database.list_routes().await.expect("routes after"),
+            before_routes
+        );
+        assert_eq!(
+            database.routing_state().await.expect("routing after"),
+            before_routing
+        );
+        assert_eq!(
+            database.critical_revision().await.expect("critical after"),
+            critical_before
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_atomic_reorders_allow_one_revision_winner() {
+        let (_directory, database) = database();
+        let first = database
+            .create_route(route("First", "first-key"))
+            .await
+            .expect("first");
+        let second = database
+            .create_route(route("Second", "second-key"))
+            .await
+            .expect("second");
+        let third = database
+            .create_route(route("Third", "third-key"))
+            .await
+            .expect("third");
+        let before = database.routing_state().await.expect("routing before");
+        let critical_before = database.critical_revision().await.expect("critical before");
+        let first_candidate = vec![
+            second.route_id.clone(),
+            first.route_id.clone(),
+            third.route_id.clone(),
+        ];
+        let second_candidate = vec![third.route_id, second.route_id, first.route_id];
+
+        let (first_result, second_result) = tokio::join!(
+            database.reorder_routes_and_fallback(
+                first_candidate.clone(),
+                2,
+                before.fallback.config_revision,
+            ),
+            database.reorder_routes_and_fallback(
+                second_candidate.clone(),
+                2,
+                before.fallback.config_revision,
+            )
+        );
+        let results = [&first_result, &second_result];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(true)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(StorageError::StaleRoutingConfiguration)))
+                .count(),
+            1
+        );
+        let stored = database
+            .list_routes()
+            .await
+            .expect("winner order")
+            .into_iter()
+            .map(|route| route.route_id)
+            .collect::<Vec<_>>();
+        assert!(stored == first_candidate || stored == second_candidate);
+        let after = database.routing_state().await.expect("routing after");
+        assert_eq!(
+            after.fallback.config_revision,
+            before.fallback.config_revision + 1
+        );
+        assert_eq!(
+            database.critical_revision().await.expect("critical after"),
+            critical_before + 1
         );
     }
 

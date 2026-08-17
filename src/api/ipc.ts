@@ -22,11 +22,11 @@ import type {
   ReachabilityResult,
   RecoveryHealthDto,
   RecoverySnapshotDto,
+  ReorderRoutesAndFallbackInputDto,
   RouteActivationPreviewDto,
   RouteActivationResultDto,
   RouteEditDto,
   RouteId,
-  RouteMoveDirection,
   RouteSaveInputDto,
   RouteSaveResultDto,
   SettingsSnapshotDto,
@@ -66,11 +66,10 @@ export const IPC_COMMANDS = {
   confirmRouteActivation: "confirm_route_activation",
   dismissCodexRestartNotice: "dismiss_codex_restart_notice",
   setFallbackEnabled: "set_fallback_enabled",
-  setFallbackParticipantCount: "set_fallback_participant_count",
+  reorderRoutesAndFallback: "reorder_routes_and_fallback",
   updateBalanceQuerySettings: "update_balance_query_settings",
   updateImagesGenerationSettings: "update_images_generation_settings",
   updateAppearancePreference: "update_appearance_preference",
-  moveRoute: "move_route",
   refreshBalance: "refresh_balance",
   refreshAllBalances: "refresh_all_balances",
   testBalanceQuery: "test_balance_query",
@@ -302,11 +301,11 @@ export async function setFallbackEnabled(
   });
 }
 
-export async function setFallbackParticipantCount(
-  participantCount: number,
+export async function reorderRoutesAndFallback(
+  input: ReorderRoutesAndFallbackInputDto,
 ): Promise<MutationResultDto> {
-  return invoke<MutationResultDto>(IPC_COMMANDS.setFallbackParticipantCount, {
-    participantCount,
+  return invoke<MutationResultDto>(IPC_COMMANDS.reorderRoutesAndFallback, {
+    input,
   });
 }
 
@@ -335,16 +334,6 @@ export async function updateImagesGenerationSettings(
       input,
     },
   );
-}
-
-export async function moveRoute(
-  routeId: RouteId,
-  direction: RouteMoveDirection,
-): Promise<MutationResultDto> {
-  return invoke<MutationResultDto>(IPC_COMMANDS.moveRoute, {
-    routeId,
-    direction,
-  });
 }
 
 export async function refreshBalance(

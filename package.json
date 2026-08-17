@@ -67,6 +67,9 @@
     "artifacts:clean": "node scripts/manage-build-artifacts.mjs clean"
   },
   "dependencies": {
+    "@dnd-kit/core": "6.3.1",
+    "@dnd-kit/sortable": "10.0.0",
+    "@dnd-kit/utilities": "3.2.2",
     "@radix-ui/react-scroll-area": "^1.2.18",
     "@tanstack/react-query": "^5.101.4",
     "@tauri-apps/api": "^2.8.0",
