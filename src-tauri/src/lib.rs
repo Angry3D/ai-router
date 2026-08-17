@@ -17,8 +17,8 @@ use router_core::app_api::{ApplicationUpdateProgressDto, ApplicationUpdateSnapsh
 use router_core::lifecycle::{AppCoordinator, AppLifecycleIssue, AppLifecyclePhase};
 use router_core::qa_acceptance::QaAcceptanceRoot;
 use router_core::state::{
-    AppRuntimeState, BootstrapSnapshotDto, StateArea, StateChangedEventDto, StateEventError,
-    StateEventSink,
+    AppRuntimeState, BootstrapSnapshotDto, IpcErrorDto, StateArea, StateChangedEventDto,
+    StateEventError, StateEventSink,
 };
 use runtime::{
     DesktopLifecycleServices, DesktopRuntimeProfile, RuntimeLogController,
@@ -41,6 +41,7 @@ use runtime::{
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, ipc::Channel};
 
 const STATE_CHANGED_EVENT: &str = "router-state-changed";
+const PROJECT_REPOSITORY_URL: &str = "https://github.com/Angry3D/ai-router";
 
 struct TauriStateEventSink {
     app_handle: AppHandle,
@@ -185,6 +186,24 @@ fn restart_for_application_update(
     coordinator.request_restart()
 }
 
+fn open_project_repository_with<E>(
+    opener: impl FnOnce(&str) -> Result<(), E>,
+) -> Result<(), IpcErrorDto> {
+    opener(PROJECT_REPOSITORY_URL).map_err(|_| IpcErrorDto {
+        code: "project_repository_open_failed".to_owned(),
+        message: "GitHub 项目无法打开。".to_owned(),
+        retryable: true,
+        field: None,
+    })
+}
+
+#[tauri::command]
+fn open_project_repository() -> Result<(), IpcErrorDto> {
+    open_project_repository_with(|url| {
+        tauri_plugin_opener::open_url(url, None::<&str>).map_err(|_| ())
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the desktop application event loop.
 ///
@@ -229,6 +248,7 @@ pub fn run() {
             check_application_update,
             download_and_install_application_update,
             open_application_update_release,
+            open_project_repository,
             restart_for_application_update,
             get_menu_snapshot,
             get_settings_snapshot,
@@ -428,5 +448,33 @@ mod tests {
             APPLICATION_UPDATE_RESTART_REQUEST_CODE,
             tauri::RESTART_EXIT_CODE
         );
+    }
+
+    #[test]
+    fn project_repository_command_uses_the_fixed_canonical_target() {
+        let mut opened_url = None;
+
+        open_project_repository_with(|url| {
+            opened_url = Some(url.to_owned());
+            Ok::<(), ()>(())
+        })
+        .expect("fixed project repository target should open");
+
+        assert_eq!(opened_url.as_deref(), Some(PROJECT_REPOSITORY_URL));
+        assert_eq!(
+            PROJECT_REPOSITORY_URL,
+            "https://github.com/Angry3D/ai-router"
+        );
+    }
+
+    #[test]
+    fn project_repository_command_maps_opener_failures_to_a_safe_error() {
+        let error = open_project_repository_with(|_| Err::<(), ()>(()))
+            .expect_err("opener failure should be contained");
+
+        assert_eq!(error.code, "project_repository_open_failed");
+        assert_eq!(error.message, "GitHub 项目无法打开。");
+        assert!(error.retryable);
+        assert_eq!(error.field, None);
     }
 }

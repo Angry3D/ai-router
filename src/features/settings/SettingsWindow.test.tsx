@@ -1,5 +1,12 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SettingsNavigationEvent } from "../../api/ipc";
@@ -44,6 +51,7 @@ const ipc = vi.hoisted(() => ({
   updateBalanceQuerySettings: vi.fn(),
   updateImagesGenerationSettings: vi.fn(),
   getRunningAppVersion: vi.fn(),
+  openProjectRepository: vi.fn(),
   hideSettingsWindow: vi.fn(),
   quitApplication: vi.fn(),
   tauriRuntime: false,
@@ -71,6 +79,7 @@ vi.mock("../../api/ipc", () => ({
   getUsageHistory: ipc.getUsageHistory,
   getUsageRequestDetail: ipc.getUsageRequestDetail,
   getUsageRouteOptions: ipc.getUsageRouteOptions,
+  openProjectRepository: ipc.openProjectRepository,
   hideSettingsWindow: ipc.hideSettingsWindow,
   isTauriRuntime: () => ipc.tauriRuntime,
   listenSettingsCloseRequested: vi.fn(async (listener: () => void) => {
@@ -206,12 +215,14 @@ beforeEach(() => {
   ipc.updateBalanceQuerySettings.mockReset();
   ipc.updateImagesGenerationSettings.mockReset();
   ipc.getRunningAppVersion.mockReset();
+  ipc.openProjectRepository.mockReset();
   ipc.hideSettingsWindow.mockReset();
   ipc.quitApplication.mockReset();
   ipc.listeners.navigation = undefined;
   ipc.listeners.close = undefined;
   ipc.tauriRuntime = false;
   ipc.getRunningAppVersion.mockResolvedValue("0.1.1");
+  ipc.openProjectRepository.mockResolvedValue(undefined);
   ipc.saveRoute.mockResolvedValue({
     routeId: previewRouteEdits[0].routeId,
     revision: 13,
@@ -328,6 +339,35 @@ describe("SettingsWindow interactions", () => {
     await renderSettings();
 
     expect(await screen.findByText("版本 0.1.1")).toBeInTheDocument();
+  });
+
+  it("guards the repository opener while pending and recovers from rejection", async () => {
+    let resolveOpen!: () => void;
+    ipc.openProjectRepository.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveOpen = resolve;
+        }),
+    );
+    await renderSettings();
+
+    const repositoryLink = screen.getByRole("button", {
+      name: "打开 GitHub 项目",
+    });
+    fireEvent.click(repositoryLink);
+    fireEvent.click(repositoryLink);
+    expect(ipc.openProjectRepository).toHaveBeenCalledOnce();
+    expect(repositoryLink).toBeDisabled();
+
+    resolveOpen();
+    await waitFor(() => expect(repositoryLink).toBeEnabled());
+
+    ipc.openProjectRepository.mockRejectedValueOnce(
+      new Error("opener unavailable"),
+    );
+    fireEvent.click(repositoryLink);
+    await waitFor(() => expect(repositoryLink).toBeEnabled());
+    expect(ipc.openProjectRepository).toHaveBeenCalledTimes(2);
   });
 
   it("keeps every shared page heading inside the draggable title band", async () => {

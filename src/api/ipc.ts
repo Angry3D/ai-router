@@ -49,6 +49,7 @@ export const IPC_COMMANDS = {
   downloadAndInstallApplicationUpdate:
     "download_and_install_application_update",
   openApplicationUpdateRelease: "open_application_update_release",
+  openProjectRepository: "open_project_repository",
   restartForApplicationUpdate: "restart_for_application_update",
   getUsageHistory: "get_usage_history",
   getUsageStatistics: "get_usage_statistics",
@@ -169,6 +170,10 @@ export async function downloadAndInstallApplicationUpdate(
 
 export async function openApplicationUpdateRelease(): Promise<void> {
   return invoke<void>(IPC_COMMANDS.openApplicationUpdateRelease);
+}
+
+export async function openProjectRepository(): Promise<void> {
+  return invoke<void>(IPC_COMMANDS.openProjectRepository);
 }
 
 export async function restartForApplicationUpdate(): Promise<void> {

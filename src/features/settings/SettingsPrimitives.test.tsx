@@ -17,10 +17,13 @@ import {
 describe("Settings visual primitives", () => {
   it("keeps sidebar selection semantic and delegates navigation", () => {
     const onSelect = vi.fn();
+    const onOpenRepository = vi.fn();
     render(
       <SettingsSidebar
         activeSection="routes"
         onSelect={onSelect}
+        onOpenRepository={onOpenRepository}
+        isRepositoryPending={false}
         version="0.1.1"
         items={[
           { id: "routes", label: "路由", icon: <Route aria-hidden="true" /> },
@@ -48,6 +51,37 @@ describe("Settings visual primitives", () => {
     fireEvent.click(screen.getByRole("button", { name: "Codex" }));
     expect(onSelect).toHaveBeenCalledWith("codex");
     expect(screen.getByText("版本 0.1.1")).toBeInTheDocument();
+    const repositoryLink = screen.getByRole("button", {
+      name: "打开 GitHub 项目",
+    });
+    expect(repositoryLink).toHaveAttribute("title", "打开 GitHub 项目");
+    expect(repositoryLink).toHaveAttribute("type", "button");
+    expect(repositoryLink.querySelector(".anticon")).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+    fireEvent.click(repositoryLink);
+    expect(onOpenRepository).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the pending button footprint and native disabled state", () => {
+    render(
+      <SettingsSidebar
+        activeSection="routes"
+        onSelect={vi.fn()}
+        onOpenRepository={vi.fn()}
+        isRepositoryPending
+        version="0.1.1"
+        items={[
+          { id: "routes", label: "路由", icon: <Route aria-hidden="true" /> },
+        ]}
+      />,
+    );
+
+    const repositoryLink = screen.getByRole("button", {
+      name: "打开 GitHub 项目",
+    });
+    expect(repositoryLink).toBeDisabled();
   });
 
   it("preserves native field, switch, button, and heading semantics", () => {

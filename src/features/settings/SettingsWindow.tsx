@@ -11,6 +11,7 @@ import {
   hideSettingsWindow,
   listenSettingsCloseRequested,
   listenSettingsNavigation,
+  openProjectRepository,
 } from "../../api/ipc";
 import {
   isDatabaseSnapshotBlocked,
@@ -63,6 +64,8 @@ export function SettingsWindow() {
   const [dirty, setDirty] = useState(false);
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [isRepositoryPending, setIsRepositoryPending] = useState(false);
+  const repositoryPending = useRef(false);
 
   const routes = settings.data?.routes ?? [];
   const effectiveSelection = newRoute
@@ -176,6 +179,20 @@ export function SettingsWindow() {
     setEditorKey((value) => value + 1);
   };
 
+  const openRepository = useCallback(async () => {
+    if (repositoryPending.current) return;
+    repositoryPending.current = true;
+    setIsRepositoryPending(true);
+    try {
+      await openProjectRepository();
+    } catch {
+      // The external browser is optional; keep Settings usable on failure.
+    } finally {
+      repositoryPending.current = false;
+      setIsRepositoryPending(false);
+    }
+  }, []);
+
   return (
     <main
       className="settings-shell"
@@ -184,6 +201,8 @@ export function SettingsWindow() {
       <SettingsSidebar
         activeSection={section}
         onSelect={selectSection}
+        onOpenRepository={() => void openRepository()}
+        isRepositoryPending={isRepositoryPending}
         version={appVersion}
         items={[
           {

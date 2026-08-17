@@ -1110,11 +1110,57 @@ body[data-view="settings"] .app-variant-badge {
   box-shadow: inset 0 0 0 2px var(--blue);
 }
 
-.settings-nav-version {
+.settings-nav-footer {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
   margin: auto 8px 0;
+}
+
+.settings-nav-version {
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: var(--settings-sidebar-version-size);
   line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-github-link {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+}
+
+.settings-github-link .anticon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.settings-github-link:hover:not(:disabled) {
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.settings-github-link:focus {
+  outline: none;
+}
+
+.settings-github-link:focus-visible {
+  background: transparent;
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
 }
 
 .settings-loading {
