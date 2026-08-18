@@ -3438,6 +3438,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "http-body",
  "png 0.18.1",
  "reqwest",
  "rmcp",

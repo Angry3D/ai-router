@@ -44,10 +44,11 @@ use router_core::{
     },
     proxy::{
         AsyncHistoryRecorder, FallbackActivationError, FallbackActivationRequest,
-        FallbackActivator, InferenceStatusService, ProxyIngressState, ProxyPortError,
-        ProxyPortStore, ProxyServerHandle, ReachabilityProbe, RequestTransitionSink,
-        ResponsesForwarder, RouteSnapshot, RoutingSnapshot, RoutingSnapshotStore,
-        RuntimeDiagnosticEvent, RuntimeDiagnosticSink, build_proxy_router, transition_proxy_port,
+        FallbackActivator, InferenceStatusService, LogicalRequestActivitySink,
+        LogicalRequestActivityTracker, ProxyIngressState, ProxyPortError, ProxyPortStore,
+        ProxyServerHandle, ReachabilityProbe, RequestTransitionSink, ResponsesForwarder,
+        RouteSnapshot, RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticEvent,
+        RuntimeDiagnosticSink, build_proxy_router, transition_proxy_port,
     },
     qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     recovery::{
@@ -229,6 +230,7 @@ pub struct DesktopLifecycleServices {
     profile: DesktopRuntimeProfile,
     runtime_state: Arc<AppRuntimeState>,
     diagnostics: Arc<dyn RuntimeDiagnosticSink>,
+    activity: LogicalRequestActivityTracker,
     database: tokio::sync::Mutex<Option<DatabaseExecutor>>,
     recovery: tokio::sync::Mutex<Option<Arc<RecoveryCoordinator>>>,
     proxy: tokio::sync::Mutex<Option<ProxyServerHandle>>,
@@ -292,12 +294,31 @@ struct CodexImagesMcpRepairPermit {
 }
 
 impl DesktopLifecycleServices {
+    #[cfg(test)]
     pub fn new(
         app_data_dir: PathBuf,
         user_home: &std::path::Path,
         profile: DesktopRuntimeProfile,
         runtime_state: Arc<AppRuntimeState>,
         diagnostics: Arc<dyn RuntimeDiagnosticSink>,
+    ) -> Arc<Self> {
+        Self::new_with_activity_sink(
+            app_data_dir,
+            user_home,
+            profile,
+            runtime_state,
+            diagnostics,
+            Arc::new(router_core::proxy::NoopLogicalRequestActivitySink),
+        )
+    }
+
+    pub fn new_with_activity_sink(
+        app_data_dir: PathBuf,
+        user_home: &std::path::Path,
+        profile: DesktopRuntimeProfile,
+        runtime_state: Arc<AppRuntimeState>,
+        diagnostics: Arc<dyn RuntimeDiagnosticSink>,
+        activity_sink: Arc<dyn LogicalRequestActivitySink>,
     ) -> Arc<Self> {
         let codex_home = profile.codex_home(&app_data_dir, user_home);
         Arc::new(Self {
@@ -306,6 +327,7 @@ impl DesktopLifecycleServices {
             profile,
             runtime_state,
             diagnostics,
+            activity: LogicalRequestActivityTracker::new(activity_sink),
             database: tokio::sync::Mutex::new(None),
             recovery: tokio::sync::Mutex::new(None),
             proxy: tokio::sync::Mutex::new(None),
@@ -328,6 +350,19 @@ impl DesktopLifecycleServices {
             codex_recovery_reset_permit: tokio::sync::Mutex::new(None),
             codex_recovery_reset_permit_generation: AtomicU64::new(0),
         })
+    }
+
+    fn proxy_ingress(
+        &self,
+        gateway_token: &str,
+        forwarder: ResponsesForwarder,
+        history: Arc<AsyncHistoryRecorder>,
+    ) -> ProxyIngressState {
+        ProxyIngressState::new(gateway_token, Arc::new(forwarder))
+            .with_runtime_sinks(history, self.diagnostics.clone())
+            .with_activity_tracker(self.activity.clone())
+            .with_routing_store(self.routing.clone())
+            .with_mcp_image_asset_root(self.app_data_dir.join("mcp-images"))
     }
 
     async fn database(&self) -> Result<DatabaseExecutor, LifecycleFailure> {
@@ -2697,10 +2732,7 @@ impl AppLifecycleServices for DesktopLifecycleServices {
             .with_runtime_services(history.clone(), self.diagnostics.clone(), inference.clone())
             .with_fallback_services(self.routing.clone(), activator)
             .with_request_transition_sink(transition_sink);
-        let ingress = ProxyIngressState::new(&gateway_token, Arc::new(forwarder))
-            .with_runtime_sinks(history.clone(), self.diagnostics.clone())
-            .with_routing_store(self.routing.clone())
-            .with_mcp_image_asset_root(self.app_data_dir.join("mcp-images"));
+        let ingress = self.proxy_ingress(&gateway_token, forwarder, history.clone());
         let summaries = routes
             .iter()
             .map(|route| {

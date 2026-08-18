@@ -54,16 +54,16 @@ tauri_panel! {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TrayVisualState {
-    Normal,
-    Attention,
-    Failure,
+pub(crate) enum TrayVisualState {
+    Ready,
+    Active,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct TrayPresentation {
-    title: String,
-    tooltip: String,
+pub(crate) struct TrayPresentation {
+    pub(crate) title: String,
+    pub(crate) tooltip: String,
+    pub(crate) visual_state: TrayVisualState,
 }
 
 #[derive(Default)]
@@ -466,29 +466,12 @@ pub fn hide_menu_window<R: Runtime>(app: &AppHandle<R>) {
     hide_window(app, &controller);
 }
 
-pub fn update_tray_status<R: Runtime>(
-    app: &AppHandle<R>,
-    snapshot: &BootstrapSnapshotDto,
-    balance: Option<&BalanceDisplaySnapshot>,
-    isolated: bool,
-) {
-    let presentation = tray_presentation(&app.package_info().name, snapshot, balance, isolated);
-    if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_title(Some(presentation.title));
-        let _ = tray.set_tooltip(Some(presentation.tooltip));
-    }
-}
-
-#[must_use]
-pub fn initial_tray_title(isolated: bool) -> String {
-    with_qa_prefix("无中转(--)", isolated)
-}
-
-fn tray_presentation(
+pub(crate) fn tray_presentation(
     app_name: &str,
     snapshot: &BootstrapSnapshotDto,
     balance: Option<&BalanceDisplaySnapshot>,
     isolated: bool,
+    active: bool,
 ) -> TrayPresentation {
     let active_route = snapshot.active_route_id.as_ref().and_then(|active_id| {
         snapshot
@@ -504,11 +487,8 @@ fn tray_presentation(
         .map_or_else(|| "--".to_owned(), compact_balance_value);
     let compact_name = compact_route_name(route_name);
     let title = with_qa_prefix(&format!("{compact_name}({amount})"), isolated);
-    let state_label = match tray_visual_state(snapshot) {
-        TrayVisualState::Normal => "正常",
-        TrayVisualState::Attention => "需要处理",
-        TrayVisualState::Failure => "代理故障",
-    };
+    let visual_state = tray_visual_state(active);
+    let state_label = tray_status_label(snapshot, active);
     let tooltip = active_route.map_or_else(
         || format!("{app_name} {state_label} · 无中转"),
         |route| {
@@ -520,7 +500,16 @@ fn tray_presentation(
         },
     );
 
-    TrayPresentation { title, tooltip }
+    TrayPresentation {
+        title,
+        tooltip,
+        visual_state,
+    }
+}
+
+#[must_use]
+pub fn initial_tray_title(isolated: bool) -> String {
+    with_qa_prefix("无中转(--)", isolated)
 }
 
 fn with_qa_prefix(title: &str, isolated: bool) -> String {
@@ -595,18 +584,25 @@ fn balance_tooltip_detail(balance: Option<&BalanceDisplaySnapshot>) -> String {
     }
 }
 
-fn tray_visual_state(snapshot: &BootstrapSnapshotDto) -> TrayVisualState {
+fn tray_visual_state(active: bool) -> TrayVisualState {
+    if active {
+        TrayVisualState::Active
+    } else {
+        TrayVisualState::Ready
+    }
+}
+
+fn tray_status_label(snapshot: &BootstrapSnapshotDto, active: bool) -> &'static str {
     match snapshot.proxy_status {
-        ProxyRuntimeStatus::Running if snapshot.active_route_id.is_some() => {
-            TrayVisualState::Normal
-        }
+        ProxyRuntimeStatus::PortConflict
+        | ProxyRuntimeStatus::Error
+        | ProxyRuntimeStatus::DatabaseError => "代理故障",
+        ProxyRuntimeStatus::Running if active => "处理中",
+        ProxyRuntimeStatus::Running if snapshot.active_route_id.is_some() => "正常",
         ProxyRuntimeStatus::Running
         | ProxyRuntimeStatus::Starting
         | ProxyRuntimeStatus::Stopped
-        | ProxyRuntimeStatus::ShuttingDown => TrayVisualState::Attention,
-        ProxyRuntimeStatus::PortConflict
-        | ProxyRuntimeStatus::Error
-        | ProxyRuntimeStatus::DatabaseError => TrayVisualState::Failure,
+        | ProxyRuntimeStatus::ShuttingDown => "需要处理",
     }
 }
 
@@ -2005,7 +2001,7 @@ mod tests {
     }
 
     #[test]
-    fn tray_visual_distinguishes_normal_attention_and_failure() {
+    fn tray_visual_depends_only_on_logical_request_activity() {
         let snapshot = |proxy_status, active_route_id| BootstrapSnapshotDto {
             revision: 0,
             routes: Vec::new(),
@@ -2015,17 +2011,25 @@ mod tests {
             lifecycle: router_core::lifecycle::AppLifecycleSnapshot::default(),
             appearance_preference: router_core::domain::AppearancePreference::System,
         };
+        for state in [
+            snapshot(ProxyRuntimeStatus::Running, Some(RouteId::new())),
+            snapshot(ProxyRuntimeStatus::Running, None),
+            snapshot(ProxyRuntimeStatus::PortConflict, None),
+        ] {
+            assert_eq!(tray_visual_state(false), TrayVisualState::Ready);
+            assert_eq!(tray_visual_state(true), TrayVisualState::Active);
+            assert_ne!(tray_status_label(&state, false), "处理中");
+        }
         assert_eq!(
-            tray_visual_state(&snapshot(ProxyRuntimeStatus::Running, Some(RouteId::new()))),
-            TrayVisualState::Normal
+            tray_status_label(
+                &snapshot(ProxyRuntimeStatus::Running, Some(RouteId::new())),
+                true,
+            ),
+            "处理中"
         );
         assert_eq!(
-            tray_visual_state(&snapshot(ProxyRuntimeStatus::Running, None)),
-            TrayVisualState::Attention
-        );
-        assert_eq!(
-            tray_visual_state(&snapshot(ProxyRuntimeStatus::PortConflict, None)),
-            TrayVisualState::Failure
+            tray_status_label(&snapshot(ProxyRuntimeStatus::PortConflict, None), true),
+            "代理故障"
         );
     }
 
@@ -2043,12 +2047,17 @@ mod tests {
             Some("USD"),
         );
 
-        let production = tray_presentation("AI Router", &snapshot, Some(&balance), false);
-        let isolated = tray_presentation("AI Router QA", &snapshot, Some(&balance), true);
+        let production = tray_presentation("AI Router", &snapshot, Some(&balance), false, false);
+        let isolated = tray_presentation("AI Router QA", &snapshot, Some(&balance), true, false);
 
         assert_eq!(production.title, "INPUT($24.80)");
         assert_eq!(isolated.title, "QA · INPUT($24.80)");
         assert!(production.tooltip.contains("正常 · INPUT · 余额 $24.80"));
+
+        let active = tray_presentation("AI Router", &snapshot, Some(&balance), false, true);
+        assert_eq!(active.title, production.title);
+        assert!(active.tooltip.contains("处理中 · INPUT · 余额 $24.80"));
+        assert_eq!(active.visual_state, TrayVisualState::Active);
     }
 
     #[test]
@@ -2065,8 +2074,8 @@ mod tests {
             Some("$"),
         );
 
-        let refreshing = tray_presentation("AI Router", &snapshot, Some(&balance), false);
-        let unavailable = tray_presentation("AI Router", &snapshot, None, false);
+        let refreshing = tray_presentation("AI Router", &snapshot, Some(&balance), false, false);
+        let unavailable = tray_presentation("AI Router", &snapshot, None, false, false);
 
         assert_eq!(refreshing.title, "INPUT($9.50)");
         assert!(refreshing.tooltip.contains("正在刷新"));
@@ -2086,7 +2095,8 @@ mod tests {
             (BalanceDisplayStatus::LastGood, "上次余额"),
         ] {
             let balance = tray_balance(route_id.clone(), status, Some(12.5), Some("$"));
-            let presentation = tray_presentation("AI Router", &snapshot, Some(&balance), false);
+            let presentation =
+                tray_presentation("AI Router", &snapshot, Some(&balance), false, false);
 
             assert_eq!(presentation.title, "INPUT($12.50)");
             assert!(presentation.tooltip.contains(expected_tooltip));
@@ -2099,7 +2109,7 @@ mod tests {
             Some("$"),
         );
         failed.value = None;
-        let presentation = tray_presentation("AI Router", &snapshot, Some(&failed), false);
+        let presentation = tray_presentation("AI Router", &snapshot, Some(&failed), false, false);
 
         assert_eq!(presentation.title, "INPUT(--)");
         assert!(presentation.tooltip.contains("余额查询失败"));
@@ -2109,13 +2119,13 @@ mod tests {
     fn tray_title_uses_no_route_fallback_and_keeps_proxy_failure_in_tooltip() {
         let empty = tray_snapshot(None, ProxyRuntimeStatus::Stopped);
         assert_eq!(
-            tray_presentation("AI Router", &empty, None, false).title,
+            tray_presentation("AI Router", &empty, None, false, false).title,
             "无中转(--)"
         );
 
         let route_id = RouteId::new();
         let failed = tray_snapshot(Some((route_id, "INPUT")), ProxyRuntimeStatus::PortConflict);
-        let presentation = tray_presentation("AI Router", &failed, None, false);
+        let presentation = tray_presentation("AI Router", &failed, None, false, true);
         assert_eq!(presentation.title, "INPUT(--)");
         assert!(presentation.tooltip.contains("代理故障"));
     }
@@ -2134,7 +2144,8 @@ mod tests {
             Some("USD"),
         );
 
-        let presentation = tray_presentation("AI Router", &snapshot, Some(&other_balance), false);
+        let presentation =
+            tray_presentation("AI Router", &snapshot, Some(&other_balance), false, false);
 
         assert_eq!(presentation.title, "INPUT(--)");
         assert!(presentation.tooltip.contains("尚无余额"));
@@ -2189,7 +2200,7 @@ mod tests {
             next_due_at_ms: None,
             error: None,
         };
-        let presentation = tray_presentation("AI Router", &snapshot, Some(&balance), false);
+        let presentation = tray_presentation("AI Router", &snapshot, Some(&balance), false, false);
 
         assert!(presentation.title.contains('…'));
         assert!(
@@ -2200,17 +2211,42 @@ mod tests {
     }
 
     #[test]
-    fn stable_tray_icon_has_real_transparency() {
-        let image = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-route.png"))
-            .expect("valid tray PNG");
-        assert_eq!((image.width(), image.height()), (44, 44));
-        assert!(image.rgba().chunks_exact(4).any(|pixel| pixel[3] == 0));
-        assert!(image.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
-        assert!(
-            image
-                .rgba()
-                .chunks_exact(4)
-                .all(|pixel| pixel[3] == 0 || pixel[..3] == [0, 0, 0])
-        );
+    fn tray_state_icons_are_transparent_monochrome_templates() {
+        for (name, bytes) in [
+            (
+                "ready",
+                include_bytes!("../icons/tray-route.png").as_slice(),
+            ),
+            (
+                "active-static",
+                include_bytes!("../icons/tray-active-static.png").as_slice(),
+            ),
+            (
+                "active-a",
+                include_bytes!("../icons/tray-active-a.png").as_slice(),
+            ),
+            (
+                "active-b",
+                include_bytes!("../icons/tray-active-b.png").as_slice(),
+            ),
+        ] {
+            let image = tauri::image::Image::from_bytes(bytes).expect("valid tray PNG");
+            assert_eq!((image.width(), image.height()), (44, 44));
+            assert!(
+                image.rgba().chunks_exact(4).any(|pixel| pixel[3] == 0),
+                "{name} needs a fully transparent pixel"
+            );
+            assert!(
+                image.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "{name} needs a visible pixel"
+            );
+            assert!(
+                image
+                    .rgba()
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[3] == 0 || pixel[..3] == [0, 0, 0]),
+                "{name} visible pixels must be black"
+            );
+        }
     }
 }
