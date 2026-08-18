@@ -25,7 +25,7 @@ afterEach(async () => {
 describe("tracked public source security gate", () => {
   it("accepts the repository public-source projection", async () => {
     await expect(checkRepositorySecurity()).resolves.toMatchObject({
-      declaredAssets: 15,
+      declaredAssets: 21,
     });
   });
 

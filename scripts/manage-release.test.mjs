@@ -447,7 +447,12 @@ describe("release metadata and inventory", () => {
     ["TODO placeholder", "# AI Router v1.2.3\n\n## 重点更新\n\n- TODO: 补充说明"],
     [
       "local path",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- 调试文件位于 /Users/example/private.log",
+      `# AI Router v1.2.3\n\n## 重点更新\n\n- 调试文件位于 ${[
+        "",
+        "Users",
+        "example",
+        "private.log",
+      ].join("/")}`,
     ],
     [
       "empty optional section",
