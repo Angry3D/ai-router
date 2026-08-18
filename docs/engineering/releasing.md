@@ -37,16 +37,30 @@ pnpm version:check
 repository、`GITHUB_REF`、tag、应用版本、checkout `HEAD` 和 tag commit；prerelease、build metadata、
 移动 tag 或版本漂移全部失败关闭。
 
+## 版本说明
+
+每个候选稳定版本必须在创建 tag 前提交 `release-notes/v<version>.md`。文件使用严格结构：
+`# AI Router v<version>`、包含一到三条项目符号的 `重点更新`，以及可选的 `问题修复` 和
+`注意事项`。工具或 AI 可以生成初稿，但发布负责人必须核对用户可见变化、兼容性与操作提示，
+并在普通 pull request 中审核最终内容。
+
+该文件是 GitHub Release 正文和 `latest.json.notes` 的唯一内容来源。缺失、版本不符、占位内容、
+重复项目、非法 Markdown 或超出边界都会使发布失败。完整格式和检查清单见
+[`release-notes/README.md`](../../release-notes/README.md)。不要在 GitHub UI 或生成后的
+`latest.json` 中另行维护版本说明。
+
 ## Workflow 顺序
 
-1. `release:validate` 验证版本、tag、commit 与 updater 公钥形状。
-2. `release:draft` 创建 draft；重跑只清理同 commit 的 unpublished draft，已发布 Release 会硬失败。
+1. `release:validate` 验证版本、tag、commit、审核版本说明与 updater 公钥形状。
+2. `release:draft` 用审核版本说明创建 draft；重跑会修复同 commit 的正文并清理资产，已发布
+   Release 会硬失败。
 3. `release:build` 用临时 `0600` 配置注入公钥，生成 ad-hoc-signed DMG 和 Tauri updater 归档/签名。
 4. `release:prepare` 检查 app 与 DMG 中的 identifier、版本、macOS 13、arm64、`Signature=adhoc`、无
    Developer ID authority，验证 updater 签名，生成 `latest.json` 与 `SHA256SUMS`，上传后再下载逐字节
    比较 draft 资产。
 5. 固定 SHA 的 GitHub attestation action 为完整资产目录生成 provenance。
-6. `release:publish` 再次回读并验证 draft，最后一次性切换为 published。
+6. `release:publish` 再次回读并验证 draft 资产、manifest 说明和 Release 正文，最后一次性切换为
+   published。
 
 基础 `tauri.conf.json`、QA 配置和 `pnpm tauri:source:build` 都不创建 updater 资产，也不消费 release
 secret。只有临时合并的 `tauri.release.conf.json` 启用 DMG、updater artifact 和 `signingIdentity: "-"`。

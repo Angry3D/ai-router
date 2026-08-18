@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env,
     sync::{
         Arc, Mutex,
@@ -9,8 +10,8 @@ use std::{
 
 use router_core::{
     app_api::{
-        ApplicationUpdateFailureDto, ApplicationUpdateOperationDto, ApplicationUpdateProgressDto,
-        ApplicationUpdateReleaseDto, ApplicationUpdateSnapshotDto,
+        ApplicationUpdateFailureDto, ApplicationUpdateNotesDto, ApplicationUpdateOperationDto,
+        ApplicationUpdateProgressDto, ApplicationUpdateReleaseDto, ApplicationUpdateSnapshotDto,
     },
     state::{AppRuntimeState, IpcErrorDto, StateArea},
 };
@@ -31,6 +32,8 @@ const UPDATER_PUBLIC_KEY_PLACEHOLDER: &str = "__AI_ROUTER_UPDATER_PUBLIC_KEY__";
 const MAX_VERSION_CHARS: usize = 128;
 const MAX_RELEASE_NOTES_CHARS: usize = 4_000;
 const MAX_RELEASE_NOTES_LINES: usize = 80;
+const MAX_RELEASE_NOTES_ITEMS: usize = 20;
+const MAX_RELEASE_NOTE_ITEM_CHARS: usize = 240;
 const MAX_SIGNATURE_CHARS: usize = 16_384;
 const MAX_QA_PUBLIC_KEY_CHARS: usize = 8_192;
 const MAX_PROGRESS_BYTES: u64 = 9_007_199_254_740_991;
@@ -421,9 +424,11 @@ fn normalize_release_fields(
     if version == current {
         return Ok(NormalizedRelease::Current);
     }
+    let (notes, legacy_notes) = normalize_update_notes(notes, &version.to_string())?;
     Ok(NormalizedRelease::Available(ApplicationUpdateReleaseDto {
         version: version.to_string(),
-        notes: normalize_notes(notes),
+        notes,
+        legacy_notes,
         release_url: format!(
             "{CANONICAL_RELEASE_ORIGIN}{CANONICAL_REPOSITORY_PATH}/releases/tag/v{version}"
         ),
@@ -508,6 +513,104 @@ fn normalize_notes(notes: &str) -> String {
         }
     }
     normalized
+}
+
+fn normalize_update_notes(
+    raw_notes: &str,
+    version: &str,
+) -> Result<(Option<ApplicationUpdateNotesDto>, Option<String>), ApplicationUpdateFailureDto> {
+    let normalized_newlines = raw_notes.replace("\r\n", "\n");
+    let structured = normalized_newlines.starts_with("# AI Router v");
+    if structured
+        && (normalized_newlines.chars().count() > MAX_RELEASE_NOTES_CHARS
+            || normalized_newlines.lines().count() > MAX_RELEASE_NOTES_LINES
+            || normalized_newlines
+                .chars()
+                .any(|character| character.is_control() && character != '\n'))
+    {
+        return Err(metadata_failure());
+    }
+    let normalized = normalize_notes(&normalized_newlines).trim().to_owned();
+    if !structured {
+        return Ok((None, (!normalized.is_empty()).then_some(normalized)));
+    }
+    parse_structured_notes(&normalized, version).map(|notes| (Some(notes), None))
+}
+
+fn parse_structured_notes(
+    notes: &str,
+    version: &str,
+) -> Result<ApplicationUpdateNotesDto, ApplicationUpdateFailureDto> {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Section {
+        Highlights,
+        Fixes,
+        Notices,
+    }
+
+    let mut lines = notes.lines();
+    if lines.next() != Some(format!("# AI Router v{version}").as_str()) {
+        return Err(metadata_failure());
+    }
+    let mut result = ApplicationUpdateNotesDto {
+        highlights: Vec::new(),
+        fixes: Vec::new(),
+        notices: Vec::new(),
+    };
+    let mut section = None;
+    let mut last_section_index = 0_usize;
+    let mut seen_sections = HashSet::new();
+    let mut seen_items = HashSet::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("## ") {
+            let (next, index) = match heading {
+                "重点更新" => (Section::Highlights, 1),
+                "问题修复" => (Section::Fixes, 2),
+                "注意事项" => (Section::Notices, 3),
+                _ => return Err(metadata_failure()),
+            };
+            if index <= last_section_index || !seen_sections.insert(index) {
+                return Err(metadata_failure());
+            }
+            last_section_index = index;
+            section = Some(next);
+            continue;
+        }
+        let item = line.strip_prefix("- ").ok_or_else(metadata_failure)?;
+        let lowercase_item = item.to_ascii_lowercase();
+        if item.is_empty()
+            || item.trim() != item
+            || item.starts_with(' ')
+            || item.chars().count() > MAX_RELEASE_NOTE_ITEM_CHARS
+            || item
+                .chars()
+                .any(|character| matches!(character, '`' | '*' | '_' | '~' | '<' | '>' | '[' | ']'))
+            || lowercase_item.contains("http://")
+            || lowercase_item.contains("https://")
+            || lowercase_item.contains("www.")
+            || !seen_items.insert(item.to_owned())
+        {
+            return Err(metadata_failure());
+        }
+        match section.ok_or_else(metadata_failure)? {
+            Section::Highlights => result.highlights.push(item.to_owned()),
+            Section::Fixes => result.fixes.push(item.to_owned()),
+            Section::Notices => result.notices.push(item.to_owned()),
+        }
+    }
+    let total = result.highlights.len() + result.fixes.len() + result.notices.len();
+    if result.highlights.is_empty()
+        || result.highlights.len() > 3
+        || total > MAX_RELEASE_NOTES_ITEMS
+        || (seen_sections.contains(&2) && result.fixes.is_empty())
+        || (seen_sections.contains(&3) && result.notices.is_empty())
+    {
+        return Err(metadata_failure());
+    }
+    Ok(result)
 }
 
 fn automatic_check_is_due(last_attempt_ms: Option<i64>, now_ms: i64) -> bool {
@@ -637,7 +740,8 @@ mod tests {
             operation: ApplicationUpdateOperationDto::Checking,
             available: Some(ApplicationUpdateReleaseDto {
                 version: "1.2.4".to_owned(),
-                notes: "notes".to_owned(),
+                notes: None,
+                legacy_notes: Some("notes".to_owned()),
                 release_url: "https://github.com/Angry3D/ai-router/releases/tag/v1.2.4".to_owned(),
             }),
             last_successful_check_at_ms: Some(100),
@@ -747,6 +851,47 @@ mod tests {
         assert!(!normalized.contains('\u{0000}'));
         assert!(normalized.chars().count() <= MAX_RELEASE_NOTES_CHARS);
         assert!(normalized.lines().count() <= MAX_RELEASE_NOTES_LINES);
+    }
+
+    #[test]
+    fn structured_release_notes_are_projected_into_typed_sections() {
+        let notes = "# AI Router v1.2.4\n\n## 重点更新\n\n- 第一项改进\n- 第二项改进\n\n## 问题修复\n\n- 修复一个问题\n\n## 注意事项\n\n- 无需迁移配置";
+        let (structured, legacy) =
+            normalize_update_notes(notes, "1.2.4").expect("structured notes");
+        let structured = structured.expect("typed notes");
+        assert_eq!(structured.highlights, ["第一项改进", "第二项改进"]);
+        assert_eq!(structured.fixes, ["修复一个问题"]);
+        assert_eq!(structured.notices, ["无需迁移配置"]);
+        assert!(legacy.is_none());
+    }
+
+    #[test]
+    fn legacy_notes_remain_bounded_and_malformed_structured_notes_fail_closed() {
+        let (structured, legacy) =
+            normalize_update_notes("旧版本说明", "1.2.4").expect("legacy notes");
+        assert!(structured.is_none());
+        assert_eq!(legacy.as_deref(), Some("旧版本说明"));
+        assert!(
+            normalize_update_notes("# AI Router v1.2.4\n\n## 重点更新\n\n普通段落", "1.2.4")
+                .is_err()
+        );
+        assert!(
+            normalize_update_notes("# AI Router v9.9.9\n\n## 重点更新\n\n- 版本不匹配", "1.2.4")
+                .is_err()
+        );
+        for notes in [
+            "# AI Router v1.2.4\r\n\r\n## 重点更新\r\n\r\n- 合法 CRLF 内容",
+            "# AI Router v1.2.4\n\n## 重点更新\n\n- 合法内容",
+        ] {
+            assert!(normalize_update_notes(notes, "1.2.4").is_ok());
+        }
+        for notes in [
+            "# AI Router v1.2.4\n\n## 重点更新\n\n- 含有\t制表符",
+            "# AI Router v1.2.4\n\n## 重点更新\n\n- **Markdown**",
+            "# AI Router v1.2.4\n\n## 重点更新\n\n- 合法内容\n\n## 问题修复",
+        ] {
+            assert!(normalize_update_notes(notes, "1.2.4").is_err());
+        }
     }
 
     #[test]

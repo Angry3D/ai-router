@@ -2181,7 +2181,7 @@ body[data-view="settings"] .app-variant-badge {
   display: grid;
   grid-template-columns: var(--settings-label-width) minmax(0, 1fr);
   gap: var(--settings-field-gap);
-  margin: 4px 0 8px;
+  margin: 6px 0 10px;
   font-size: 12px;
   line-height: 18px;
 }
@@ -2190,24 +2190,61 @@ body[data-view="settings"] .app-variant-badge {
   min-width: 0;
 }
 
+.application-update-notes ul,
 .application-update-notes p {
-  display: -webkit-box;
   margin: 0;
-  overflow: hidden;
   color: var(--text-secondary);
   overflow-wrap: anywhere;
+}
+
+.application-update-notes ul {
+  padding-left: 18px;
+}
+
+.application-update-notes li + li {
+  margin-top: 4px;
+}
+
+.application-update-note-groups {
+  display: grid;
+  gap: 12px;
+}
+
+.application-update-note-groups section {
+  margin: 0;
+}
+
+.application-update-note-groups h4 {
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.application-update-notes-legacy p {
   white-space: pre-line;
+}
+
+.application-update-notes-legacy #application-update-legacy-notes {
+  display: -webkit-box;
+  overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 6;
 }
 
-.application-update-notes p.is-expanded {
+.application-update-notes-legacy #application-update-legacy-notes.is-expanded {
   display: block;
+}
+
+.application-update-notes-legacy .application-update-notes-fallback {
+  margin-top: 6px;
+  color: var(--muted);
 }
 
 .application-update-notes-toggle {
   padding: 2px 0;
-  margin-top: 2px;
+  margin-top: 6px;
   color: var(--blue);
   background: transparent;
   border: 0;

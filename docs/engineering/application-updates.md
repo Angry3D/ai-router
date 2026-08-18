@@ -23,9 +23,14 @@ GitHub artifact provenance 不是第六个下载文件，而是 GitHub 对这些
 ## 信任边界
 
 `latest.json` 和下载内容都按不可信远端输入处理。Rust coordinator 只接受 canonical repository、
-`darwin-aarch64`、严格稳定且高于运行版本的 SemVer、canonical 归档 URL、有界纯文本说明和有界签名。
+`darwin-aarch64`、严格稳定且高于运行版本的 SemVer、canonical 归档 URL、有界版本说明和有界签名。
 这些检查决定是否展示更新，不授予安装权限。用户确认下载后，Tauri updater 必须使用 bundle 中的
 项目公钥验证归档签名，验证成功才进入安装。
+
+新版本说明由提交在 `release-notes/v<version>.md` 的审核内容生成。Rust 只解析受限的标题和平铺
+项目符号，并向界面投影 `重点更新`、`问题修复`、`注意事项` 三组数据；React 不解析 Markdown 或
+HTML。设置页默认展示最多三条重点更新，按需展开全部分类项目。旧 manifest 的普通文本仍以有界
+兼容模式展示，并保留 canonical GitHub Release 入口。
 
 自动检查在应用进入 `Running` 60 秒后开始，尝试时间先写入 SQLite，再执行网络请求。跨启动 24 小时
 内不重复自动尝试；未来时间戳按到期处理，恢复点会清除该非关键时间戳。后台失败保持安静。手动检查

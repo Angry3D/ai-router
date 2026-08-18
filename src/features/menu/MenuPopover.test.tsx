@@ -264,7 +264,8 @@ describe("P8 menu interactions", () => {
       operation: "idle",
       available: {
         version: "0.2.0",
-        notes: "Synthetic update",
+        notes: null,
+        legacyNotes: "Synthetic update",
         releaseUrl: "https://github.com/Angry3D/ai-router/releases/tag/v0.2.0",
       },
       lastSuccessfulCheckAtMs: 1_725_000_000_000,
