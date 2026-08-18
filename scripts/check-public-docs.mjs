@@ -23,6 +23,7 @@ const REQUIRED_FILES = [
   "docs/engineering/releasing.md",
   "docs/engineering/verification.md",
   "docs/engineering/github-security-settings.md",
+  "release-notes/README.md",
   ".github/ISSUE_TEMPLATE/bug_report.yml",
   ".github/ISSUE_TEMPLATE/feature_request.yml",
   ".github/ISSUE_TEMPLATE/config.yml",
@@ -266,6 +267,11 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
   }
 
   validateVersionIndependentProjectClaims(files);
+  assertContains(
+    files.get("release-notes/README.md"),
+    "`v<version>.md`",
+    "release-notes/README.md",
+  );
   const readme = files.get("README.md");
   for (const value of [
     "macOS 13",

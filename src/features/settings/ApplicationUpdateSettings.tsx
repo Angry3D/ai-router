@@ -44,7 +44,9 @@ export function ApplicationUpdateSettings({
     null,
   );
   const [actionError, setActionError] = useState<string | null>(null);
-  const [notesExpanded, setNotesExpanded] = useState(false);
+  const [expandedNotesVersion, setExpandedNotesVersion] = useState<
+    string | null
+  >(null);
   const downloadGeneration = useRef(0);
 
   const current =
@@ -70,6 +72,8 @@ export function ApplicationUpdateSettings({
     effectiveOperation === "checking" ||
     effectiveOperation === "downloading" ||
     effectiveOperation === "installing";
+
+  const notesExpanded = expandedNotesVersion === current.available?.version;
 
   const applySnapshot = (next: ApplicationUpdateSnapshotDto) => {
     setLocalResult({ source: snapshot, snapshot: next });
@@ -191,21 +195,81 @@ export function ApplicationUpdateSettings({
 
         {current.available?.notes ? (
           <div className="application-update-notes">
-            <span className="settings-field-label">发行说明</span>
+            <span className="settings-field-label">本次更新</span>
             <div className="application-update-notes-content">
-              <p className={notesExpanded ? "is-expanded" : ""}>
-                {current.available.notes}
-              </p>
-              {current.available.notes.split("\n").length > 6 ||
-              current.available.notes.length > 360 ? (
+              <div id="application-update-release-details">
+                {notesExpanded ? (
+                  <ApplicationUpdateNoteGroups
+                    highlights={current.available.notes.highlights}
+                    fixes={current.available.notes.fixes}
+                    notices={current.available.notes.notices}
+                  />
+                ) : (
+                  <ul className="application-update-notes-summary">
+                    {current.available.notes.highlights.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              {releaseNoteItemCount(current.available.notes) >
+              current.available.notes.highlights.length ? (
                 <button
                   type="button"
                   className="application-update-notes-toggle"
-                  onClick={() => setNotesExpanded((value) => !value)}
+                  aria-expanded={notesExpanded}
+                  aria-controls="application-update-release-details"
+                  onClick={() =>
+                    setExpandedNotesVersion(
+                      notesExpanded
+                        ? null
+                        : (current.available?.version ?? null),
+                    )
+                  }
                 >
-                  {notesExpanded ? "收起发行说明" : "展开发行说明"}
+                  {notesExpanded
+                    ? "收起更新内容"
+                    : `查看全部 ${releaseNoteItemCount(current.available.notes)} 项`}
                 </button>
               ) : null}
+            </div>
+          </div>
+        ) : current.available ? (
+          <div className="application-update-notes application-update-notes-legacy">
+            <span className="settings-field-label">发行说明</span>
+            <div className="application-update-notes-content">
+              {current.available.legacyNotes ? (
+                <>
+                  <p
+                    id="application-update-legacy-notes"
+                    className={notesExpanded ? "is-expanded" : ""}
+                  >
+                    {current.available.legacyNotes}
+                  </p>
+                  {legacyNotesAreExpandable(current.available.legacyNotes) ? (
+                    <button
+                      type="button"
+                      className="application-update-notes-toggle"
+                      aria-expanded={notesExpanded}
+                      aria-controls="application-update-legacy-notes"
+                      onClick={() =>
+                        setExpandedNotesVersion(
+                          notesExpanded
+                            ? null
+                            : (current.available?.version ?? null),
+                        )
+                      }
+                    >
+                      {notesExpanded ? "收起发行说明" : "展开发行说明"}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}
+              <p className="application-update-notes-fallback">
+                {current.available.legacyNotes
+                  ? "此说明来自旧版格式，完整内容请查看 GitHub Release。"
+                  : "此版本未提供可验证的更新摘要，请查看 GitHub Release。"}
+              </p>
             </div>
           </div>
         ) : null}
@@ -277,6 +341,54 @@ export function ApplicationUpdateSettings({
       ) : null}
     </>
   );
+}
+
+type ReleaseNoteGroupsProps = {
+  highlights: string[];
+  fixes: string[];
+  notices: string[];
+};
+
+function ApplicationUpdateNoteGroups({
+  highlights,
+  fixes,
+  notices,
+}: ReleaseNoteGroupsProps) {
+  return (
+    <div className="application-update-note-groups">
+      <ApplicationUpdateNoteGroup heading="重点更新" items={highlights} />
+      <ApplicationUpdateNoteGroup heading="问题修复" items={fixes} />
+      <ApplicationUpdateNoteGroup heading="注意事项" items={notices} />
+    </div>
+  );
+}
+
+function ApplicationUpdateNoteGroup({
+  heading,
+  items,
+}: {
+  heading: string;
+  items: string[];
+}) {
+  if (items.length === 0) return null;
+  return (
+    <section>
+      <h4>{heading}</h4>
+      <ul>
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function releaseNoteItemCount(notes: ReleaseNoteGroupsProps) {
+  return notes.highlights.length + notes.fixes.length + notes.notices.length;
+}
+
+function legacyNotesAreExpandable(notes: string) {
+  return notes.split("\n").length > 6 || notes.length > 360;
 }
 
 function UpdateProgress({

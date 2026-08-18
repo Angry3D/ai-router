@@ -17,8 +17,24 @@ import type {
 
 const previewUpdateAvailable = {
   version: "0.2.0",
-  notes:
-    "新增经过签名校验的应用内更新，并改进菜单栏状态同步。\n修复设置窗口在较小尺寸下的布局问题。",
+  notes: {
+    highlights: [
+      "菜单栏现在会显示代理请求的活动状态。",
+      "应用更新页会在安装前展示本版本的重要变化。",
+      "设置窗口在较小尺寸下保持操作按钮可见。",
+    ],
+    fixes: ["修复部分流式请求结束后活动状态未及时恢复的问题。"],
+    notices: ["本版本无需迁移配置。"],
+  },
+  legacyNotes: null,
+  releaseUrl: "https://github.com/Angry3D/ai-router/releases/tag/v0.2.0",
+};
+
+const previewLegacyUpdateAvailable = {
+  version: "0.2.0",
+  notes: null,
+  legacyNotes:
+    "AI Router v0.2.0 已发布。首次安装请下载 DMG；应用内更新会在安装前验证项目 updater 签名。",
   releaseUrl: "https://github.com/Angry3D/ai-router/releases/tag/v0.2.0",
 };
 
@@ -40,6 +56,12 @@ export function previewApplicationUpdateSnapshot(): ApplicationUpdateSnapshotDto
       return {
         ...base,
         available: previewUpdateAvailable,
+        lastSuccessfulCheckAtMs: previewNow,
+      };
+    case "legacy":
+      return {
+        ...base,
+        available: previewLegacyUpdateAvailable,
         lastSuccessfulCheckAtMs: previewNow,
       };
     case "downloading":

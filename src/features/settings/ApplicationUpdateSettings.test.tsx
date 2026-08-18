@@ -40,7 +40,12 @@ const available: ApplicationUpdateSnapshotDto = {
   operation: "idle",
   available: {
     version: "0.2.0",
-    notes: "第一项改进\n第二项改进",
+    notes: {
+      highlights: ["第一项改进", "第二项改进"],
+      fixes: ["修复一个问题"],
+      notices: ["无需迁移配置"],
+    },
+    legacyNotes: null,
     releaseUrl: "https://github.com/Angry3D/ai-router/releases/tag/v0.2.0",
   },
   lastSuccessfulCheckAtMs: 1_725_000_000_000,
@@ -112,9 +117,93 @@ describe("ApplicationUpdateSettings", () => {
     );
     expect(screen.getByText("0.1.0")).toBeInTheDocument();
     expect(screen.getByText("0.2.0")).toBeInTheDocument();
-    expect(screen.getByText(/第一项改进/u)).toHaveTextContent(
-      "第一项改进 第二项改进",
-    );
+    expect(screen.getByText("第一项改进")).toBeInTheDocument();
+    expect(screen.getByText("第二项改进")).toBeInTheDocument();
+    expect(screen.queryByText("修复一个问题")).not.toBeInTheDocument();
+  });
+
+  it("expands the exact categorized release content without moving focus", () => {
+    renderUpdate(available);
+
+    const toggle = screen.getByRole("button", { name: "查看全部 4 项" });
+    toggle.focus();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("heading", { name: "重点更新" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "问题修复" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "注意事项" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("修复一个问题")).toBeInTheDocument();
+    expect(screen.getByText("无需迁移配置")).toBeInTheDocument();
+    expect(toggle).toHaveTextContent("收起更新内容");
+  });
+
+  it("shows one to three highlights directly when there is no additional content", () => {
+    renderUpdate({
+      ...available,
+      available: {
+        ...available.available!,
+        notes: {
+          highlights: ["唯一重点更新"],
+          fixes: [],
+          notices: [],
+        },
+      },
+    });
+
+    expect(screen.getByText("唯一重点更新")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /查看全部/u }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows bounded legacy notes with the canonical full-content prompt", () => {
+    renderUpdate({
+      ...available,
+      available: {
+        ...available.available!,
+        notes: null,
+        legacyNotes: "旧版本的普通文本说明",
+      },
+    });
+
+    expect(screen.getByText("旧版本的普通文本说明")).toBeInTheDocument();
+    expect(screen.getByText(/旧版格式.*GitHub Release/u)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /查看全部/u }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps long legacy notes collapsed until the existing detail control is used", () => {
+    renderUpdate({
+      ...available,
+      available: {
+        ...available.available!,
+        notes: null,
+        legacyNotes: Array.from(
+          { length: 7 },
+          (_, index) => `旧版说明第 ${index + 1} 行`,
+        ).join("\n"),
+      },
+    });
+
+    const notes = screen.getByText(/旧版说明第 1 行/u);
+    const toggle = screen.getByRole("button", { name: "展开发行说明" });
+    expect(notes).not.toHaveClass("is-expanded");
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveTextContent("收起发行说明");
+    expect(notes).toHaveClass("is-expanded");
   });
 
   it("requires cancel-first confirmation before download and consumes progress", async () => {
@@ -172,9 +261,7 @@ describe("ApplicationUpdateSettings", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent("暂时无法连接更新服务");
     expect(screen.getByText("0.2.0")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "重试下载" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重试下载" })).toBeEnabled();
     fireEvent.click(
       screen.getByRole("button", { name: "查看 GitHub Release" }),
     );
@@ -216,7 +303,9 @@ describe("ApplicationUpdateSettings", () => {
     expect(
       screen.getByRole("progressbar", { name: "正在验证并安装" }),
     ).not.toHaveAttribute("aria-valuenow");
-    expect(screen.getByText("正在验证并安装", { selector: "p" })).toBeInTheDocument();
+    expect(
+      screen.getByText("正在验证并安装", { selector: "p" }),
+    ).toBeInTheDocument();
   });
 
   it("ignores progress from an older completed download operation", async () => {

@@ -933,9 +933,19 @@ pub enum ApplicationUpdateOperationDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
+pub struct ApplicationUpdateNotesDto {
+    pub highlights: Vec<String>,
+    pub fixes: Vec<String>,
+    pub notices: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
 pub struct ApplicationUpdateReleaseDto {
     pub version: String,
-    pub notes: String,
+    pub notes: Option<ApplicationUpdateNotesDto>,
+    pub legacy_notes: Option<String>,
     pub release_url: String,
 }
 

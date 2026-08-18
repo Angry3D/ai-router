@@ -3,6 +3,7 @@ export type { AppLifecyclePhase } from "./AppLifecyclePhase";
 export type { AppLifecycleSnapshot } from "./AppLifecycleSnapshot";
 export type { AppearancePreference } from "./AppearancePreference";
 export type { ApplicationUpdateFailureDto } from "./ApplicationUpdateFailureDto";
+export type { ApplicationUpdateNotesDto } from "./ApplicationUpdateNotesDto";
 export type { ApplicationUpdateOperationDto } from "./ApplicationUpdateOperationDto";
 export type { ApplicationUpdateProgressDto } from "./ApplicationUpdateProgressDto";
 export type { ApplicationUpdateReleaseDto } from "./ApplicationUpdateReleaseDto";

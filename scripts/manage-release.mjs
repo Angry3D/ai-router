@@ -33,6 +33,15 @@ const DRAFT_DOWNLOAD_DIRECTORY = "release-draft-download";
 const MAX_PUBLIC_KEY_LENGTH = 8_192;
 const MAX_PRIVATE_KEY_LENGTH = 65_536;
 const MAX_SIGNATURE_LENGTH = 16_384;
+const MAX_RELEASE_NOTE_ITEM_CHARS = 240;
+const MAX_RELEASE_NOTE_ITEMS = 20;
+const MAX_RELEASE_NOTE_LINES = 80;
+const MAX_RELEASE_NOTE_CHARS = 4_000;
+const RELEASE_NOTE_SECTIONS = new Map([
+  ["重点更新", "highlights"],
+  ["问题修复", "fixes"],
+  ["注意事项", "notices"],
+]);
 
 export class ReleaseError extends Error {}
 
@@ -155,9 +164,14 @@ function checksumAssetNames(version) {
   return expectedAssetNames(version).slice(0, 4);
 }
 
-export function releaseNotes(version) {
+export function releaseNotes(version, document) {
+  return releaseNotesFromDocument(version, document);
+}
+
+function releaseNotesFromDocument(version, document) {
+  const authored = parseReleaseNotes(document?.markdown, version).markdown;
   return [
-    `AI Router v${version}`,
+    authored,
     "",
     "首次安装请下载 DMG。该应用使用 ad-hoc 签名，未经 Apple Developer ID 验证或公证。",
     "已安装支持应用内更新的版本可在“设置 -> 系统 -> 应用更新”中检查并确认安装。",
@@ -166,7 +180,163 @@ export function releaseNotes(version) {
   ].join("\n");
 }
 
-export function createLatestManifest(version, publicDate, signature) {
+function boundedReleaseError(message) {
+  fail(`Release notes are invalid: ${message}`);
+}
+
+function normalizeNoteItem(value) {
+  if (
+    [...value].some((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint !== undefined && (codePoint < 32 || codePoint === 127);
+    })
+  ) {
+    boundedReleaseError("items must be short plain text without markup.");
+  }
+  const item = value.trim().replace(/ +/g, " ");
+  if (
+    item.length === 0 ||
+    [...item].length > MAX_RELEASE_NOTE_ITEM_CHARS ||
+    ["`", "*", "_", "~", "<", ">", "[", "]"].some((marker) =>
+      item.includes(marker),
+    ) ||
+    /https?:\/\/|www\./iu.test(item)
+  ) {
+    boundedReleaseError("items must be short plain text without markup.");
+  }
+  return item;
+}
+
+export function parseReleaseNotes(markdown, version) {
+  if (typeof markdown !== "string" || markdown.length === 0) {
+    boundedReleaseError("the version file is missing or empty.");
+  }
+  const normalized = markdown.replace(/\r\n?/g, "\n").trim();
+  if (
+    [...normalized].length > MAX_RELEASE_NOTE_CHARS ||
+    normalized.split("\n").length > MAX_RELEASE_NOTE_LINES
+  ) {
+    boundedReleaseError("the document exceeds its size limit.");
+  }
+  const lines = normalized.split("\n");
+  if (lines.shift() !== `# AI Router v${version}`) {
+    boundedReleaseError("the version heading does not match the release.");
+  }
+  const sections = { highlights: [], fixes: [], notices: [] };
+  let current = null;
+  const seenSections = new Set();
+  let lastSectionIndex = -1;
+  for (const line of lines) {
+    if (line === "") continue;
+    if (line.startsWith("## ")) {
+      const heading = line.slice(3);
+      current = RELEASE_NOTE_SECTIONS.get(heading);
+      if (!current)
+        boundedReleaseError("only supported section headings are allowed.");
+      const sectionIndex = [...RELEASE_NOTE_SECTIONS.keys()].indexOf(heading);
+      if (seenSections.has(current) || sectionIndex <= lastSectionIndex) {
+        boundedReleaseError(
+          "sections must be unique and in the documented order.",
+        );
+      }
+      seenSections.add(current);
+      lastSectionIndex = sectionIndex;
+      continue;
+    }
+    if (!current || !line.startsWith("- ") || line.startsWith("-  ")) {
+      boundedReleaseError("sections must contain flat unordered-list items.");
+    }
+    sections[current].push(normalizeNoteItem(line.slice(2)));
+  }
+  if (sections.highlights.length < 1 || sections.highlights.length > 3) {
+    boundedReleaseError("重点更新 must contain one to three items.");
+  }
+  const items = [
+    ...sections.highlights,
+    ...sections.fixes,
+    ...sections.notices,
+  ];
+  if (
+    items.length > MAX_RELEASE_NOTE_ITEMS ||
+    new Set(items).size !== items.length
+  ) {
+    boundedReleaseError("items must be unique and within the item limit.");
+  }
+  if (
+    [...seenSections].some(
+      (section) => section !== "highlights" && sections[section].length === 0,
+    )
+  ) {
+    boundedReleaseError("included sections must contain at least one item.");
+  }
+  if (
+    items.some((item) =>
+      /^(?:todo|tbd|placeholder|待补充|待定|稍后补充|待完善)(?:$|\s|[:：.!。！])/iu.test(
+        item,
+      ),
+    )
+  ) {
+    boundedReleaseError("placeholder content is not allowed.");
+  }
+  if (
+    items.some((item) =>
+      /AI_ROUTER_|TAURI_SIGNING_|PRIVATE KEY|Authorization:|Bearer\s+\S+|sk-[a-z0-9_-]{12,}|file:\/\/|\/Users\/|\/home\/|[a-z]:\\Users\\/iu.test(
+        item,
+      ),
+    )
+  ) {
+    boundedReleaseError("secret-like or local-path content is not allowed.");
+  }
+  const genericOnly = items.every((item) =>
+    /^(?:AI Router v\d+\.\d+\.\d+ (?:已发布|released)|首次安装.*DMG|.*updater.*签名|.*更新.*签名)/iu.test(
+      item,
+    ),
+  );
+  if (genericOnly) {
+    boundedReleaseError("generic placeholder content is not sufficient.");
+  }
+  const renderSection = (heading, values) =>
+    values.length > 0
+      ? [`## ${heading}`, ...values.map((item) => `- ${item}`)]
+      : [];
+  const canonical = [
+    `# AI Router v${version}`,
+    "",
+    ...renderSection("重点更新", sections.highlights),
+    ...(sections.fixes.length
+      ? ["", ...renderSection("问题修复", sections.fixes)]
+      : []),
+    ...(sections.notices.length
+      ? ["", ...renderSection("注意事项", sections.notices)]
+      : []),
+  ].join("\n");
+  return { ...sections, markdown: canonical };
+}
+
+export async function loadReleaseNotes(root, version) {
+  const parsedVersion = semver.parse(version, { loose: false });
+  if (
+    !parsedVersion ||
+    parsedVersion.version !== version ||
+    parsedVersion.prerelease.length > 0 ||
+    parsedVersion.build.length > 0
+  ) {
+    boundedReleaseError(
+      "the requested version is not a canonical stable SemVer.",
+    );
+  }
+  const path = resolve(root, "release-notes", `v${version}.md`);
+  let markdown;
+  try {
+    markdown = await readFile(path, "utf8");
+  } catch {
+    boundedReleaseError(`missing reviewed file for v${version}.`);
+  }
+  return parseReleaseNotes(markdown, version);
+}
+
+export function createLatestManifest(version, publicDate, signature, document) {
+  const authoredNotes = parseReleaseNotes(document?.markdown, version).markdown;
   let normalizedPublicDate;
   try {
     normalizedPublicDate = new Date(publicDate).toISOString();
@@ -187,7 +357,7 @@ export function createLatestManifest(version, publicDate, signature) {
   strictBase64(signature, "The updater archive signature");
   return {
     version,
-    notes: `AI Router v${version} 已发布。首次安装请下载 DMG；应用内更新会在安装前验证项目 updater 签名。`,
+    notes: authoredNotes,
     pub_date: publicDate,
     platforms: {
       "darwin-aarch64": {
@@ -303,7 +473,11 @@ function exactKeys(value, expected, label) {
   }
 }
 
-export async function verifyReleaseDirectory(directory, version) {
+export async function verifyReleaseDirectory(
+  directory,
+  version,
+  expectedDocument = null,
+) {
   const expected = expectedAssetNames(version);
   const entries = (await readdir(directory)).sort();
   const wanted = [...expected].sort();
@@ -360,6 +534,9 @@ export async function verifyReleaseDirectory(directory, version) {
       `https://github.com/${REPOSITORY}/releases/download/v${version}/AI.Router.app.tar.gz`
   ) {
     fail("latest.json does not match the canonical release assets.");
+  }
+  if (expectedDocument && manifest.notes !== expectedDocument.markdown) {
+    fail("latest.json release notes do not match the reviewed source.");
   }
 
   const checksumLines = (await readFile(join(directory, "SHA256SUMS"), "utf8"))
@@ -505,10 +682,12 @@ async function stageReleaseArtifacts(
     })
   ).stdout.trim();
   const publicDate = new Date(commitDate).toISOString();
+  const notes = await loadReleaseNotes(root, identity.version);
   const manifest = createLatestManifest(
     identity.version,
     publicDate,
     signature,
+    notes,
   );
   await writeFile(
     join(directory, "latest.json"),
@@ -524,7 +703,7 @@ async function stageReleaseArtifacts(
     `${checksumLines.join("\n")}\n`,
     "utf8",
   );
-  await verifyReleaseDirectory(directory, identity.version);
+  await verifyReleaseDirectory(directory, identity.version, notes);
   await runner(
     "cargo",
     [
@@ -553,7 +732,7 @@ async function readDraft(identity, runner = execute) {
       "--repo",
       identity.repository,
       "--json",
-      "isDraft,tagName,targetCommitish,assets",
+      "isDraft,tagName,targetCommitish,assets,body",
     ],
     { allowFailure: true },
   );
@@ -582,7 +761,14 @@ export function validateRepairableDraft(release, identity) {
   return release;
 }
 
-async function ensureEmptyDraft(identity, runner = execute) {
+export function validateDraftBody(release, expectedBody) {
+  if (release?.body !== expectedBody) {
+    fail("The draft release body does not match the reviewed release notes.");
+  }
+}
+
+async function ensureEmptyDraft(identity, document, runner = execute) {
+  const expectedBody = releaseNotesFromDocument(identity.version, document);
   let release = await readDraft(identity, runner);
   if (!release) {
     await runner(
@@ -600,13 +786,31 @@ async function ensureEmptyDraft(identity, runner = execute) {
         "--title",
         `AI Router ${identity.version}`,
         "--notes",
-        releaseNotes(identity.version),
+        expectedBody,
       ],
       {},
     );
     release = await readDraft(identity, runner);
   }
   if (!release) fail("GitHub did not create the draft release.");
+  if (release.body !== expectedBody) {
+    await runner(
+      "gh",
+      [
+        "release",
+        "edit",
+        identity.tag,
+        "--repo",
+        identity.repository,
+        "--notes",
+        expectedBody,
+      ],
+      {},
+    );
+    release = await readDraft(identity, runner);
+    if (!release) fail("GitHub did not retain the repaired draft release.");
+  }
+  validateDraftBody(release, expectedBody);
   for (const asset of release.assets) {
     if (typeof asset?.name !== "string" || asset.name.length > 256) {
       fail("The draft contains an invalid asset name.");
@@ -658,8 +862,13 @@ export function validateRemoteAssetInventory(assets, version) {
 }
 
 async function verifyRemoteDraft(root, identity, runner = execute) {
+  const document = await loadReleaseNotes(root, identity.version);
   const release = await readDraft(identity, runner);
   if (!release) fail("The draft release is missing.");
+  validateDraftBody(
+    release,
+    releaseNotesFromDocument(identity.version, document),
+  );
   validateRemoteAssetInventory(release.assets, identity.version);
   const downloadDirectory = generatedDirectory(root, DRAFT_DOWNLOAD_DIRECTORY);
   await rm(downloadDirectory, { force: true, recursive: true });
@@ -677,7 +886,7 @@ async function verifyRemoteDraft(root, identity, runner = execute) {
     ],
     {},
   );
-  await verifyReleaseDirectory(downloadDirectory, identity.version);
+  await verifyReleaseDirectory(downloadDirectory, identity.version, document);
   await compareDirectories(
     generatedDirectory(root, RELEASE_DIRECTORY),
     downloadDirectory,
@@ -716,7 +925,8 @@ export async function buildRelease(
   environment = process.env,
   { runBuildImpl = runBuild, runner = execute } = {},
 ) {
-  await releaseContext(root, environment, runner);
+  const identity = await releaseContext(root, environment, runner);
+  await loadReleaseNotes(root, identity.version);
   const publicKey = validateUpdaterPublicKey(environment[PUBLIC_KEY_ENV]);
   validatePrivateSigningEnvironment(environment);
   const template = await readFile(
@@ -744,13 +954,15 @@ export async function buildRelease(
 }
 
 async function validateCommand(root, environment, runner) {
-  await releaseContext(root, environment, runner);
+  const identity = await releaseContext(root, environment, runner);
+  await loadReleaseNotes(root, identity.version);
   validateUpdaterPublicKey(environment[PUBLIC_KEY_ENV]);
 }
 
 async function draftCommand(root, environment, runner) {
   const identity = await releaseContext(root, environment, runner);
-  await ensureEmptyDraft(identity, runner);
+  const document = await loadReleaseNotes(root, identity.version);
+  await ensureEmptyDraft(identity, document, runner);
 }
 
 async function prepareCommand(root, environment, runner) {

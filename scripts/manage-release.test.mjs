@@ -8,10 +8,13 @@ import {
   createLatestManifest,
   expectedAssetNames,
   inspectAppBundle,
+  loadReleaseNotes,
+  parseReleaseNotes,
   ReleaseError,
   releaseNotes,
   renderReleaseConfig,
   uploadPreparedDraft,
+  validateDraftBody,
   validateReleaseIdentity,
   validateRemoteAssetInventory,
   validateRepairableDraft,
@@ -32,6 +35,13 @@ function digest(content) {
   return createHash("sha256").update(content).digest("hex");
 }
 
+function releaseDocument(version = "1.2.3") {
+  return parseReleaseNotes(
+    `# AI Router v${version}\n\n## 重点更新\n\n- 新增可审核的版本说明。`,
+    version,
+  );
+}
+
 async function releaseFixture(version = "1.2.3") {
   const root = await mkdtemp(join(tmpdir(), "ai-router-release-"));
   temporaryRoots.push(root);
@@ -48,10 +58,12 @@ async function releaseFixture(version = "1.2.3") {
   for (const [name, bytes] of content) {
     await writeFile(join(root, name), bytes);
   }
+  const document = releaseDocument(version);
   const manifest = createLatestManifest(
     version,
     "2026-08-16T10:00:00.000Z",
     signature,
+    document,
   );
   const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
   content.set("latest.json", manifestBytes);
@@ -61,7 +73,7 @@ async function releaseFixture(version = "1.2.3") {
     .map((name) => `${digest(content.get(name))}  ${name}`)
     .join("\n");
   await writeFile(join(root, "SHA256SUMS"), `${checksums}\n`);
-  return { names, root, version };
+  return { document, names, root, version };
 }
 
 afterEach(async () => {
@@ -331,9 +343,137 @@ describe("release signing configuration", () => {
 
 describe("release metadata and inventory", () => {
   it("produces user-facing DMG guidance without claiming Apple verification", () => {
-    const notes = releaseNotes("1.2.3");
+    const notes = releaseNotes("1.2.3", releaseDocument());
     expect(notes).toContain("首次安装请下载 DMG");
     expect(notes).toContain("未经 Apple Developer ID 验证或公证");
+  });
+
+  it("does not generate either release output without reviewed notes", () => {
+    const signature = Buffer.from("synthetic minisign signature").toString(
+      "base64",
+    );
+    expect(() => releaseNotes("1.2.3")).toThrow("missing or empty");
+    expect(() =>
+      createLatestManifest("1.2.3", "2026-08-16T10:00:00.000Z", signature),
+    ).toThrow("missing or empty");
+  });
+
+  it("parses one reviewed document for both release and updater output", () => {
+    const document = parseReleaseNotes(
+      [
+        "# AI Router v1.2.3",
+        "",
+        "## 重点更新",
+        "",
+        "- 新增用户可见的更新摘要。",
+        "- 优化设置窗口的更新流程。",
+        "",
+        "## 问题修复",
+        "",
+        "- 修复一个用户可见的问题。",
+        "",
+        "## 注意事项",
+        "",
+        "- 本版本无需迁移配置。",
+      ].join("\n"),
+      "1.2.3",
+    );
+    const manifest = createLatestManifest(
+      "1.2.3",
+      "2026-08-16T10:00:00.000Z",
+      Buffer.from("synthetic minisign signature").toString("base64"),
+      document,
+    );
+
+    expect(manifest.notes).toBe(document.markdown);
+    expect(releaseNotes("1.2.3", document)).toContain(document.markdown);
+    expect(document.highlights).toHaveLength(2);
+    expect(document.fixes).toHaveLength(1);
+    expect(document.notices).toHaveLength(1);
+  });
+
+  it("rejects draft body drift before publication", () => {
+    const document = parseReleaseNotes(
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 新增可审核的版本说明。",
+      "1.2.3",
+    );
+    const body = releaseNotes("1.2.3", document);
+    expect(() => validateDraftBody({ body }, body)).not.toThrow();
+    expect(() => validateDraftBody({ body: `${body}\n漂移` }, body)).toThrow(
+      "does not match",
+    );
+  });
+
+  it.each([
+    ["wrong version", "# AI Router v9.9.9\n\n## 重点更新\n\n- 有效更新"],
+    ["missing highlights", "# AI Router v1.2.3\n\n## 问题修复\n\n- 有效修复"],
+    ["paragraph", "# AI Router v1.2.3\n\n## 重点更新\n\n普通段落"],
+    [
+      "duplicate",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 重复项目\n- 重复项目",
+    ],
+    [
+      "link",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- [外部链接](https://example.invalid)",
+    ],
+    [
+      "placeholder",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- AI Router v1.2.3 已发布",
+    ],
+    [
+      "too many highlights",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 一\n- 二\n- 三\n- 四",
+    ],
+    [
+      "too many items",
+      `# AI Router v1.2.3\n\n## 重点更新\n\n- 重点\n\n## 问题修复\n\n${Array.from({ length: 20 }, (_, index) => `- 修复 ${index + 1}`).join("\n")}`,
+    ],
+    [
+      "oversized item",
+      `# AI Router v1.2.3\n\n## 重点更新\n\n- ${"长".repeat(241)}`,
+    ],
+    [
+      "secret-like content",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 配置 TAURI_SIGNING_PRIVATE_KEY",
+    ],
+    [
+      "control character",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 含有\t制表符",
+    ],
+    [
+      "inline markdown",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- **加粗占位内容**",
+    ],
+    ["TODO placeholder", "# AI Router v1.2.3\n\n## 重点更新\n\n- TODO: 补充说明"],
+    [
+      "local path",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 调试文件位于 /Users/example/private.log",
+    ],
+    [
+      "empty optional section",
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 有效更新\n\n## 问题修复",
+    ],
+  ])("rejects invalid reviewed release notes: %s", (_label, markdown) => {
+    expect(() => parseReleaseNotes(markdown, "1.2.3")).toThrow(ReleaseError);
+  });
+
+  it("loads only the exact versioned release-note file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ai-router-release-notes-"));
+    temporaryRoots.push(root);
+    await mkdir(join(root, "release-notes"), { recursive: true });
+    await writeFile(
+      join(root, "release-notes", "v1.2.3.md"),
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 新增可审核的版本说明。\n",
+    );
+    await expect(loadReleaseNotes(root, "1.2.3")).resolves.toMatchObject({
+      highlights: ["新增可审核的版本说明。"],
+    });
+    await expect(loadReleaseNotes(root, "1.2.4")).rejects.toThrow(
+      "missing reviewed file",
+    );
+    await expect(loadReleaseNotes(root, "../../private")).rejects.toThrow(
+      "canonical stable SemVer",
+    );
   });
 
   it("accepts one complete internally consistent release directory", async () => {
@@ -341,6 +481,28 @@ describe("release metadata and inventory", () => {
     await expect(
       verifyReleaseDirectory(fixture.root, fixture.version),
     ).resolves.toMatchObject({ assets: fixture.names });
+  });
+
+  it("counts Unicode code points and rejects manifest note drift", async () => {
+    expect(() =>
+      parseReleaseNotes(
+        `# AI Router v1.2.3\n\n## 重点更新\n\n- ${"😀".repeat(240)}`,
+        "1.2.3",
+      ),
+    ).not.toThrow();
+
+    const fixture = await releaseFixture();
+    const manifestPath = join(fixture.root, "latest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.notes = manifest.notes.replace("新增", "修改");
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await expect(
+      verifyReleaseDirectory(
+        fixture.root,
+        fixture.version,
+        fixture.document,
+      ),
+    ).rejects.toThrow("reviewed source");
   });
 
   it("rejects missing, unexpected, checksum-drifted, and URL-drifted assets", async () => {
