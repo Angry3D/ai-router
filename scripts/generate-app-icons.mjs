@@ -18,6 +18,12 @@ const ICONS = [
   },
 ];
 
+const TRAY_ICONS = [
+  "tray-active-static",
+  "tray-active-a",
+  "tray-active-b",
+];
+
 function runTauriIcon(source, output) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
@@ -29,6 +35,17 @@ function runTauriIcon(source, output) {
     child.once("exit", (code) => {
       if (code === 0) resolvePromise();
       else reject(new Error(`Tauri icon generation failed for ${source}.`));
+    });
+  });
+}
+
+function runCommand(command, args) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { cwd: projectRoot, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code === 0) resolvePromise();
+      else reject(new Error(`${command} exited with code ${code}.`));
     });
   });
 }
@@ -70,8 +87,35 @@ async function generateIcon({ source, target }) {
   }
 }
 
+async function generateTrayIcon(name) {
+  if (process.platform !== "darwin") {
+    throw new Error("Tray template generation requires macOS sips.");
+  }
+  const output = await mkdtemp(join(tmpdir(), "ai-router-tray-icon-"));
+  try {
+    await runTauriIcon(
+      join(projectRoot, `src-tauri/icons/${name}.svg`),
+      output,
+    );
+    await runCommand("/usr/bin/sips", [
+      "-z",
+      "44",
+      "44",
+      join(output, "icon.png"),
+      "--out",
+      join(projectRoot, `src-tauri/icons/${name}.png`),
+    ]);
+  } finally {
+    await rm(output, { force: true, recursive: true });
+  }
+}
+
 for (const icon of ICONS) {
   await generateIcon(icon);
+}
+
+for (const icon of TRAY_ICONS) {
+  await generateTrayIcon(icon);
 }
 
 await cp(
@@ -79,4 +123,4 @@ await cp(
   join(projectRoot, "src-tauri/icons/icon.png"),
 );
 
-console.log("Generated production and QA macOS app icons.");
+console.log("Generated production, QA, and active tray icons.");

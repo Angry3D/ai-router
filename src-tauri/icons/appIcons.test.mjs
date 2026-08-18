@@ -57,4 +57,38 @@ describe("macOS app icon assets", () => {
     expect(qaIcns.subarray(0, 4).toString("ascii")).toBe("icns");
     expect(defaultPng).toEqual(productionPng);
   });
+
+  it("keeps generated activity tray frames aligned and monochrome", async () => {
+    const names = [
+      "tray-active-static",
+      "tray-active-a",
+      "tray-active-b",
+    ];
+    const sources = await Promise.all(
+      names.map((name) => readFile(join(iconDirectory, `${name}.svg`), "utf8")),
+    );
+    const pngs = await Promise.all(
+      names.map((name) => readFile(join(iconDirectory, `${name}.png`))),
+    );
+
+    for (const source of sources) {
+      expect(source).toContain('width="44" height="44"');
+      expect(new Set(source.match(/#[0-9a-fA-F]{6}/g) ?? [])).toEqual(
+        new Set(["#000000"]),
+      );
+    }
+    for (const source of sources) {
+      expect(source).toContain(routePath);
+    }
+    expect(sources[0]).toContain('<circle cx="12" cy="12" r="1.8"');
+    expect(sources[1]).toContain('<circle cx="9" cy="12" r="1.8"');
+    expect(sources[2]).toContain('<circle cx="15" cy="12" r="1.8"');
+    for (const png of pngs) {
+      expect(pngMetadata(png)).toEqual({
+        colorType: 6,
+        height: 44,
+        width: 44,
+      });
+    }
+  });
 });

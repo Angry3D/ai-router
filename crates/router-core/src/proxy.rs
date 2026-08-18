@@ -55,6 +55,12 @@ mod images;
 mod sse;
 pub(crate) mod upstream;
 
+mod activity;
+
+pub use activity::{
+    LogicalRequestActivitySink, LogicalRequestActivityTracker, LogicalRequestActivityTransition,
+    NoopLogicalRequestActivitySink,
+};
 pub use history::{
     AsyncHistoryRecorder, HistorySink, HistorySummaryChangeSink, InferenceStatusChangeSink,
     InferenceStatusService, MetadataFailureSnapshot, RuntimeDiagnosticCode,
@@ -232,6 +238,7 @@ pub struct ProxyIngressState {
     upstream: Arc<dyn UpstreamRequestHandler>,
     history: Arc<dyn HistorySink>,
     diagnostics: Arc<dyn RuntimeDiagnosticSink>,
+    activity: LogicalRequestActivityTracker,
     wire_limit: usize,
     decoded_limit: usize,
     images: ImagesGenerationService,
@@ -250,6 +257,7 @@ impl ProxyIngressState {
             upstream,
             history: Arc::new(NoopHistorySink),
             diagnostics: Arc::new(NoopRuntimeDiagnosticSink),
+            activity: LogicalRequestActivityTracker::default(),
             wire_limit: MAX_REQUEST_WIRE_BYTES,
             decoded_limit: MAX_REQUEST_DECODED_BYTES,
             mcp_image_asset_root: None,
@@ -296,6 +304,12 @@ impl ProxyIngressState {
     ) -> Self {
         self.history = history;
         self.diagnostics = diagnostics;
+        self
+    }
+
+    #[must_use]
+    pub fn with_activity_tracker(mut self, activity: LogicalRequestActivityTracker) -> Self {
+        self.activity = activity;
         self
     }
 
@@ -492,7 +506,16 @@ async fn responses_handler(State(state): State<ProxyIngressState>, request: Requ
     )
     .await
     {
-        Ok(request) => state.upstream.handle(request).await,
+        Ok(request) => {
+            let activity = state.activity.acquire();
+            let response = state.upstream.handle(request).await;
+            match activity {
+                Some(activity) => response.map(|body| {
+                    Body::new(activity::LogicalRequestActivityBody::new(body, activity))
+                }),
+                None => response,
+            }
+        }
         Err(failure) => {
             let finished_at_ms = now_millis();
             let completion_state = if failure.code == "no_upstream_route" {
@@ -1220,6 +1243,36 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingActivity(Mutex<Vec<LogicalRequestActivityTransition>>);
+
+    impl LogicalRequestActivitySink for RecordingActivity {
+        fn activity_changed(&self, transition: LogicalRequestActivityTransition) {
+            self.0.lock().expect("activity mutex").push(transition);
+        }
+    }
+
+    struct MultiAttemptUpstream {
+        activity: LogicalRequestActivityTracker,
+        snapshots: Mutex<Vec<(usize, u64)>>,
+    }
+
+    #[async_trait]
+    impl UpstreamRequestHandler for MultiAttemptUpstream {
+        async fn handle(&self, _request: ValidatedProxyRequest) -> Response {
+            self.snapshots
+                .lock()
+                .expect("attempt snapshot mutex")
+                .push(self.activity.snapshot());
+            tokio::task::yield_now().await;
+            self.snapshots
+                .lock()
+                .expect("attempt snapshot mutex")
+                .push(self.activity.snapshot());
+            (StatusCode::OK, "upstream").into_response()
+        }
+    }
+
     #[async_trait]
     impl UpstreamRequestHandler for RecordingUpstream {
         async fn handle(&self, request: ValidatedProxyRequest) -> Response {
@@ -1344,6 +1397,132 @@ mod tests {
         assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
         assert!(history.0.lock().expect("history mutex").is_empty());
         assert_eq!(diagnostics.0.lock().expect("diagnostic mutex").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn responses_activity_starts_after_validation_and_ends_with_body_lifetime() {
+        let upstream = Arc::new(RecordingUpstream::default());
+        let activity = Arc::new(RecordingActivity::default());
+        let tracker = LogicalRequestActivityTracker::new(activity.clone());
+        let state = ProxyIngressState::new(TOKEN, upstream).with_activity_tracker(tracker.clone());
+        state.set_active_route(Some(route("primary")));
+        let router = build_proxy_router(state);
+        router
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .body(Body::from(r#"{"model":"gpt-5"}"#))
+                    .expect("unauthorized request"),
+            )
+            .await
+            .expect("unauthorized response");
+        assert_eq!(tracker.snapshot(), (0, 0));
+        router
+            .clone()
+            .oneshot(authorized_request(
+                Method::POST,
+                "/v1/responses",
+                Body::from("not-json"),
+            ))
+            .await
+            .expect("invalid response");
+        assert_eq!(tracker.snapshot(), (0, 0));
+        assert!(activity.0.lock().expect("activity mutex").is_empty());
+
+        let response = router
+            .oneshot(authorized_request(
+                Method::POST,
+                "/v1/responses",
+                Body::from(r#"{"model":"gpt-5"}"#),
+            ))
+            .await
+            .expect("accepted response");
+        assert_eq!(tracker.snapshot(), (1, 1));
+        assert_eq!(
+            to_bytes(response.into_body(), 1024)
+                .await
+                .expect("response body"),
+            Bytes::from_static(b"upstream")
+        );
+        assert_eq!(tracker.snapshot(), (0, 2));
+        assert_eq!(
+            activity.0.lock().expect("activity mutex").as_slice(),
+            [
+                LogicalRequestActivityTransition {
+                    active: true,
+                    count: 1,
+                    revision: 1,
+                },
+                LogicalRequestActivityTransition {
+                    active: false,
+                    count: 0,
+                    revision: 2,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_activity_covers_overlapping_bodies_and_downstream_drop() {
+        let upstream = Arc::new(RecordingUpstream::default());
+        let activity = Arc::new(RecordingActivity::default());
+        let tracker = LogicalRequestActivityTracker::new(activity.clone());
+        let state = ProxyIngressState::new(TOKEN, upstream).with_activity_tracker(tracker.clone());
+        state.set_active_route(Some(route("primary")));
+        let router = build_proxy_router(state);
+        let request = || {
+            authorized_request(
+                Method::POST,
+                "/v1/responses",
+                Body::from(r#"{"model":"gpt-5","stream":true}"#),
+            )
+        };
+
+        let first = router
+            .clone()
+            .oneshot(request())
+            .await
+            .expect("first response");
+        let second = router.oneshot(request()).await.expect("second response");
+        assert_eq!(tracker.snapshot(), (2, 2));
+
+        drop(first);
+        assert_eq!(tracker.snapshot(), (1, 3));
+        drop(second);
+        assert_eq!(tracker.snapshot(), (0, 4));
+        assert_eq!(activity.0.lock().expect("activity mutex").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn responses_activity_stays_single_across_logical_upstream_attempts() {
+        let activity = Arc::new(RecordingActivity::default());
+        let tracker = LogicalRequestActivityTracker::new(activity.clone());
+        let upstream = Arc::new(MultiAttemptUpstream {
+            activity: tracker.clone(),
+            snapshots: Mutex::new(Vec::new()),
+        });
+        let state =
+            ProxyIngressState::new(TOKEN, upstream.clone()).with_activity_tracker(tracker.clone());
+        state.set_active_route(Some(route("primary")));
+        let response = build_proxy_router(state)
+            .oneshot(authorized_request(
+                Method::POST,
+                "/v1/responses",
+                Body::from(r#"{"model":"gpt-5"}"#),
+            ))
+            .await
+            .expect("accepted response");
+
+        assert_eq!(
+            *upstream.snapshots.lock().expect("attempt snapshot mutex"),
+            [(1, 1), (1, 1)]
+        );
+        assert_eq!(tracker.snapshot(), (1, 1));
+        drop(response);
+        assert_eq!(tracker.snapshot(), (0, 2));
+        assert_eq!(activity.0.lock().expect("activity mutex").len(), 2);
     }
 
     #[tokio::test]
