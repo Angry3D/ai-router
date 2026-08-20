@@ -63,6 +63,8 @@ describe("macOS app icon assets", () => {
       "tray-active-static",
       "tray-active-a",
       "tray-active-b",
+      "tray-active-c",
+      "tray-active-d",
     ];
     const sources = await Promise.all(
       names.map((name) => readFile(join(iconDirectory, `${name}.svg`), "utf8")),
@@ -80,9 +82,11 @@ describe("macOS app icon assets", () => {
     for (const source of sources) {
       expect(source).toContain(routePath);
     }
-    expect(sources[0]).toContain('<circle cx="12" cy="12" r="1.8"');
-    expect(sources[1]).toContain('<circle cx="9" cy="12" r="1.8"');
-    expect(sources[2]).toContain('<circle cx="15" cy="12" r="1.8"');
+    expect(sources[0]).toContain('<circle cx="12" cy="12" r="2.2"');
+    expect(sources[1]).toContain('<circle cx="18" cy="5" r="3" fill="#000000"');
+    expect(sources[2]).toContain('<circle cx="9" cy="12" r="2.6"');
+    expect(sources[3]).toContain('<circle cx="15" cy="12" r="2.6"');
+    expect(sources[4]).toContain('<circle cx="6" cy="19" r="3" fill="#000000"');
     for (const png of pngs) {
       expect(pngMetadata(png)).toEqual({
         colorType: 6,

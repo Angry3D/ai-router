@@ -10,7 +10,74 @@ use ts_rs::TS;
 use crate::{
     domain::{AppearancePreference, InferenceStatus, ProxyRuntimeStatus, RouteId},
     lifecycle::{AppLifecycleIssue, AppLifecyclePhase, AppLifecycleSnapshot},
+    proxy::{RecoveryOrigin, RouteHealthSnapshot},
 };
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum RouteHealthOriginDto {
+    ProviderFailure,
+    ModelBypassed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+#[ts(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum RouteHealthDto {
+    Striking {
+        failure_count: u8,
+    },
+    Switching,
+    SwitchPending {
+        retry_after_seconds: Option<u16>,
+    },
+    Open {
+        origin: RouteHealthOriginDto,
+        recovery_successes: u8,
+        retry_after_seconds: u16,
+    },
+    Probing {
+        recovery_successes: u8,
+    },
+}
+
+impl From<RouteHealthSnapshot> for RouteHealthDto {
+    fn from(value: RouteHealthSnapshot) -> Self {
+        match value {
+            RouteHealthSnapshot::Striking { failure_count } => Self::Striking { failure_count },
+            RouteHealthSnapshot::Switching => Self::Switching,
+            RouteHealthSnapshot::SwitchPending {
+                retry_after_seconds,
+            } => Self::SwitchPending {
+                retry_after_seconds,
+            },
+            RouteHealthSnapshot::Open {
+                origin,
+                recovery_successes,
+                retry_after_seconds,
+            } => Self::Open {
+                origin: match origin {
+                    RecoveryOrigin::ProviderFailure => RouteHealthOriginDto::ProviderFailure,
+                    RecoveryOrigin::ModelBypassed => RouteHealthOriginDto::ModelBypassed,
+                },
+                recovery_successes,
+                retry_after_seconds,
+            },
+            RouteHealthSnapshot::Probing { recovery_successes } => {
+                Self::Probing { recovery_successes }
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +117,7 @@ pub struct RouteSummaryDto {
     pub name: String,
     pub base_url_host: String,
     pub inference_status: InferenceStatus,
+    pub health: Option<RouteHealthDto>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -286,6 +354,33 @@ impl crate::proxy::InferenceStatusChangeSink for AppRuntimeState {
     }
 }
 
+impl crate::proxy::HealthChangeSink for AppRuntimeState {
+    fn route_health_changed(
+        &self,
+        route_id: RouteId,
+        health: Option<crate::proxy::RouteHealthSnapshot>,
+    ) {
+        let health = health.map(Into::into);
+        let mut projection = self
+            .projection
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(route) = projection
+            .routes
+            .iter_mut()
+            .find(|route| route.route_id == route_id)
+        else {
+            return;
+        };
+        if route.health == health {
+            return;
+        }
+        route.health = health;
+        drop(projection);
+        self.publish_background_change(vec![StateArea::Routes]);
+    }
+}
+
 impl crate::proxy::HistorySummaryChangeSink for AppRuntimeState {
     fn history_summary_changed(&self) {
         self.publish_background_change(vec![StateArea::RequestHistorySummary]);
@@ -427,6 +522,7 @@ mod tests {
                 failure_reason: None,
                 observed_at_ms: None,
             },
+            health: None,
         }];
         let projected_routes = routes.clone();
         runtime
@@ -466,6 +562,7 @@ mod tests {
                 failure_reason: None,
                 observed_at_ms: None,
             },
+            health: None,
         };
         runtime
             .apply_committed::<_, ()>(
@@ -497,6 +594,50 @@ mod tests {
         assert_eq!(
             snapshot.routes[0].inference_status.kind,
             crate::domain::InferenceStatusKind::RecentFailure
+        );
+        assert_eq!(
+            sink.0.lock().expect("sink lock")[0].areas,
+            vec![StateArea::Routes]
+        );
+    }
+
+    #[test]
+    fn background_health_changes_update_projection_before_publication() {
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = AppRuntimeState::new(sink.clone());
+        let route_id = RouteId::new();
+        runtime
+            .apply_committed::<_, ()>(
+                Ok(()),
+                vec![StateArea::Routes],
+                RuntimeProjectionUpdate {
+                    routes: Some(vec![RouteSummaryDto {
+                        route_id: route_id.clone(),
+                        name: "Work".to_owned(),
+                        base_url_host: "example.com".to_owned(),
+                        inference_status: crate::domain::InferenceStatus {
+                            kind: crate::domain::InferenceStatusKind::Unverified,
+                            last_outcome: None,
+                            failure_reason: None,
+                            observed_at_ms: None,
+                        },
+                        health: None,
+                    }]),
+                    ..RuntimeProjectionUpdate::default()
+                },
+            )
+            .expect("initial projection");
+        sink.0.lock().expect("sink lock").clear();
+
+        crate::proxy::HealthChangeSink::route_health_changed(
+            &runtime,
+            route_id,
+            Some(crate::proxy::RouteHealthSnapshot::Striking { failure_count: 3 }),
+        );
+
+        assert_eq!(
+            runtime.bootstrap_snapshot().routes[0].health,
+            Some(super::RouteHealthDto::Striking { failure_count: 3 })
         );
         assert_eq!(
             sink.0.lock().expect("sink lock")[0].areas,

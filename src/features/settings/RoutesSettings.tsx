@@ -53,6 +53,10 @@ import {
 } from "./routeOrderSequence";
 import { RouteRowOverlay, SortableRouteRow } from "./SortableRouteRow";
 import {
+  routeHealthCountdownSeconds,
+  routeHealthPresentation,
+} from "./routeHealthPresentation";
+import {
   SettingsButton,
   SettingsHelpTooltip,
   SettingsIconButton,
@@ -104,7 +108,13 @@ export function RoutesSettings({
   >(null);
   const [dndSession, setDndSession] = useState(0);
   const [overlayWidth, setOverlayWidth] = useState<number | null>(null);
+  const [healthClock, setHealthClock] = useState(() => Date.now());
   const routeListViewportRef = useRef<HTMLDivElement | null>(null);
+  const healthClockOriginRef = useRef({
+    signature: "",
+    startedAtMs: 0,
+    refreshedRouteIds: new Set<string>(),
+  });
   const previewSequenceRef = useRef<RouteOrderItemId[] | null>(null);
   const activeItemIdRef = useRef<RouteOrderItemId | null>(null);
   const focusAfterResetItemRef = useRef<RouteOrderItemId | null>(null);
@@ -134,6 +144,36 @@ export function RoutesSettings({
   const routeById = useMemo(
     () => new Map(routes.map((route) => [route.routeId, route])),
     [routes],
+  );
+  const healthSignature = JSON.stringify(
+    routes.map((route) => [route.routeId, route.health]),
+  );
+  if (healthClockOriginRef.current.signature !== healthSignature) {
+    healthClockOriginRef.current = {
+      signature: healthSignature,
+      startedAtMs: Date.now(),
+      refreshedRouteIds: new Set<string>(),
+    };
+  }
+  const elapsedHealthSeconds = Math.max(
+    0,
+    Math.floor(
+      (healthClock - healthClockOriginRef.current.startedAtMs) / 1_000,
+    ),
+  );
+  const healthPresentationByRouteId = useMemo(
+    () =>
+      new Map(
+        routes.map((route) => [
+          route.routeId,
+          routeHealthPresentation(
+            route.health,
+            route.routeId === snapshot.activeRouteId,
+            elapsedHealthSeconds,
+          ),
+        ]),
+      ),
+    [elapsedHealthSeconds, routes, snapshot.activeRouteId],
   );
   const selectedRouteIndex = routes.findIndex(
     (route) => route.routeId === selectedRouteId,
@@ -211,10 +251,7 @@ export function RoutesSettings({
   }, []);
 
   const resetDrag = useCallback(
-    (
-      remountContext: boolean,
-      focusItemId = activeItemIdRef.current,
-    ) => {
+    (remountContext: boolean, focusItemId = activeItemIdRef.current) => {
       const activeItemId = activeItemIdRef.current;
       stopEdgeScroll();
       activeItemIdRef.current = null;
@@ -231,6 +268,30 @@ export function RoutesSettings({
     },
     [restoreSortableFocus, setPreview, stopEdgeScroll],
   );
+
+  useEffect(() => {
+    const hasCountdown = routes.some(
+      (route) => routeHealthCountdownSeconds(route.health) > 0,
+    );
+    if (!hasCountdown) return undefined;
+    const timer = window.setInterval(() => setHealthClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [healthSignature, routes]);
+
+  useEffect(() => {
+    for (const route of routes) {
+      const initial = routeHealthCountdownSeconds(route.health);
+      if (initial <= 0 || elapsedHealthSeconds < initial) continue;
+      if (healthClockOriginRef.current.refreshedRouteIds.has(route.routeId)) {
+        continue;
+      }
+      healthClockOriginRef.current.refreshedRouteIds.add(route.routeId);
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.settings }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap }),
+      ]);
+    }
+  }, [elapsedHealthSeconds, healthSignature, queryClient, routes]);
 
   useEffect(() => {
     const itemId = focusAfterResetItemRef.current;
@@ -585,7 +646,13 @@ export function RoutesSettings({
                         ? routeIndex + 1
                         : null
                     }
-                    active={routeId === snapshot.activeRouteId}
+                    healthPresentation={
+                      healthPresentationByRouteId.get(routeId) ??
+                      routeHealthPresentation(
+                        null,
+                        routeId === snapshot.activeRouteId,
+                      )
+                    }
                     selected={selectedRouteId === routeId && !newRoute}
                     disabled={routeToolsBusy}
                     onSelectRoute={onSelectRoute}
@@ -627,7 +694,11 @@ export function RoutesSettings({
                 }
               />
               <SettingsHelpTooltip label="说明自动 Fallback 切换规则">
-                请求失败且符合切换条件时，将按顺序尝试后续路由；到最后一条后停止，不会回到前面的路由。
+                <ul>
+                  <li>5 次可归因失败后，按顺序切换后续路由。</li>
+                  <li>兼容请求验证成功 2 次后，恢复更前路由。</li>
+                  <li>手动切换后，重新计数。</li>
+                </ul>
               </SettingsHelpTooltip>
             </span>
             <span className="route-tools-error-slot">
@@ -661,7 +732,13 @@ export function RoutesSettings({
             <RouteRowOverlay
               route={overlayRoute}
               fallbackPosition={overlayPosition?.participantPosition ?? null}
-              active={overlayRoute.routeId === snapshot.activeRouteId}
+              healthPresentation={
+                healthPresentationByRouteId.get(overlayRoute.routeId) ??
+                routeHealthPresentation(
+                  null,
+                  overlayRoute.routeId === snapshot.activeRouteId,
+                )
+              }
               selected={overlayRoute.routeId === selectedRouteId && !newRoute}
             />
           ) : null}
@@ -674,6 +751,15 @@ export function RoutesSettings({
         activeRouteId={snapshot.activeRouteId}
         riskConfirmed={snapshot.balanceScriptRiskConfirmed}
         externalBusy={routeToolsLocked}
+        healthDetail={
+          selectedRouteId &&
+          healthPresentationByRouteId.get(selectedRouteId)?.detail
+            ? {
+                text: healthPresentationByRouteId.get(selectedRouteId)!.detail!,
+                tone: healthPresentationByRouteId.get(selectedRouteId)!.tone,
+              }
+            : null
+        }
         onDirtyChange={onDirtyChange}
         onCancel={onCancelEditor}
         onSaved={onSaved}

@@ -13,15 +13,18 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import {
   IPC_COMMANDS,
+  getRouteEdit,
   getUsageHistory,
   getUsageRequestDetail,
   getUsageRouteOptions,
   normalizeIpcError,
   openProjectRepository,
 } from "./ipc";
+import { previewFallbackUiRouteEdits } from "../previewFixtures";
 
 beforeEach(() => {
   tauri.invoke.mockReset();
+  window.history.replaceState({}, "", "/");
 });
 
 describe("IPC error normalization", () => {
@@ -62,6 +65,19 @@ describe("project repository command", () => {
 });
 
 describe("development Usage preview", () => {
+  it("selects the dedicated Fallback UI route fixture from the preview URL", async () => {
+    window.history.replaceState({}, "", "/?fallback-ui=preview");
+
+    const edit = await getRouteEdit(previewFallbackUiRouteEdits[0].routeId);
+
+    expect(edit.fallbackExcludedModels).toEqual([
+      "gpt-5.6-luna",
+      "gpt-5.2-codex",
+      "relay-preview-model",
+    ]);
+    expect(tauri.invoke).not.toHaveBeenCalled();
+  });
+
   it("provides privacy-safe list, route, and on-demand detail fixtures", async () => {
     const page = await getUsageHistory({
       finishedAtOrAfterMs: null,

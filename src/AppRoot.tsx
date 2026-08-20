@@ -24,6 +24,7 @@ function DevelopmentPreviewData({
       const parameters = new URLSearchParams(window.location.search);
       const mode = parameters.get("recovery");
       const imagesMode = parameters.get("images");
+      const fallbackUiPreview = parameters.get("fallback-ui") === "preview";
       const fatalIssue = mode?.startsWith("fatal-")
         ? mode.slice("fatal-".length)
         : null;
@@ -37,8 +38,9 @@ function DevelopmentPreviewData({
           : isFatalIssue(fatalIssue)
             ? fixtures.previewFatalDatabaseBootstraps[fatalIssue]
             : fixtures.previewMenuSnapshot.bootstrap;
-      const settings =
-        mode === null && imagesMode === "missing"
+      const settings = fallbackUiPreview
+        ? fixtures.previewFallbackUiSettingsSnapshot
+        : mode === null && imagesMode === "missing"
           ? fixtures.previewMissingImageRouteSettingsSnapshot
           : mode === null && parameters.get("routes") === "long"
             ? fixtures.previewLongRoutesSettingsSnapshot

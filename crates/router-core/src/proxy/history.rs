@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    hash::Hash,
     sync::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -16,7 +17,10 @@ use crate::{
     domain::{
         InferenceFailureReason, InferenceOutcome, InferenceStatus, InferenceStatusKind, RouteId,
     },
-    storage::{DatabaseExecutor, FallbackStopRecord, LatestInferenceAttempt, RequestHistoryRecord},
+    storage::{
+        AttemptRoutingTransitionRecord, DatabaseExecutor, FallbackStopRecord,
+        LatestInferenceAttempt, RequestHistoryRecord,
+    },
 };
 
 const DEFAULT_HISTORY_QUEUE_CAPACITY: usize = 1_024;
@@ -119,6 +123,10 @@ pub trait HistorySink: Send + Sync {
     fn try_record_fallback_stop(&self, _record: FallbackStopRecord) -> bool {
         true
     }
+
+    fn try_record_routing_transition(&self, _record: AttemptRoutingTransitionRecord) -> bool {
+        true
+    }
 }
 
 pub trait HistorySummaryChangeSink: Send + Sync {
@@ -194,6 +202,60 @@ pub struct AsyncHistoryRecorder {
 enum HistoryCommand {
     Request(Box<RequestHistoryRecord>),
     FallbackStop(FallbackStopRecord),
+    RoutingTransition(AttemptRoutingTransitionRecord),
+}
+
+fn buffer_pending_metadata<K, V>(
+    pending: &mut HashMap<K, V>,
+    key: K,
+    record: V,
+    capacity: usize,
+    failures: &MetadataFailureState,
+    diagnostics: &dyn RuntimeDiagnosticSink,
+    request_id: &str,
+) where
+    K: Eq + Hash,
+{
+    if pending.len() < capacity || pending.contains_key(&key) {
+        pending.insert(key, record);
+    } else {
+        failures.record_drop(RuntimeDiagnosticCode::MetadataQueueFull);
+        diagnostics.emit(RuntimeDiagnosticEvent {
+            component: RuntimeDiagnosticComponent::RequestHistory,
+            code: RuntimeDiagnosticCode::MetadataQueueFull,
+            request_id: Some(request_id.to_owned()),
+            route_id: None,
+            http_status: None,
+        });
+    }
+}
+
+fn finish_history_command(
+    result: &Result<(), crate::storage::StorageError>,
+    request_id: String,
+    failures: &MetadataFailureState,
+    diagnostics: &dyn RuntimeDiagnosticSink,
+    changes: &dyn HistorySummaryChangeSink,
+) {
+    if result.is_err() {
+        failures.record_write_failure();
+        diagnostics.emit(RuntimeDiagnosticEvent {
+            component: RuntimeDiagnosticComponent::RequestHistory,
+            code: RuntimeDiagnosticCode::MetadataWriteFailed,
+            request_id: Some(request_id),
+            route_id: None,
+            http_status: None,
+        });
+    }
+    changes.history_summary_changed();
+}
+
+fn history_attempt_indexes(record: &RequestHistoryRecord) -> Vec<u32> {
+    record
+        .attempts
+        .iter()
+        .map(|attempt| attempt.attempt_index)
+        .collect()
 }
 
 impl AsyncHistoryRecorder {
@@ -227,30 +289,85 @@ impl AsyncHistoryRecorder {
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_changes = Arc::clone(&changes);
         let worker = tokio::spawn(async move {
+            let mut pending_stops = HashMap::<(String, u32), FallbackStopRecord>::new();
+            let mut pending_transitions =
+                HashMap::<(String, u32), AttemptRoutingTransitionRecord>::new();
             while let Some(command) = receiver.recv().await {
                 let (request_id, result) = match command {
                     HistoryCommand::Request(record) => {
                         let request_id = record.request_id.clone();
-                        let result = database.record_request_history(*record).await;
+                        let attempt_indexes = history_attempt_indexes(&record);
+                        let result = async {
+                            database.record_request_history(*record).await?;
+                            for attempt_index in attempt_indexes {
+                                let key = (request_id.clone(), attempt_index);
+                                if let Some(transition) = pending_transitions.remove(&key) {
+                                    let _ = database
+                                        .record_attempt_routing_transition(transition)
+                                        .await?;
+                                }
+                                if let Some(stop) = pending_stops.remove(&key) {
+                                    let _ = database.record_fallback_stop(stop).await?;
+                                }
+                            }
+                            Ok(())
+                        }
+                        .await;
                         (request_id, result)
                     }
                     HistoryCommand::FallbackStop(record) => {
                         let request_id = record.request_id.clone();
-                        let result = database.record_fallback_stop(record).await;
+                        let key = (request_id.clone(), record.attempt_index);
+                        let result = match database.record_fallback_stop(record.clone()).await {
+                            Ok(true) => Ok(()),
+                            Ok(false) => {
+                                buffer_pending_metadata(
+                                    &mut pending_stops,
+                                    key,
+                                    record,
+                                    capacity,
+                                    &worker_failures,
+                                    worker_diagnostics.as_ref(),
+                                    &request_id,
+                                );
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        };
+                        (request_id, result)
+                    }
+                    HistoryCommand::RoutingTransition(record) => {
+                        let request_id = record.request_id.clone();
+                        let key = (request_id.clone(), record.attempt_index);
+                        let result = match database
+                            .record_attempt_routing_transition(record.clone())
+                            .await
+                        {
+                            Ok(true) => Ok(()),
+                            Ok(false) => {
+                                buffer_pending_metadata(
+                                    &mut pending_transitions,
+                                    key,
+                                    record,
+                                    capacity,
+                                    &worker_failures,
+                                    worker_diagnostics.as_ref(),
+                                    &request_id,
+                                );
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        };
                         (request_id, result)
                     }
                 };
-                if result.is_err() {
-                    worker_failures.record_write_failure();
-                    worker_diagnostics.emit(RuntimeDiagnosticEvent {
-                        component: RuntimeDiagnosticComponent::RequestHistory,
-                        code: RuntimeDiagnosticCode::MetadataWriteFailed,
-                        request_id: Some(request_id),
-                        route_id: None,
-                        http_status: None,
-                    });
-                }
-                worker_changes.history_summary_changed();
+                finish_history_command(
+                    &result,
+                    request_id,
+                    &worker_failures,
+                    worker_diagnostics.as_ref(),
+                    worker_changes.as_ref(),
+                );
             }
         });
         Arc::new(Self {
@@ -356,6 +473,40 @@ impl HistorySink for AsyncHistoryRecorder {
             return false;
         };
         match sender.try_send(HistoryCommand::FallbackStop(record)) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {
+                let code = if sender.is_closed() {
+                    RuntimeDiagnosticCode::MetadataQueueClosed
+                } else {
+                    RuntimeDiagnosticCode::MetadataQueueFull
+                };
+                self.failures.record_drop(code.clone());
+                self.diagnostics.emit(RuntimeDiagnosticEvent {
+                    component: RuntimeDiagnosticComponent::RequestHistory,
+                    code,
+                    request_id: Some(request_id),
+                    route_id: None,
+                    http_status: None,
+                });
+                self.changes.history_summary_changed();
+                false
+            }
+        }
+    }
+
+    fn try_record_routing_transition(&self, record: AttemptRoutingTransitionRecord) -> bool {
+        let request_id = record.request_id.clone();
+        let sender = self
+            .sender
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(sender) = sender else {
+            self.failures
+                .record_drop(RuntimeDiagnosticCode::MetadataQueueClosed);
+            return false;
+        };
+        match sender.try_send(HistoryCommand::RoutingTransition(record)) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {
                 let code = if sender.is_closed() {
@@ -944,6 +1095,7 @@ mod tests {
         record.attempts.push(crate::storage::AttemptHistoryRecord {
             attempt_id: crate::domain::UpstreamAttemptId::new(),
             attempt_index: 0,
+            attempt_role: crate::storage::AttemptRole::Ordinary,
             route_id: route_id.clone(),
             route_name: "Retained route".to_owned(),
             started_at_ms: 1,
@@ -988,6 +1140,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transition_and_stop_buffer_until_their_streaming_attempt_is_persisted() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database =
+            DatabaseExecutor::open(directory.path().join("router.sqlite3")).expect("database");
+        let recorder = AsyncHistoryRecorder::new(
+            database.clone(),
+            Arc::new(DiagnosticCapture::default()),
+            Arc::new(ChangeCounter::default()),
+        );
+        let route_id = RouteId::new();
+        let target_route_id = RouteId::new();
+        assert!(recorder.try_record_routing_transition(
+            crate::storage::AttemptRoutingTransitionRecord {
+                request_id: "reverse-metadata".to_owned(),
+                attempt_index: 0,
+                transition: crate::storage::AttemptRoutingTransition {
+                    kind: crate::storage::RoutingTransitionKind::ActivateNext,
+                    target_route_id: target_route_id.clone(),
+                    target_route_name: "Next route".to_owned(),
+                    skipped_routes: Vec::new(),
+                },
+            }
+        ));
+        assert!(
+            recorder.try_record_fallback_stop(crate::storage::FallbackStopRecord {
+                request_id: "reverse-metadata".to_owned(),
+                attempt_index: 1,
+                reason: crate::storage::FallbackStopReason::ResponseCommitted,
+                target_route_id: Some(target_route_id.clone()),
+                target_route_name: Some("Next route".to_owned()),
+            })
+        );
+        let mut record = history_record("reverse-metadata");
+        record.streaming = true;
+        record.attempts.push(crate::storage::AttemptHistoryRecord {
+            attempt_id: crate::domain::UpstreamAttemptId::new(),
+            attempt_index: 0,
+            attempt_role: crate::storage::AttemptRole::Ordinary,
+            route_id,
+            route_name: "Source route".to_owned(),
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            http_status: Some(200),
+            error_category: None,
+            delivery_state: crate::domain::DeliveryState::Completed,
+            actual_model: None,
+            forwarded_service_tier: None,
+            actual_service_tier: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+        });
+        record.attempts.push(crate::storage::AttemptHistoryRecord {
+            attempt_id: crate::domain::UpstreamAttemptId::new(),
+            attempt_index: 1,
+            attempt_role: crate::storage::AttemptRole::Ordinary,
+            route_id: target_route_id.clone(),
+            route_name: "Next route".to_owned(),
+            started_at_ms: 2,
+            finished_at_ms: 3,
+            http_status: Some(200),
+            error_category: None,
+            delivery_state: crate::domain::DeliveryState::Completed,
+            actual_model: None,
+            forwarded_service_tier: None,
+            actual_service_tier: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+        });
+        assert!(recorder.try_record(record));
+        recorder.shutdown().await;
+
+        let detail = database
+            .usage_request_detail("reverse-metadata".to_owned())
+            .await
+            .expect("usage detail");
+        assert_eq!(
+            detail.attempts[0].routing_transition,
+            Some(crate::storage::AttemptRoutingTransition {
+                kind: crate::storage::RoutingTransitionKind::ActivateNext,
+                target_route_id: target_route_id.clone(),
+                target_route_name: "Next route".to_owned(),
+                skipped_routes: Vec::new(),
+            })
+        );
+        assert_eq!(
+            detail.attempts[1].routing_decision,
+            Some(crate::storage::RoutingDecision::Stop {
+                reason: crate::storage::FallbackStopReason::ResponseCommitted,
+                target_route_id: Some(target_route_id),
+                target_route_name: Some("Next route".to_owned()),
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn fallback_stop_is_not_attached_when_its_attempt_was_not_persisted() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let database =
@@ -1002,6 +1255,7 @@ mod tests {
         record.attempts.push(crate::storage::AttemptHistoryRecord {
             attempt_id: crate::domain::UpstreamAttemptId::new(),
             attempt_index: 0,
+            attempt_role: crate::storage::AttemptRole::Ordinary,
             route_id,
             route_name: "Earlier route".to_owned(),
             started_at_ms: 1,
@@ -1053,6 +1307,7 @@ mod tests {
         record.attempts.push(crate::storage::AttemptHistoryRecord {
             attempt_id: crate::domain::UpstreamAttemptId::new(),
             attempt_index: wide_index,
+            attempt_role: crate::storage::AttemptRole::Ordinary,
             route_id,
             route_name: "Route".to_owned(),
             started_at_ms: 1,
@@ -1103,6 +1358,7 @@ mod tests {
         first.attempts.push(crate::storage::AttemptHistoryRecord {
             attempt_id: attempt_id.clone(),
             attempt_index: 0,
+            attempt_role: crate::storage::AttemptRole::Ordinary,
             route_id: RouteId::new(),
             route_name: "Route".to_owned(),
             started_at_ms: 1,
@@ -1125,6 +1381,7 @@ mod tests {
             .push(crate::storage::AttemptHistoryRecord {
                 attempt_id,
                 attempt_index: 1,
+                attempt_role: crate::storage::AttemptRole::Ordinary,
                 route_id: RouteId::new(),
                 route_name: "Route".to_owned(),
                 started_at_ms: 2,
@@ -1175,6 +1432,7 @@ mod tests {
         record.attempts = vec![crate::storage::AttemptHistoryRecord {
             attempt_id: crate::domain::UpstreamAttemptId::new(),
             attempt_index: 0,
+            attempt_role: crate::storage::AttemptRole::Ordinary,
             route_id: route_id.clone(),
             route_name: "Route".to_owned(),
             started_at_ms: 1,

@@ -1,3 +1,6 @@
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::too_many_lines)]
+
 use std::{
     collections::HashSet,
     io::{Cursor, Read},
@@ -18,9 +21,10 @@ use serde::Deserialize;
 
 use super::{
     FallbackActivationRequest, FallbackActivator, HistorySink, InferenceStatusService,
-    NoopFallbackActivator, NoopRequestTransitionSink, RequestTransitionSink, RoutingSnapshot,
-    RoutingSnapshotStore, RuntimeDiagnosticCode, RuntimeDiagnosticComponent,
-    RuntimeDiagnosticEvent, RuntimeDiagnosticSink, UpstreamRequestHandler, ValidatedProxyRequest,
+    NoopFallbackActivator, NoopRequestTransitionSink, RequestActivityDisposition,
+    RequestTransitionSink, RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticCode,
+    RuntimeDiagnosticComponent, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
+    UpstreamRequestHandler, ValidatedProxyRequest,
     fallback::{
         ClassifiedFailure, FIRST_MEANINGFUL_OUTPUT_TIMEOUT, FailurePolicy, SSE_PREFLIGHT_LIMIT,
         TransportFailure, classify_http, classify_semantic, classify_transport,
@@ -39,7 +43,11 @@ use crate::{
         CompletionState, DeliveryState, InferenceFailureReason, InferenceOutcome,
         ServiceTierPolicy, UpstreamAttemptId,
     },
-    storage::{AttemptHistoryRecord, FallbackStopReason, FallbackStopRecord, RequestHistoryRecord},
+    storage::{
+        AttemptHistoryRecord, AttemptRole, AttemptRoutingTransition,
+        AttemptRoutingTransitionRecord, FallbackStopReason, FallbackStopRecord,
+        RequestHistoryRecord, RoutingTransitionKind,
+    },
 };
 
 const DEFAULT_RESPONSE_LIMIT: usize = 200 * 1024 * 1024;
@@ -48,6 +56,51 @@ const RESPONSE_TERMINAL_GRACE: Duration = Duration::from_secs(3);
 
 const fn checked_next_attempt_index(attempt_index: u32) -> Option<u32> {
     attempt_index.checked_add(1)
+}
+
+fn bounded_timeout(configured: Duration, deadline: Option<Instant>) -> Duration {
+    deadline.map_or(configured, |deadline| {
+        configured.min(deadline.saturating_duration_since(Instant::now()))
+    })
+}
+
+struct ForwardCandidate {
+    index: usize,
+    route: Arc<super::RouteSnapshot>,
+    health: super::CandidateHealth,
+}
+
+struct ForwardCandidateScan {
+    candidate: Option<ForwardCandidate>,
+    skipped: Vec<super::FallbackActivationSkip>,
+}
+
+struct ProbeCancellationGuard {
+    health: Arc<super::RouteHealthRegistry>,
+    lease: super::ProbeLease,
+    completed: bool,
+}
+
+impl ProbeCancellationGuard {
+    fn new(health: Arc<super::RouteHealthRegistry>, lease: super::ProbeLease) -> Self {
+        Self {
+            health,
+            lease,
+            completed: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ProbeCancellationGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.health.complete_probe_cancelled(&self.lease);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -84,9 +137,77 @@ pub struct ResponsesForwarder {
     routing: RoutingSnapshotStore,
     activator: Arc<dyn FallbackActivator>,
     transitions: Arc<dyn RequestTransitionSink>,
+    route_health: Option<Arc<super::RouteHealthRegistry>>,
 }
 
 impl ResponsesForwarder {
+    fn forward_candidate_from(
+        routing: &RoutingSnapshot,
+        start_index: usize,
+        model: &str,
+        health: &super::RouteHealthRegistry,
+        may_probe: bool,
+    ) -> ForwardCandidateScan {
+        let mut skipped_routes = Vec::new();
+        for (index, candidate) in routing.participants.iter().enumerate().skip(start_index) {
+            if candidate.fallback_excluded_models.contains(model) {
+                skipped_routes.push(super::FallbackActivationSkip {
+                    route: Arc::clone(candidate),
+                    kind: super::ActivatedSkipKind::ModelFallbackExcluded,
+                });
+                continue;
+            }
+            let candidate_health =
+                health.candidate_health(&candidate.route_id, routing.health_generation);
+            if candidate_health == super::CandidateHealth::Closed
+                || (may_probe && candidate_health == super::CandidateHealth::OpenReady)
+            {
+                return ForwardCandidateScan {
+                    candidate: Some(ForwardCandidate {
+                        index,
+                        route: Arc::clone(candidate),
+                        health: candidate_health,
+                    }),
+                    skipped: skipped_routes,
+                };
+            }
+            skipped_routes.push(super::FallbackActivationSkip {
+                route: Arc::clone(candidate),
+                kind: super::ActivatedSkipKind::HealthUnavailable,
+            });
+        }
+        ForwardCandidateScan {
+            candidate: None,
+            skipped: skipped_routes,
+        }
+    }
+
+    fn forward_candidate(
+        routing: &RoutingSnapshot,
+        source_route_id: &crate::domain::RouteId,
+        model: &str,
+        health: &super::RouteHealthRegistry,
+    ) -> (
+        Option<Arc<super::RouteSnapshot>>,
+        Vec<super::FallbackActivationSkip>,
+    ) {
+        let source_index = routing
+            .participants
+            .iter()
+            .position(|route| &route.route_id == source_route_id);
+        source_index.map_or_else(
+            || (None, Vec::new()),
+            |source_index| {
+                let scan =
+                    Self::forward_candidate_from(routing, source_index + 1, model, health, false);
+                (
+                    scan.candidate.map(|candidate| candidate.route),
+                    scan.skipped,
+                )
+            },
+        )
+    }
+
     /// Creates the single-attempt Responses forwarder.
     ///
     /// # Errors
@@ -114,6 +235,7 @@ impl ResponsesForwarder {
             routing: RoutingSnapshotStore::default(),
             activator: Arc::new(NoopFallbackActivator),
             transitions: Arc::new(NoopRequestTransitionSink),
+            route_health: None,
         })
     }
 
@@ -147,6 +269,15 @@ impl ResponsesForwarder {
         transitions: Arc<dyn RequestTransitionSink>,
     ) -> Self {
         self.transitions = transitions;
+        self
+    }
+
+    #[must_use]
+    pub fn with_route_health_registry(
+        mut self,
+        route_health: Arc<super::RouteHealthRegistry>,
+    ) -> Self {
+        self.route_health = Some(route_health);
         self
     }
 }
@@ -187,11 +318,500 @@ impl ResponsesForwarder {
         let mut routing = Arc::clone(&routed_request.routing);
         let participant_eligible = routing.active_participant_index().is_some();
         let mut attempt_index = 0_u32;
+        let mut forward_activation_used = false;
+        if self.route_health.is_some()
+            && routed_request
+                .route
+                .fallback_excluded_models
+                .contains(&routed_request.model)
+        {
+            let result = self
+                .forward_once(&routed_request, attempt_index, AttemptRole::Ordinary, None)
+                .await;
+            return match result {
+                AttemptResult::Committed(response) => {
+                    self.terminal_response(&routed_request.request_id, response)
+                }
+                AttemptResult::PrecommitFailure { response, failure }
+                    if failure.policy == FailurePolicy::ForwardImmediately =>
+                {
+                    self.stopped_response(
+                        &routed_request.request_id,
+                        attempt_index,
+                        response,
+                        FallbackStopReason::ModelFallbackExcluded,
+                        None,
+                    )
+                }
+                AttemptResult::PrecommitFailure { response, .. } => self.stopped_response(
+                    &routed_request.request_id,
+                    attempt_index,
+                    response,
+                    FallbackStopReason::FailureNotEligible,
+                    None,
+                ),
+            };
+        }
+        if routing.enabled {
+            if let (Some(health), Some(active_index)) = (
+                self.route_health.as_ref(),
+                routing.active_participant_index(),
+            ) {
+                let earlier_candidates = routing.participants[..active_index]
+                    .iter()
+                    .filter(|route| {
+                        !route
+                            .fallback_excluded_models
+                            .contains(&routed_request.model)
+                    })
+                    .map(|route| route.route_id.clone())
+                    .collect::<Vec<_>>();
+                if let super::ProbeLeaseResult::Acquired(lease) =
+                    health.try_acquire_probe(&earlier_candidates, routing.health_generation)
+                {
+                    let mut probe_guard =
+                        ProbeCancellationGuard::new(Arc::clone(health), lease.clone());
+                    let probe_route = routing
+                        .participants
+                        .iter()
+                        .find(|route| route.route_id == lease.route_id)
+                        .cloned()
+                        .expect("leased recovery route belongs to snapshot");
+                    let mut probe_request = routed_request.clone();
+                    probe_request.route = Arc::clone(&probe_route);
+                    let probe_result = self
+                        .forward_once(
+                            &probe_request,
+                            attempt_index,
+                            AttemptRole::RecoveryProbe,
+                            Some(super::RECOVERY_EVIDENCE_DEADLINE),
+                        )
+                        .await;
+                    match probe_result {
+                        AttemptResult::PrecommitFailure { failure, .. } => {
+                            if failure.policy == FailurePolicy::ForwardImmediately {
+                                health
+                                    .complete_probe_failure(&lease, health_failure_class(failure));
+                            } else {
+                                health.complete_probe_neutral(&lease);
+                            }
+                            probe_guard.complete();
+                            self.record_routing_transition(
+                                &routed_request.request_id,
+                                attempt_index,
+                                RoutingTransitionKind::ResumeCaptured,
+                                &routed_request.route,
+                                &[],
+                            );
+                            attempt_index =
+                                checked_next_attempt_index(attempt_index).unwrap_or(u32::MAX);
+                        }
+                        AttemptResult::Committed(response) => {
+                            if response
+                                .extensions()
+                                .get::<PositiveHealthEvidence>()
+                                .is_none()
+                            {
+                                health.complete_probe_committed(&lease);
+                                probe_guard.complete();
+                                return self
+                                    .terminal_response(&routed_request.request_id, response);
+                            }
+                            let completion = health.complete_probe_positive(&lease);
+                            if completion != super::ProbeCompletion::SecondPositiveReady {
+                                probe_guard.complete();
+                            }
+                            match completion {
+                                super::ProbeCompletion::FirstPositive => {
+                                    return self.stopped_response(
+                                        &routed_request.request_id,
+                                        attempt_index,
+                                        response,
+                                        FallbackStopReason::RecoveryConfirmationPending,
+                                        None,
+                                    );
+                                }
+                                super::ProbeCompletion::SecondPositiveReady => {
+                                    let activation = self
+                                        .activator
+                                        .activate_next(FallbackActivationRequest {
+                                            request_id: routed_request.request_id.clone(),
+                                            routing: Arc::clone(&routing),
+                                            current_route_id: routed_request.route.route_id.clone(),
+                                            target_route: Arc::clone(&probe_route),
+                                            requested_model: routed_request.model.clone(),
+                                            skipped_routes: Vec::new(),
+                                            mode: super::FallbackActivationMode::Recover,
+                                            health_proof: Some(
+                                                super::HealthActivationProof::Recover {
+                                                    target: lease.clone(),
+                                                },
+                                            ),
+                                        })
+                                        .await;
+                                    match activation {
+                                        Ok(Some(_next_routing)) => {
+                                            self.record_routing_transition(
+                                                &routed_request.request_id,
+                                                attempt_index,
+                                                RoutingTransitionKind::Recover,
+                                                &probe_route,
+                                                &[],
+                                            );
+                                        }
+                                        Ok(None) => {
+                                            health.discard_probe(&lease);
+                                        }
+                                        Err(super::FallbackActivationError::Persistence) => {
+                                            health.complete_probe_activation_failure(&lease);
+                                            self.emit_activation_persistence_failure(
+                                                &routed_request.request_id,
+                                                &probe_route.route_id,
+                                            );
+                                        }
+                                    }
+                                    probe_guard.complete();
+                                    return self
+                                        .terminal_response(&routed_request.request_id, response);
+                                }
+                                super::ProbeCompletion::Stale | super::ProbeCompletion::Applied => {
+                                    return self
+                                        .terminal_response(&routed_request.request_id, response);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let (Some(health), true) = (self.route_health.as_ref(), routing.enabled) {
+            if let Some(lease) =
+                health.claim_pending(&routed_request.route.route_id, routing.health_generation)
+            {
+                if health.reserve_trip(&lease) {
+                    let mut activation_lease = lease;
+                    let source_index = routing
+                        .participants
+                        .iter()
+                        .position(|route| route.route_id == routed_request.route.route_id)
+                        .expect("pending source belongs to participant snapshot");
+                    let mut scan_index = source_index + 1;
+                    let mut skipped_routes = Vec::new();
+                    let mut target_route = None;
+                    let mut probe_used = false;
+                    loop {
+                        let scan = Self::forward_candidate_from(
+                            &routing,
+                            scan_index,
+                            &routed_request.model,
+                            health,
+                            !probe_used,
+                        );
+                        skipped_routes.extend(scan.skipped);
+                        let Some(candidate) = scan.candidate else {
+                            break;
+                        };
+                        let candidate_index = candidate.index;
+                        let candidate_health = candidate.health;
+                        let candidate = candidate.route;
+                        if candidate_health == super::CandidateHealth::Closed {
+                            if probe_used {
+                                let Some(reclaimed) = health.claim_pending(
+                                    &routed_request.route.route_id,
+                                    routing.health_generation,
+                                ) else {
+                                    break;
+                                };
+                                if !health.reserve_trip(&reclaimed) {
+                                    break;
+                                }
+                                activation_lease = reclaimed;
+                            }
+                            target_route = Some(candidate);
+                            break;
+                        }
+                        match health.try_acquire_later_probe(&activation_lease, &candidate.route_id)
+                        {
+                            super::LaterProbeLeaseResult::Acquired {
+                                source,
+                                probe: probe_lease,
+                            } => {
+                                let mut probe_guard = ProbeCancellationGuard::new(
+                                    Arc::clone(health),
+                                    probe_lease.clone(),
+                                );
+                                probe_used = true;
+                                let probe_attempt_index = attempt_index;
+                                let mut probe_request = routed_request.clone();
+                                probe_request.route = Arc::clone(&candidate);
+                                let probe_result = self
+                                    .forward_once(
+                                        &probe_request,
+                                        probe_attempt_index,
+                                        AttemptRole::RecoveryProbe,
+                                        Some(super::RECOVERY_EVIDENCE_DEADLINE),
+                                    )
+                                    .await;
+                                match probe_result {
+                                    AttemptResult::PrecommitFailure { failure, .. } => {
+                                        if failure.policy == FailurePolicy::ForwardImmediately {
+                                            health.complete_probe_failure(
+                                                &probe_lease,
+                                                health_failure_class(failure),
+                                            );
+                                        } else {
+                                            health.complete_probe_neutral(&probe_lease);
+                                        }
+                                        probe_guard.complete();
+                                        self.record_routing_transition(
+                                            &routed_request.request_id,
+                                            probe_attempt_index,
+                                            RoutingTransitionKind::ResumeCaptured,
+                                            &routed_request.route,
+                                            &[],
+                                        );
+                                        let Some(next_index) =
+                                            checked_next_attempt_index(attempt_index)
+                                        else {
+                                            break;
+                                        };
+                                        attempt_index = next_index;
+                                        skipped_routes.push(super::FallbackActivationSkip {
+                                            route: Arc::clone(&candidate),
+                                            kind: super::ActivatedSkipKind::HealthUnavailable,
+                                        });
+                                        scan_index = candidate_index + 1;
+                                    }
+                                    AttemptResult::Committed(probe_response) => {
+                                        if probe_response
+                                            .extensions()
+                                            .get::<PositiveHealthEvidence>()
+                                            .is_none()
+                                        {
+                                            health.complete_probe_committed(&probe_lease);
+                                            probe_guard.complete();
+                                            return self.terminal_response(
+                                                &routed_request.request_id,
+                                                probe_response,
+                                            );
+                                        }
+                                        let completion =
+                                            health.complete_probe_positive(&probe_lease);
+                                        if completion != super::ProbeCompletion::SecondPositiveReady
+                                        {
+                                            probe_guard.complete();
+                                        }
+                                        match completion {
+                                            super::ProbeCompletion::FirstPositive => {
+                                                return self.stopped_response(
+                                                    &routed_request.request_id,
+                                                    probe_attempt_index,
+                                                    probe_response,
+                                                    FallbackStopReason::RecoveryConfirmationPending,
+                                                    None,
+                                                );
+                                            }
+                                            super::ProbeCompletion::SecondPositiveReady => {
+                                                let activation = self
+                                                    .activator
+                                                    .activate_next(FallbackActivationRequest {
+                                                        request_id: routed_request
+                                                            .request_id
+                                                            .clone(),
+                                                        routing: Arc::clone(&routing),
+                                                        current_route_id: routed_request
+                                                            .route
+                                                            .route_id
+                                                            .clone(),
+                                                        target_route: Arc::clone(&candidate),
+                                                        requested_model: routed_request
+                                                            .model
+                                                            .clone(),
+                                                        skipped_routes: skipped_routes.clone(),
+                                                        mode: super::FallbackActivationMode::AdvanceRecovered,
+                                                        health_proof: Some(
+                                                            super::HealthActivationProof::AdvanceRecovered {
+                                                                source: source.clone(),
+                                                                target: probe_lease.clone(),
+                                                            },
+                                                        ),
+                                                    })
+                                                    .await;
+                                                match activation {
+                                                    Ok(Some(_next_routing)) => {
+                                                        self.record_routing_transition(
+                                                            &routed_request.request_id,
+                                                            probe_attempt_index,
+                                                            RoutingTransitionKind::Recover,
+                                                            &candidate,
+                                                            &[],
+                                                        );
+                                                    }
+                                                    Ok(None) => {
+                                                        health.discard_probe(&probe_lease);
+                                                    }
+                                                    Err(
+                                                        super::FallbackActivationError::Persistence,
+                                                    ) => {
+                                                        health.complete_probe_activation_failure(
+                                                            &probe_lease,
+                                                        );
+                                                        health.defer_pending_activation(&source);
+                                                        self.emit_activation_persistence_failure(
+                                                            &routed_request.request_id,
+                                                            &candidate.route_id,
+                                                        );
+                                                    }
+                                                }
+                                                probe_guard.complete();
+                                                return self.terminal_response(
+                                                    &routed_request.request_id,
+                                                    probe_response,
+                                                );
+                                            }
+                                            super::ProbeCompletion::Stale
+                                            | super::ProbeCompletion::Applied => {
+                                                return self.terminal_response(
+                                                    &routed_request.request_id,
+                                                    probe_response,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            super::LaterProbeLeaseResult::Busy
+                            | super::LaterProbeLeaseResult::NotReady => {
+                                skipped_routes.push(super::FallbackActivationSkip {
+                                    route: Arc::clone(&candidate),
+                                    kind: super::ActivatedSkipKind::HealthUnavailable,
+                                });
+                                scan_index = candidate_index + 1;
+                            }
+                            super::LaterProbeLeaseResult::Stale => break,
+                        }
+                    }
+                    if let Some(target_route) = target_route {
+                        forward_activation_used = true;
+                        match self
+                            .activator
+                            .activate_next(FallbackActivationRequest {
+                                request_id: routed_request.request_id.clone(),
+                                routing: Arc::clone(&routing),
+                                current_route_id: routed_request.route.route_id.clone(),
+                                target_route: Arc::clone(&target_route),
+                                requested_model: routed_request.model.clone(),
+                                skipped_routes: skipped_routes.clone(),
+                                mode: super::FallbackActivationMode::Advance,
+                                health_proof: Some(super::HealthActivationProof::Advance {
+                                    source: activation_lease.clone(),
+                                }),
+                            })
+                            .await
+                        {
+                            Ok(Some(next_routing)) => {
+                                if let Some(source_attempt) =
+                                    activation_lease.source_attempt.as_ref()
+                                {
+                                    self.record_routing_transition(
+                                        &source_attempt.request_id,
+                                        source_attempt.attempt_index,
+                                        RoutingTransitionKind::ActivateNext,
+                                        &target_route,
+                                        &skipped_routes,
+                                    );
+                                }
+                                routing = next_routing;
+                                routed_request.route = target_route;
+                            }
+                            Ok(None) => {
+                                health.discard_trip(&activation_lease);
+                                let result = self
+                                    .forward_once(
+                                        &routed_request,
+                                        attempt_index,
+                                        AttemptRole::Ordinary,
+                                        None,
+                                    )
+                                    .await;
+                                return match result {
+                                    AttemptResult::Committed(response) => {
+                                        self.terminal_response(&routed_request.request_id, response)
+                                    }
+                                    AttemptResult::PrecommitFailure { response, .. } => self
+                                        .stopped_response(
+                                            &routed_request.request_id,
+                                            attempt_index,
+                                            response,
+                                            FallbackStopReason::StalePolicy,
+                                            Some(&target_route),
+                                        ),
+                                };
+                            }
+                            Err(super::FallbackActivationError::Persistence) => {
+                                health.release_trip(&activation_lease, true);
+                                self.emit_activation_persistence_failure(
+                                    &routed_request.request_id,
+                                    &routed_request.route.route_id,
+                                );
+                                let result = self
+                                    .forward_once(
+                                        &routed_request,
+                                        attempt_index,
+                                        AttemptRole::Ordinary,
+                                        None,
+                                    )
+                                    .await;
+                                return match result {
+                                    AttemptResult::Committed(response) => {
+                                        if response
+                                            .extensions()
+                                            .get::<PositiveHealthEvidence>()
+                                            .is_some()
+                                        {
+                                            health.record_ordinary_positive(
+                                                &routed_request.route.route_id,
+                                                routing.health_generation,
+                                            );
+                                        }
+                                        self.terminal_response(&routed_request.request_id, response)
+                                    }
+                                    AttemptResult::PrecommitFailure { response, .. } => self
+                                        .stopped_response(
+                                            &routed_request.request_id,
+                                            attempt_index,
+                                            response,
+                                            FallbackStopReason::ActivationFailed,
+                                            Some(&target_route),
+                                        ),
+                                };
+                            }
+                        }
+                    } else {
+                        health.release_trip(&activation_lease, false);
+                    }
+                }
+            }
+        }
         loop {
             routed_request.routing = Arc::clone(&routing);
-            let (response, failure) = match self.forward_once(&routed_request, attempt_index).await
-            {
+            let attempt_result = self
+                .forward_once(&routed_request, attempt_index, AttemptRole::Ordinary, None)
+                .await;
+            let (response, failure) = match attempt_result {
                 AttemptResult::Committed(response) => {
+                    if response
+                        .extensions()
+                        .get::<PositiveHealthEvidence>()
+                        .is_some()
+                    {
+                        if let Some(health) = self.route_health.as_ref() {
+                            health.record_ordinary_positive(
+                                &routed_request.route.route_id,
+                                routing.health_generation,
+                            );
+                        }
+                    }
                     return self.terminal_response(&routed_request.request_id, response);
                 }
                 AttemptResult::PrecommitFailure { response, failure } => (response, failure),
@@ -214,12 +834,297 @@ impl ResponsesForwarder {
                     None,
                 );
             }
-            let Some(target_route) = routing.next_after(&routed_request.route.route_id) else {
+            let mut trip_lease = None;
+            if let Some(health) = self.route_health.as_ref() {
+                let has_successor = routing.next_after(&routed_request.route.route_id).is_some();
+                if !has_successor {
+                    return self.stopped_response(
+                        &routed_request.request_id,
+                        attempt_index,
+                        response,
+                        FallbackStopReason::AllParticipantsAttempted,
+                        None,
+                    );
+                }
+                match health.record_ordinary_failure_for_attempt(
+                    &routed_request.route.route_id,
+                    routing.health_generation,
+                    health_failure_class(failure),
+                    has_successor,
+                    !forward_activation_used,
+                    super::HealthAttemptRef {
+                        request_id: routed_request.request_id.clone(),
+                        attempt_index,
+                    },
+                ) {
+                    super::StrikeResult::BelowThreshold { .. } => {
+                        return self.stopped_response(
+                            &routed_request.request_id,
+                            attempt_index,
+                            response,
+                            FallbackStopReason::FailureThresholdNotReached,
+                            None,
+                        );
+                    }
+                    super::StrikeResult::TripAcquired(lease) => {
+                        if !health.reserve_trip(&lease) {
+                            return self.stopped_response(
+                                &routed_request.request_id,
+                                attempt_index,
+                                response,
+                                FallbackStopReason::FailureThresholdReachedPending,
+                                None,
+                            );
+                        }
+                        trip_lease = Some(lease);
+                    }
+                    super::StrikeResult::Pending | super::StrikeResult::TripBusy => {
+                        return self.stopped_response(
+                            &routed_request.request_id,
+                            attempt_index,
+                            response,
+                            FallbackStopReason::FailureThresholdReachedPending,
+                            None,
+                        );
+                    }
+                    super::StrikeResult::Ignored | super::StrikeResult::Stale => {
+                        return self.stopped_response(
+                            &routed_request.request_id,
+                            attempt_index,
+                            response,
+                            FallbackStopReason::StalePolicy,
+                            None,
+                        );
+                    }
+                }
+            }
+            let (target_route, skipped_routes) = if let (Some(health), Some(initial_trip)) =
+                (self.route_health.as_ref(), trip_lease.clone())
+            {
+                let source_index = routing
+                    .participants
+                    .iter()
+                    .position(|route| route.route_id == routed_request.route.route_id)
+                    .expect("eligible source belongs to participant snapshot");
+                let mut scan_index = source_index + 1;
+                let mut skipped_routes = Vec::new();
+                let mut probe_used = false;
+                let mut pending_source = None;
+                let mut target_route = None;
+                loop {
+                    let scan = Self::forward_candidate_from(
+                        &routing,
+                        scan_index,
+                        &routed_request.model,
+                        health,
+                        !probe_used && pending_source.is_none(),
+                    );
+                    skipped_routes.extend(scan.skipped);
+                    let Some(candidate) = scan.candidate else {
+                        break;
+                    };
+                    let candidate_index = candidate.index;
+                    let candidate_health = candidate.health;
+                    let candidate = candidate.route;
+                    if candidate_health == super::CandidateHealth::Closed {
+                        if trip_lease.is_none() {
+                            let Some(reclaimed) = health.claim_pending(
+                                &routed_request.route.route_id,
+                                routing.health_generation,
+                            ) else {
+                                break;
+                            };
+                            if !health.reserve_trip(&reclaimed) {
+                                break;
+                            }
+                            trip_lease = Some(reclaimed);
+                        }
+                        target_route = Some(candidate);
+                        break;
+                    }
+                    let active_trip = trip_lease.as_ref().unwrap_or(&initial_trip);
+                    match health.try_acquire_later_probe(active_trip, &candidate.route_id) {
+                        super::LaterProbeLeaseResult::Acquired {
+                            source,
+                            probe: lease,
+                        } => {
+                            let mut probe_guard =
+                                ProbeCancellationGuard::new(Arc::clone(health), lease.clone());
+                            trip_lease = None;
+                            pending_source = Some(source.clone());
+                            probe_used = true;
+                            let Some(probe_attempt_index) =
+                                checked_next_attempt_index(attempt_index)
+                            else {
+                                health.complete_probe_neutral(&lease);
+                                break;
+                            };
+                            let mut probe_request = routed_request.clone();
+                            probe_request.route = Arc::clone(&candidate);
+                            let probe_result = self
+                                .forward_once(
+                                    &probe_request,
+                                    probe_attempt_index,
+                                    AttemptRole::RecoveryProbe,
+                                    Some(super::RECOVERY_EVIDENCE_DEADLINE),
+                                )
+                                .await;
+                            match probe_result {
+                                AttemptResult::PrecommitFailure { failure, .. } => {
+                                    if failure.policy == FailurePolicy::ForwardImmediately {
+                                        health.complete_probe_failure(
+                                            &lease,
+                                            health_failure_class(failure),
+                                        );
+                                    } else {
+                                        health.complete_probe_neutral(&lease);
+                                    }
+                                    probe_guard.complete();
+                                    self.record_routing_transition(
+                                        &routed_request.request_id,
+                                        probe_attempt_index,
+                                        RoutingTransitionKind::ResumeCaptured,
+                                        &routed_request.route,
+                                        &[],
+                                    );
+                                    attempt_index = probe_attempt_index;
+                                    skipped_routes.push(super::FallbackActivationSkip {
+                                        route: Arc::clone(&candidate),
+                                        kind: super::ActivatedSkipKind::HealthUnavailable,
+                                    });
+                                    scan_index = candidate_index + 1;
+                                }
+                                AttemptResult::Committed(probe_response) => {
+                                    if probe_response
+                                        .extensions()
+                                        .get::<PositiveHealthEvidence>()
+                                        .is_none()
+                                    {
+                                        health.complete_probe_committed(&lease);
+                                        probe_guard.complete();
+                                        return self.terminal_response(
+                                            &routed_request.request_id,
+                                            probe_response,
+                                        );
+                                    }
+                                    let completion = health.complete_probe_positive(&lease);
+                                    if completion != super::ProbeCompletion::SecondPositiveReady {
+                                        probe_guard.complete();
+                                    }
+                                    match completion {
+                                        super::ProbeCompletion::FirstPositive => {
+                                            return self.stopped_response(
+                                                &routed_request.request_id,
+                                                probe_attempt_index,
+                                                probe_response,
+                                                FallbackStopReason::RecoveryConfirmationPending,
+                                                None,
+                                            );
+                                        }
+                                        super::ProbeCompletion::SecondPositiveReady => {
+                                            let activation = self
+                                                .activator
+                                                .activate_next(FallbackActivationRequest {
+                                                    request_id: routed_request.request_id.clone(),
+                                                    routing: Arc::clone(&routing),
+                                                    current_route_id: routed_request
+                                                        .route
+                                                        .route_id
+                                                        .clone(),
+                                                    target_route: Arc::clone(&candidate),
+                                                    requested_model: routed_request.model.clone(),
+                                                    skipped_routes: skipped_routes.clone(),
+                                                    mode: super::FallbackActivationMode::AdvanceRecovered,
+                                                    health_proof: Some(
+                                                        super::HealthActivationProof::AdvanceRecovered {
+                                                            source: source.clone(),
+                                                            target: lease.clone(),
+                                                        },
+                                                    ),
+                                                })
+                                                .await;
+                                            match activation {
+                                                Ok(Some(_next_routing)) => {
+                                                    self.record_routing_transition(
+                                                        &routed_request.request_id,
+                                                        probe_attempt_index,
+                                                        RoutingTransitionKind::Recover,
+                                                        &candidate,
+                                                        &[],
+                                                    );
+                                                }
+                                                Ok(None) => {
+                                                    health.discard_probe(&lease);
+                                                }
+                                                Err(
+                                                    super::FallbackActivationError::Persistence,
+                                                ) => {
+                                                    health
+                                                        .complete_probe_activation_failure(&lease);
+                                                    health.defer_pending_activation(&source);
+                                                    self.emit_activation_persistence_failure(
+                                                        &routed_request.request_id,
+                                                        &candidate.route_id,
+                                                    );
+                                                }
+                                            }
+                                            probe_guard.complete();
+                                            return self.terminal_response(
+                                                &routed_request.request_id,
+                                                probe_response,
+                                            );
+                                        }
+                                        super::ProbeCompletion::Stale
+                                        | super::ProbeCompletion::Applied => {
+                                            return self.terminal_response(
+                                                &routed_request.request_id,
+                                                probe_response,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        super::LaterProbeLeaseResult::Busy
+                        | super::LaterProbeLeaseResult::NotReady => {
+                            skipped_routes.push(super::FallbackActivationSkip {
+                                route: Arc::clone(&candidate),
+                                kind: super::ActivatedSkipKind::HealthUnavailable,
+                            });
+                            scan_index = candidate_index + 1;
+                        }
+                        super::LaterProbeLeaseResult::Stale => break,
+                    }
+                }
+                (target_route, skipped_routes)
+            } else if let Some(health) = self.route_health.as_ref() {
+                Self::forward_candidate(
+                    &routing,
+                    &routed_request.route.route_id,
+                    &routed_request.model,
+                    health,
+                )
+            } else {
+                (
+                    routing.next_after(&routed_request.route.route_id),
+                    Vec::new(),
+                )
+            };
+            let Some(target_route) = target_route else {
+                if let (Some(health), Some(lease)) =
+                    (self.route_health.as_ref(), trip_lease.as_ref())
+                {
+                    health.release_trip(lease, false);
+                }
                 return self.stopped_response(
                     &routed_request.request_id,
                     attempt_index,
                     response,
-                    FallbackStopReason::AllParticipantsAttempted,
+                    if self.route_health.is_some() {
+                        FallbackStopReason::FailureThresholdReachedPending
+                    } else {
+                        FallbackStopReason::AllParticipantsAttempted
+                    },
                     None,
                 );
             };
@@ -240,11 +1145,23 @@ impl ResponsesForwarder {
                     routing: Arc::clone(&routing),
                     current_route_id: routed_request.route.route_id.clone(),
                     target_route: Arc::clone(&target_route),
+                    requested_model: routed_request.model.clone(),
+                    skipped_routes: skipped_routes.clone(),
+                    mode: super::FallbackActivationMode::Advance,
+                    health_proof: trip_lease
+                        .clone()
+                        .map(|source| super::HealthActivationProof::Advance { source }),
                 })
                 .await;
+            forward_activation_used = true;
             let next_routing = match activation {
                 Ok(Some(next_routing)) => next_routing,
                 Ok(None) => {
+                    if let (Some(health), Some(lease)) =
+                        (self.route_health.as_ref(), trip_lease.as_ref())
+                    {
+                        health.discard_trip(lease);
+                    }
                     return self.stopped_response(
                         &routed_request.request_id,
                         attempt_index,
@@ -254,6 +1171,11 @@ impl ResponsesForwarder {
                     );
                 }
                 Err(super::FallbackActivationError::Persistence) => {
+                    if let (Some(health), Some(lease)) =
+                        (self.route_health.as_ref(), trip_lease.as_ref())
+                    {
+                        health.release_trip(lease, true);
+                    }
                     self.emit_activation_persistence_failure(
                         &routed_request.request_id,
                         &routed_request.route.route_id,
@@ -267,6 +1189,13 @@ impl ResponsesForwarder {
                     );
                 }
             };
+            self.record_routing_transition(
+                &routed_request.request_id,
+                attempt_index,
+                RoutingTransitionKind::ActivateNext,
+                &target_route,
+                &skipped_routes,
+            );
             routing = next_routing;
             routed_request.route = target_route;
             attempt_index = next_attempt_index;
@@ -277,21 +1206,29 @@ impl ResponsesForwarder {
         &self,
         request: &ValidatedProxyRequest,
         attempt_index: u32,
+        attempt_role: AttemptRole,
+        probe_evidence_timeout: Option<Duration>,
     ) -> AttemptResult {
-        let context = self.history_context(request, attempt_index);
+        let context = self.history_context_with_role(request, attempt_index, attempt_role);
         let Ok(headers) = build_upstream_headers(request) else {
             return Self::invalid_route_credentials(request, context);
         };
         let endpoint = request.route.base_url.inference_url();
         let body = upstream_request_body(request);
         let started = Instant::now();
+        let probe_deadline = probe_evidence_timeout.map(|timeout| started + timeout);
         let send = self
             .client
             .post(&endpoint)
             .headers(headers)
             .body(body)
             .send();
-        let upstream = match tokio::time::timeout(self.config.header_timeout, send).await {
+        let upstream = match tokio::time::timeout(
+            bounded_timeout(self.config.header_timeout, probe_deadline),
+            send,
+        )
+        .await
+        {
             Err(_) => {
                 let failure = classify_transport(TransportFailure::ElapsedTimeout);
                 context.finish_failure(
@@ -358,7 +1295,14 @@ impl ResponsesForwarder {
 
         if !upstream.status().is_success() {
             return self
-                .handle_error_response(upstream, request, context, &endpoint, started)
+                .handle_error_response(
+                    upstream,
+                    request,
+                    context,
+                    &endpoint,
+                    started,
+                    probe_deadline,
+                )
                 .await;
         }
         if request.stream {
@@ -366,7 +1310,13 @@ impl ResponsesForwarder {
                 && self.policy_current(&request.routing, &request.route.route_id)
             {
                 return self
-                    .preflight_stream(upstream, request, context, request.request_started)
+                    .preflight_stream(
+                        upstream,
+                        request,
+                        context,
+                        request.request_started,
+                        probe_deadline,
+                    )
                     .await;
             }
             return AttemptResult::Committed(streaming_response(
@@ -375,7 +1325,7 @@ impl ResponsesForwarder {
                 context,
             ));
         }
-        self.handle_non_streaming_response(upstream, request, context, started)
+        self.handle_non_streaming_response(upstream, request, context, started, probe_deadline)
             .await
     }
 
@@ -397,14 +1347,25 @@ impl ResponsesForwarder {
         ))
     }
 
+    #[allow(dead_code)]
     fn history_context(
         &self,
         request: &ValidatedProxyRequest,
         attempt_index: u32,
     ) -> RequestHistoryContext {
-        RequestHistoryContext::new(
+        self.history_context_with_role(request, attempt_index, AttemptRole::Ordinary)
+    }
+
+    fn history_context_with_role(
+        &self,
+        request: &ValidatedProxyRequest,
+        attempt_index: u32,
+        attempt_role: AttemptRole,
+    ) -> RequestHistoryContext {
+        RequestHistoryContext::new_with_role(
             request,
             attempt_index,
+            attempt_role,
             Arc::clone(&self.history),
             Arc::clone(&self.diagnostics),
             self.inference_status.clone(),
@@ -421,6 +1382,7 @@ impl ResponsesForwarder {
         current.enabled
             && current.config_revision == expected.config_revision
             && current.selection_generation == expected.selection_generation
+            && current.health_generation == expected.health_generation
             && current.active.as_ref().map(|route| &route.route_id) == Some(route_id)
     }
 
@@ -454,19 +1416,54 @@ impl ResponsesForwarder {
         });
     }
 
+    fn record_routing_transition(
+        &self,
+        request_id: &str,
+        attempt_index: u32,
+        kind: RoutingTransitionKind,
+        target_route: &Arc<super::RouteSnapshot>,
+        skipped_routes: &[super::FallbackActivationSkip],
+    ) {
+        let _ = self
+            .history
+            .try_record_routing_transition(AttemptRoutingTransitionRecord {
+                request_id: request_id.to_owned(),
+                attempt_index,
+                transition: AttemptRoutingTransition {
+                    kind,
+                    target_route_id: target_route.route_id.clone(),
+                    target_route_name: target_route.name.clone(),
+                    skipped_routes: skipped_routes
+                        .iter()
+                        .filter(|skip| skip.kind == super::ActivatedSkipKind::ModelFallbackExcluded)
+                        .map(|skip| crate::storage::RoutingTransitionSkip {
+                            route_id: skip.route.route_id.clone(),
+                            route_name: skip.route.name.clone(),
+                        })
+                        .collect(),
+                },
+            });
+    }
+
     async fn handle_non_streaming_response(
         &self,
         upstream: reqwest::Response,
         request: &ValidatedProxyRequest,
         context: RequestHistoryContext,
         started: Instant,
+        probe_deadline: Option<Instant>,
     ) -> AttemptResult {
         let upstream_status = upstream.status();
         let remaining = self
             .config
             .non_stream_timeout
             .saturating_sub(started.elapsed());
-        match tokio::time::timeout(remaining, self.non_streaming_response(upstream)).await {
+        match tokio::time::timeout(
+            bounded_timeout(remaining, probe_deadline),
+            self.non_streaming_response(upstream),
+        )
+        .await
+        {
             Err(_) => {
                 let failure = classify_transport(TransportFailure::ElapsedTimeout);
                 context.finish_failure(
@@ -515,6 +1512,12 @@ impl ResponsesForwarder {
                     );
                     AttemptResult::failure(result.response, failure)
                 } else {
+                    mark_activity_terminal(
+                        request.activity_reporter.as_ref(),
+                        &result.metadata,
+                        request.request_declares_local_shell,
+                        true,
+                    );
                     context.finish_attempt(
                         CompletionState::Completed,
                         Some(result.status),
@@ -525,7 +1528,9 @@ impl ResponsesForwarder {
                         Some(InferenceOutcome::Success),
                         None,
                     );
-                    AttemptResult::Committed(result.response)
+                    let mut response = result.response;
+                    response.extensions_mut().insert(PositiveHealthEvidence);
+                    AttemptResult::Committed(response)
                 }
             }
         }
@@ -538,6 +1543,7 @@ impl ResponsesForwarder {
         context: RequestHistoryContext,
         endpoint: &str,
         started: Instant,
+        probe_deadline: Option<Instant>,
     ) -> AttemptResult {
         let status = upstream.status();
         let remaining = self
@@ -545,7 +1551,7 @@ impl ResponsesForwarder {
             .non_stream_timeout
             .saturating_sub(started.elapsed());
         match tokio::time::timeout(
-            remaining,
+            bounded_timeout(remaining, probe_deadline),
             self.normalize_upstream_error(upstream, request, endpoint),
         )
         .await
@@ -616,10 +1622,14 @@ impl ResponsesForwarder {
         request: &ValidatedProxyRequest,
         context: RequestHistoryContext,
         request_started: Instant,
+        probe_deadline: Option<Instant>,
     ) -> AttemptResult {
         let mut preflight = SsePreflight::new(upstream, context, request_started);
         let mut changed = self.routing.subscribe();
-        let deadline = tokio::time::sleep(self.config.first_output_timeout);
+        let deadline = tokio::time::sleep(bounded_timeout(
+            self.config.first_output_timeout,
+            probe_deadline,
+        ));
         tokio::pin!(deadline);
 
         loop {
@@ -953,7 +1963,11 @@ impl SsePreflight {
         reason: PreflightCommitReason,
         stop_reason: Option<FallbackStopReason>,
     ) -> AttemptResult {
-        AttemptResult::Committed(streaming_response_from_parts(
+        let positive = matches!(
+            reason,
+            PreflightCommitReason::MeaningfulOutput | PreflightCommitReason::TerminalSuccess
+        );
+        let mut response = streaming_response_from_parts(
             self.status,
             self.headers,
             self.buffered,
@@ -963,7 +1977,11 @@ impl SsePreflight {
             stop_reason,
             self.effective_sse,
             Some(reason),
-        ))
+        );
+        if positive {
+            response.extensions_mut().insert(PositiveHealthEvidence);
+        }
+        AttemptResult::Committed(response)
     }
 
     fn terminal_failure(self) -> AttemptResult {
@@ -1070,6 +2088,26 @@ enum AttemptResult {
     },
 }
 
+#[derive(Clone, Copy)]
+struct PositiveHealthEvidence;
+
+fn health_failure_class(failure: ClassifiedFailure) -> super::HealthFailureClass {
+    match failure.reason {
+        Some(InferenceFailureReason::Connection) => super::HealthFailureClass::Connection,
+        Some(InferenceFailureReason::Timeout) => super::HealthFailureClass::Timeout,
+        Some(InferenceFailureReason::RateLimit) => super::HealthFailureClass::RateLimit,
+        Some(InferenceFailureReason::Authentication | InferenceFailureReason::InvalidKey) => {
+            super::HealthFailureClass::Authentication
+        }
+        Some(InferenceFailureReason::InsufficientQuota) => super::HealthFailureClass::Quota,
+        Some(InferenceFailureReason::BillingLimit) => super::HealthFailureClass::Billing,
+        _ if failure.category == "upstream_model_unavailable" => {
+            super::HealthFailureClass::ModelUnavailable
+        }
+        _ => super::HealthFailureClass::Service,
+    }
+}
+
 impl AttemptResult {
     fn failure(response: Response, failure: ClassifiedFailure) -> Self {
         Self::PrecommitFailure { response, failure }
@@ -1101,16 +2139,40 @@ struct RequestHistoryContext {
     attempt_started_at_ms: i64,
     attempt_id: UpstreamAttemptId,
     attempt_index: u32,
+    attempt_role: AttemptRole,
     history: Arc<dyn HistorySink>,
     diagnostics: Arc<dyn RuntimeDiagnosticSink>,
     inference_status: Option<InferenceStatusService>,
     transitions: Arc<dyn RequestTransitionSink>,
+    activity_reporter: Option<super::LogicalRequestActivityReporter>,
+    request_declares_local_shell: bool,
 }
 
 impl RequestHistoryContext {
+    #[allow(dead_code)]
     fn new(
         request: &ValidatedProxyRequest,
         attempt_index: u32,
+        history: Arc<dyn HistorySink>,
+        diagnostics: Arc<dyn RuntimeDiagnosticSink>,
+        inference_status: Option<InferenceStatusService>,
+        transitions: Arc<dyn RequestTransitionSink>,
+    ) -> Self {
+        Self::new_with_role(
+            request,
+            attempt_index,
+            AttemptRole::Ordinary,
+            history,
+            diagnostics,
+            inference_status,
+            transitions,
+        )
+    }
+
+    fn new_with_role(
+        request: &ValidatedProxyRequest,
+        attempt_index: u32,
+        attempt_role: AttemptRole,
         history: Arc<dyn HistorySink>,
         diagnostics: Arc<dyn RuntimeDiagnosticSink>,
         inference_status: Option<InferenceStatusService>,
@@ -1139,10 +2201,13 @@ impl RequestHistoryContext {
             attempt_started_at_ms: now_millis(),
             attempt_id: UpstreamAttemptId::new(),
             attempt_index,
+            attempt_role,
             history,
             diagnostics,
             inference_status,
             transitions,
+            activity_reporter: request.activity_reporter.clone(),
+            request_declares_local_shell: request.request_declares_local_shell,
         }
     }
 
@@ -1242,6 +2307,7 @@ impl RequestHistoryContext {
         let attempt = delivery_state.map(|delivery_state| AttemptHistoryRecord {
             attempt_id: self.attempt_id,
             attempt_index: self.attempt_index,
+            attempt_role: self.attempt_role,
             route_id: self.route_id.clone(),
             route_name: self.route_name.clone(),
             started_at_ms: self.attempt_started_at_ms,
@@ -1312,6 +2378,32 @@ fn metadata_indicates_failure(metadata: &ResponseMetadata) -> bool {
             .is_some_and(|status| matches!(status, "failed" | "cancelled" | "incomplete"))
 }
 
+fn mark_activity_terminal(
+    reporter: Option<&super::LogicalRequestActivityReporter>,
+    metadata: &ResponseMetadata,
+    request_declares_local_shell: bool,
+    successful_transport: bool,
+) {
+    let Some(reporter) = reporter else {
+        return;
+    };
+    let successful_terminal = successful_transport
+        && metadata.complete
+        && metadata.terminal_success
+        && !metadata_indicates_failure(metadata);
+    let disposition = if successful_terminal
+        && (metadata.tool_handoff.has_client()
+            || metadata.tool_handoff.has_shell() && request_declares_local_shell)
+    {
+        RequestActivityDisposition::ClientToolHandoff
+    } else if successful_terminal {
+        RequestActivityDisposition::Final
+    } else {
+        RequestActivityDisposition::Failure
+    };
+    reporter.mark_terminal(disposition);
+}
+
 fn project_non_streaming_metadata(body: &[u8]) -> ResponseMetadata {
     let Ok(projection) = serde_json::from_slice::<NonStreamingProjection>(body) else {
         return ResponseMetadata {
@@ -1319,6 +2411,21 @@ fn project_non_streaming_metadata(body: &[u8]) -> ResponseMetadata {
             ..ResponseMetadata::default()
         };
     };
+    let tool_handoff =
+        projection
+            .output
+            .iter()
+            .fold(
+                super::sse::ResponseToolHandoff::None,
+                |handoff, item| match item.item_type.as_deref() {
+                    Some(
+                        "function_call" | "custom_tool_call" | "local_shell_call" | "computer_call",
+                    ) => handoff.with_client(),
+                    Some("shell_call") => handoff.with_shell(),
+                    _ => handoff,
+                },
+            );
+    let terminal_success = projection.status.as_deref() == Some("completed");
     ResponseMetadata {
         response_id: projection
             .id
@@ -1350,6 +2457,8 @@ fn project_non_streaming_metadata(body: &[u8]) -> ResponseMetadata {
             .and_then(|usage| usage.input_details.as_ref())
             .and_then(|details| details.cache_write),
         first_output_latency_ms: None,
+        tool_handoff,
+        terminal_success,
         complete: true,
     }
 }
@@ -1362,6 +2471,14 @@ struct NonStreamingProjection {
     status: Option<String>,
     usage: Option<NonStreamingUsageProjection>,
     error: Option<NonStreamingErrorProjection>,
+    #[serde(default)]
+    output: Vec<NonStreamingOutputItemProjection>,
+}
+
+#[derive(Deserialize)]
+struct NonStreamingOutputItemProjection {
+    #[serde(rename = "type")]
+    item_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1572,6 +2689,15 @@ fn finish_stream_attempt(
     let history = Arc::clone(&context.history);
     let transitions = Arc::clone(&context.transitions);
     let semantic_failure = metadata_indicates_failure(&result.metadata);
+    mark_activity_terminal(
+        context.activity_reporter.as_ref(),
+        &result.metadata,
+        context.request_declares_local_shell,
+        matches!(
+            result.outcome,
+            SseStreamOutcome::Completed | SseStreamOutcome::TerminalGraceElapsed
+        ) && !semantic_failure,
+    );
     let response_committed =
         semantic_failure || matches!(result.outcome, SseStreamOutcome::UpstreamReadFailed);
     let semantic_classification = semantic_failure.then(|| {
@@ -1996,7 +3122,7 @@ mod tests {
         io,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
     };
 
@@ -2012,7 +3138,11 @@ mod tests {
     use super::*;
     use crate::{
         domain::{ApiKey, BaseUrl, InferenceStatusKind, RouteId},
-        proxy::{InferenceStatusChangeSink, LocalErrorDto, ProxyServerHandle, RouteSnapshot},
+        proxy::{
+            AsyncHistoryRecorder, HistorySummaryChangeSink, InferenceStatusChangeSink,
+            LocalErrorDto, MonotonicClock, ProxyServerHandle, RouteSnapshot,
+        },
+        storage::{DatabaseExecutor, RoutingDecision, RoutingTransitionSkip},
     };
 
     fn request(stream: bool) -> ValidatedProxyRequest {
@@ -2040,12 +3170,15 @@ mod tests {
             base_url: BaseUrl::parse(base_url).expect("base URL"),
             api_key: Arc::new(ApiKey::parse("upstream-secret").expect("API key")),
             service_tier_policy: ServiceTierPolicy::Passthrough,
+            fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
         });
         ValidatedProxyRequest {
             request_id: "request-id".to_owned(),
             started_at_ms: now_millis(),
             request_started: Instant::now(),
             turn_id: None,
+            activity_reporter: None,
+            request_declares_local_shell: false,
             body: Bytes::from_static(br#"{"model":"gpt-test","reasoning":{"effort":"high"}}"#),
             body_without_service_tier: None,
             model: "gpt-test".to_owned(),
@@ -2058,6 +3191,7 @@ mod tests {
                 participants: vec![route],
                 enabled: false,
                 selection_generation: 0,
+                health_generation: 0,
                 config_revision: 0,
                 images_generation_enabled: false,
                 images_route: None,
@@ -2137,13 +3271,70 @@ mod tests {
     }
 
     fn route_snapshot(name: &str, base_url: &str) -> Arc<RouteSnapshot> {
+        route_snapshot_with_exclusions(name, base_url, &[])
+    }
+
+    fn route_snapshot_with_exclusions(
+        name: &str,
+        base_url: &str,
+        excluded_models: &[&str],
+    ) -> Arc<RouteSnapshot> {
         Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: name.to_owned(),
             base_url: BaseUrl::parse(base_url).expect("base URL"),
             api_key: Arc::new(ApiKey::parse(&format!("{name}-key")).expect("API key")),
             service_tier_policy: ServiceTierPolicy::Passthrough,
+            fallback_excluded_models: Arc::new(
+                excluded_models
+                    .iter()
+                    .map(|model| (*model).to_owned())
+                    .collect(),
+            ),
         })
+    }
+
+    fn set_request_model(request: &mut ValidatedProxyRequest, model: &str) {
+        request.model = model.to_owned();
+        request.body = Bytes::from(serde_json::json!({ "model": model }).to_string());
+    }
+
+    fn request_for_current_route(
+        template: &ValidatedProxyRequest,
+        routing: &RoutingSnapshotStore,
+        request_id: &str,
+        model: &str,
+    ) -> ValidatedProxyRequest {
+        let mut request = template.clone();
+        request.request_id = request_id.to_owned();
+        request.routing = routing.load();
+        request.route = request.routing.active.clone().expect("active route");
+        set_request_model(&mut request, model);
+        request
+    }
+
+    #[derive(Default)]
+    struct TestClock(AtomicU64);
+
+    impl TestClock {
+        fn advance(&self, duration: Duration) {
+            self.0.fetch_add(
+                u64::try_from(duration.as_millis()).expect("test clock milliseconds"),
+                Ordering::AcqRel,
+            );
+        }
+    }
+
+    impl MonotonicClock for TestClock {
+        fn now(&self) -> Duration {
+            Duration::from_millis(self.0.load(Ordering::Acquire))
+        }
+    }
+
+    struct NoopHistoryChanges;
+
+    impl HistorySummaryChangeSink for NoopHistoryChanges {
+        fn history_summary_changed(&self) {}
     }
 
     fn fallback_request(
@@ -2168,6 +3359,7 @@ mod tests {
             participants,
             enabled: true,
             selection_generation: 7,
+            health_generation: 7,
             config_revision: 11,
             images_generation_enabled: false,
             images_route: None,
@@ -2183,6 +3375,7 @@ mod tests {
         routing: RoutingSnapshotStore,
         activations: Mutex<Vec<(RouteId, RouteId)>>,
         fail_persistence: AtomicBool,
+        health: Option<Arc<super::super::RouteHealthRegistry>>,
     }
 
     impl InMemoryFallbackActivator {
@@ -2191,6 +3384,7 @@ mod tests {
                 routing,
                 activations: Mutex::new(Vec::new()),
                 fail_persistence: AtomicBool::new(false),
+                health: None,
             }
         }
 
@@ -2199,7 +3393,13 @@ mod tests {
                 routing,
                 activations: Mutex::new(Vec::new()),
                 fail_persistence: AtomicBool::new(true),
+                health: None,
             }
+        }
+
+        fn with_health(mut self, health: Arc<super::super::RouteHealthRegistry>) -> Self {
+            self.health = Some(health);
+            self
         }
     }
 
@@ -2213,14 +3413,68 @@ mod tests {
                 return Err(super::super::FallbackActivationError::Persistence);
             }
             let current = self.routing.load();
-            let expected_target = current.next_after(&request.current_route_id);
+            let current_index = current
+                .participants
+                .iter()
+                .position(|route| route.route_id == request.current_route_id);
+            let target_index = current
+                .participants
+                .iter()
+                .position(|route| route.route_id == request.target_route.route_id);
+            let direction_matches = matches!(
+                (request.mode, current_index, target_index),
+                (
+                    super::super::FallbackActivationMode::Advance
+                        | super::super::FallbackActivationMode::AdvanceRecovered,
+                    Some(current_index),
+                    Some(target_index)
+                ) if target_index > current_index
+            ) || matches!(
+                (request.mode, current_index, target_index),
+                (
+                    super::super::FallbackActivationMode::Recover,
+                    Some(current_index),
+                    Some(target_index)
+                ) if target_index < current_index
+            );
+            let skipped_ids = request
+                .skipped_routes
+                .iter()
+                .map(|skip| skip.route.route_id.clone())
+                .collect::<Vec<_>>();
+            let expected_skipped_ids = match (request.mode, current_index, target_index) {
+                (
+                    super::super::FallbackActivationMode::Advance
+                    | super::super::FallbackActivationMode::AdvanceRecovered,
+                    Some(current_index),
+                    Some(target_index),
+                ) if target_index > current_index => current.participants
+                    [current_index.saturating_add(1)..target_index]
+                    .iter()
+                    .map(|route| route.route_id.clone())
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let skip_reasons_match = request.skipped_routes.iter().all(|skip| match skip.kind {
+                super::super::ActivatedSkipKind::ModelFallbackExcluded => skip
+                    .route
+                    .fallback_excluded_models
+                    .contains(&request.requested_model),
+                super::super::ActivatedSkipKind::HealthUnavailable => true,
+            });
             let current_matches = current.enabled
                 && current.selection_generation == request.routing.selection_generation
+                && current.health_generation == request.routing.health_generation
                 && current.config_revision == request.routing.config_revision
                 && current.active.as_ref().map(|route| &route.route_id)
                     == Some(&request.current_route_id)
-                && expected_target.as_ref().map(|route| &route.route_id)
-                    == Some(&request.target_route.route_id);
+                && direction_matches
+                && skipped_ids == expected_skipped_ids
+                && skip_reasons_match
+                && !request
+                    .target_route
+                    .fallback_excluded_models
+                    .contains(&request.requested_model);
             if !current_matches {
                 return Ok(None);
             }
@@ -2229,11 +3483,52 @@ mod tests {
                 participants: current.participants.clone(),
                 enabled: true,
                 selection_generation: current.selection_generation.saturating_add(1),
+                health_generation: current.health_generation.saturating_add(1),
                 config_revision: current.config_revision,
                 images_generation_enabled: current.images_generation_enabled,
                 images_route: current.images_route.clone(),
                 images_generation_timeout: current.images_generation_timeout,
             });
+            if let (Some(health), Some(proof)) = (&self.health, request.health_proof.as_ref()) {
+                let participant_ids = snapshot
+                    .participants
+                    .iter()
+                    .map(|route| route.route_id.clone())
+                    .collect::<Vec<_>>();
+                let skipped = request
+                    .skipped_routes
+                    .iter()
+                    .map(|skip| super::super::ActivatedSkipHealth {
+                        route_id: skip.route.route_id.clone(),
+                        kind: skip.kind,
+                    })
+                    .collect::<Vec<_>>();
+                let applied = match proof {
+                    super::super::HealthActivationProof::Advance { source } => health
+                        .commit_advance(
+                            source,
+                            &request.target_route.route_id,
+                            snapshot.health_generation,
+                            &participant_ids,
+                            &skipped,
+                        ),
+                    super::super::HealthActivationProof::AdvanceRecovered { source, target } => {
+                        health.commit_advance_recovered(
+                            source,
+                            target,
+                            snapshot.health_generation,
+                            &participant_ids,
+                            &skipped,
+                        )
+                    }
+                    super::super::HealthActivationProof::Recover { target } => {
+                        health.commit_recovery(target, snapshot.health_generation, &participant_ids)
+                    }
+                };
+                if !applied {
+                    return Ok(None);
+                }
+            }
             self.activations.lock().expect("activation mutex").push((
                 request.current_route_id,
                 request.target_route.route_id.clone(),
@@ -2401,6 +3696,7 @@ mod tests {
     struct DecisionHistoryCapture {
         records: Mutex<Vec<RequestHistoryRecord>>,
         stops: Mutex<Vec<FallbackStopRecord>>,
+        transitions: Mutex<Vec<AttemptRoutingTransitionRecord>>,
     }
 
     impl HistorySink for DecisionHistoryCapture {
@@ -2411,6 +3707,14 @@ mod tests {
 
         fn try_record_fallback_stop(&self, record: FallbackStopRecord) -> bool {
             self.stops.lock().expect("fallback stop mutex").push(record);
+            true
+        }
+
+        fn try_record_routing_transition(&self, record: AttemptRoutingTransitionRecord) -> bool {
+            self.transitions
+                .lock()
+                .expect("routing transition mutex")
+                .push(record);
             true
         }
     }
@@ -2753,6 +4057,51 @@ mod tests {
             );
         }
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn committed_streaming_and_non_streaming_tool_responses_report_client_handoff() {
+        let cases = [
+            (
+                false,
+                None,
+                Bytes::from_static(
+                    br#"{"id":"response-id","status":"completed","output":[{"type":"function_call"}]}"#,
+                ),
+            ),
+            (
+                true,
+                Some(HeaderValue::from_static("text/event-stream")),
+                Bytes::from_static(
+                    b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                ),
+            ),
+        ];
+
+        for (streaming, content_type, body) in cases {
+            let mut state = mock_upstream(StatusCode::OK, body);
+            if let Some(content_type) = content_type {
+                state.headers.insert(header::CONTENT_TYPE, content_type);
+            }
+            let server = start_mock_upstream(state).await;
+            let base_url = format!("http://{}/v1/responses", server.address());
+            let reporter = crate::proxy::LogicalRequestActivityReporter::default();
+            let mut request = request_for_base(streaming, &base_url);
+            request.activity_reporter = Some(reporter.clone());
+            let response = ResponsesForwarder::new()
+                .expect("forwarder")
+                .handle(request)
+                .await;
+            let _ = to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("committed response body");
+
+            assert_eq!(
+                reporter.reported_disposition_for_test(),
+                Some(RequestActivityDisposition::ClientToolHandoff)
+            );
+            server.shutdown().await;
+        }
     }
 
     #[tokio::test]
@@ -3594,6 +4943,629 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_health_waits_for_five_shared_failures_before_activation() {
+        let a_state = mock_upstream(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            br#"{"error":{"code":"server_error"}}"#.as_slice(),
+        );
+        let a_requests = Arc::clone(&a_state.requests);
+        let a_server = start_mock_upstream(a_state).await;
+        let b_state = mock_upstream(
+            StatusCode::OK,
+            br#"{"status":"completed","model":"gpt-test"}"#.as_slice(),
+        );
+        let b_requests = Arc::clone(&b_state.requests);
+        let b_server = start_mock_upstream(b_state).await;
+        let a = route_snapshot("A", &format!("http://{}/v1", a_server.address()));
+        let b = route_snapshot("B", &format!("http://{}/v1", b_server.address()));
+        let (template, routing) = fallback_request(false, vec![Arc::clone(&a), Arc::clone(&b)]);
+        let health = Arc::new(super::super::RouteHealthRegistry::default());
+        let activator = Arc::new(
+            InMemoryFallbackActivator::new(routing.clone()).with_health(Arc::clone(&health)),
+        );
+        let forwarder = ResponsesForwarder::new()
+            .expect("forwarder")
+            .with_fallback_services(routing.clone(), activator.clone())
+            .with_route_health_registry(Arc::clone(&health));
+
+        for request_number in 1..=5 {
+            let mut request = template.clone();
+            request.request_id = format!("threshold-{request_number}");
+            request.routing = routing.load();
+            request.route = request.routing.active.clone().expect("active route");
+            let response = forwarder.handle(request).await;
+            if request_number < 5 {
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(b_requests.lock().expect("B requests").len(), 0);
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        }
+
+        assert_eq!(a_requests.lock().expect("A requests").len(), 5);
+        assert_eq!(b_requests.lock().expect("B requests").len(), 1);
+        assert_eq!(activator.activations.lock().expect("activations").len(), 1);
+        assert_eq!(
+            routing.load().active.as_ref().map(|route| &route.route_id),
+            Some(&b.route_id)
+        );
+        assert!(matches!(
+            health.snapshot(&a.route_id),
+            Some(super::super::RouteHealthSnapshot::Open { .. })
+        ));
+
+        a_server.shutdown().await;
+        b_server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn persistent_failures_distribute_contacts_across_shared_thresholds() {
+        let mut servers = Vec::new();
+        let mut routes = Vec::new();
+        let mut request_counts = Vec::new();
+        for name in ["A", "B", "C"] {
+            let state = mock_upstream(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                br#"{"error":{"code":"server_error"}}"#.as_slice(),
+            );
+            request_counts.push(Arc::clone(&state.requests));
+            let server = start_mock_upstream(state).await;
+            routes.push(route_snapshot(
+                name,
+                &format!("http://{}/v1", server.address()),
+            ));
+            servers.push(server);
+        }
+        let (template, routing) = fallback_request(false, routes.clone());
+        let health = Arc::new(super::super::RouteHealthRegistry::default());
+        let activator = Arc::new(
+            InMemoryFallbackActivator::new(routing.clone()).with_health(Arc::clone(&health)),
+        );
+        let forwarder = ResponsesForwarder::new()
+            .expect("forwarder")
+            .with_fallback_services(routing.clone(), activator.clone())
+            .with_route_health_registry(Arc::clone(&health));
+
+        for request_number in 1..=30 {
+            let response = forwarder
+                .handle(request_for_current_route(
+                    &template,
+                    &routing,
+                    &format!("persistent-failure-{request_number}"),
+                    "sol",
+                ))
+                .await;
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        assert_eq!(
+            request_counts
+                .iter()
+                .map(|requests| requests.lock().expect("route requests").len())
+                .collect::<Vec<_>>(),
+            [5, 5, 22]
+        );
+        assert_eq!(
+            activator
+                .activations
+                .lock()
+                .expect("activations")
+                .as_slice(),
+            &[
+                (routes[0].route_id.clone(), routes[1].route_id.clone()),
+                (routes[1].route_id.clone(), routes[2].route_id.clone()),
+            ]
+        );
+        assert_eq!(
+            routing.load().active.as_ref().map(|route| &route.route_id),
+            Some(&routes[2].route_id)
+        );
+        assert_eq!(health.snapshot(&routes[2].route_id), None);
+
+        for server in servers {
+            server.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_route_exclusion_bypasses_ready_probe_health_and_activation() {
+        let a_state = mock_upstream(
+            StatusCode::OK,
+            br#"{"status":"completed","model":"luna"}"#.as_slice(),
+        );
+        let a_requests = Arc::clone(&a_state.requests);
+        let a_server = start_mock_upstream(a_state).await;
+        let b_state = mock_upstream(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            br#"{"error":{"code":"server_error"}}"#.as_slice(),
+        );
+        let b_requests = Arc::clone(&b_state.requests);
+        let b_server = start_mock_upstream(b_state).await;
+        let a = route_snapshot("A", &format!("http://{}/v1", a_server.address()));
+        let b = route_snapshot_with_exclusions(
+            "B",
+            &format!("http://{}/v1", b_server.address()),
+            &["luna"],
+        );
+        let (template, routing) = fallback_request(false, vec![Arc::clone(&a), Arc::clone(&b)]);
+        let clock = Arc::new(TestClock::default());
+        let health = Arc::new(super::super::RouteHealthRegistry::new(
+            clock.clone(),
+            Arc::new(super::super::NoopHealthChangeSink),
+        ));
+        for _ in 0..4 {
+            assert!(matches!(
+                health.record_ordinary_failure(
+                    &a.route_id,
+                    7,
+                    super::super::HealthFailureClass::Service,
+                    true,
+                    false,
+                ),
+                super::super::StrikeResult::BelowThreshold { .. }
+            ));
+        }
+        let trip = match health.record_ordinary_failure(
+            &a.route_id,
+            7,
+            super::super::HealthFailureClass::Service,
+            true,
+            true,
+        ) {
+            super::super::StrikeResult::TripAcquired(trip) => trip,
+            result => panic!("expected trip lease, got {result:?}"),
+        };
+        assert!(health.reserve_trip(&trip));
+        assert!(health.commit_advance(
+            &trip,
+            &b.route_id,
+            8,
+            &[a.route_id.clone(), b.route_id.clone()],
+            &[],
+        ));
+        let current = routing.load();
+        routing.store(Arc::new(RoutingSnapshot {
+            active: Some(Arc::clone(&b)),
+            participants: current.participants.clone(),
+            enabled: true,
+            selection_generation: 8,
+            health_generation: 8,
+            config_revision: current.config_revision,
+            images_generation_enabled: current.images_generation_enabled,
+            images_route: current.images_route.clone(),
+            images_generation_timeout: current.images_generation_timeout,
+        }));
+        clock.advance(Duration::from_mins(1));
+        let ready_health = health.snapshot(&a.route_id);
+        assert!(matches!(
+            ready_health,
+            Some(super::super::RouteHealthSnapshot::Open {
+                retry_after_seconds: 0,
+                ..
+            })
+        ));
+
+        let history = Arc::new(DecisionHistoryCapture::default());
+        let activator = Arc::new(
+            InMemoryFallbackActivator::new(routing.clone()).with_health(Arc::clone(&health)),
+        );
+        let forwarder = ResponsesForwarder::new()
+            .expect("forwarder")
+            .with_runtime_services(
+                history.clone(),
+                Arc::new(DiagnosticCapture::default()),
+                InferenceStatusService::new(Arc::new(NoopInferenceChanges)),
+            )
+            .with_fallback_services(routing.clone(), activator.clone())
+            .with_route_health_registry(Arc::clone(&health));
+
+        let response = forwarder
+            .handle(request_for_current_route(
+                &template,
+                &routing,
+                "selected-exclusion",
+                "luna",
+            ))
+            .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(a_requests.lock().expect("A requests").len(), 0);
+        assert_eq!(b_requests.lock().expect("B requests").len(), 1);
+        assert!(
+            activator
+                .activations
+                .lock()
+                .expect("activations")
+                .is_empty()
+        );
+        assert_eq!(health.snapshot(&a.route_id), ready_health);
+        assert_eq!(health.snapshot(&b.route_id), None);
+        assert_eq!(
+            routing.load().active.as_ref().map(|route| &route.route_id),
+            Some(&b.route_id)
+        );
+        {
+            let records = history.records.lock().expect("history records");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].attempts.len(), 1);
+            assert_eq!(records[0].attempts[0].route_id, b.route_id);
+        }
+        assert_eq!(
+            history.stops.lock().expect("fallback stops").as_slice(),
+            &[FallbackStopRecord {
+                request_id: "selected-exclusion".to_owned(),
+                attempt_index: 0,
+                reason: FallbackStopReason::ModelFallbackExcluded,
+                target_route_id: None,
+                target_route_name: None,
+            }]
+        );
+
+        a_server.shutdown().await;
+        b_server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn excluded_candidate_skips_without_history_and_compatible_traffic_restores_priority() {
+        let a_state = mock_upstream(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            br#"{"error":{"code":"server_error"}}"#.as_slice(),
+        );
+        let a_requests = Arc::clone(&a_state.requests);
+        let a_server = start_mock_upstream(a_state).await;
+        let b_state = mock_upstream(
+            StatusCode::OK,
+            br#"{"status":"completed","model":"sol"}"#.as_slice(),
+        );
+        let b_requests = Arc::clone(&b_state.requests);
+        let b_server = start_mock_upstream(b_state).await;
+        let c_state = mock_upstream(
+            StatusCode::OK,
+            br#"{"status":"completed","model":"sol"}"#.as_slice(),
+        );
+        let c_requests = Arc::clone(&c_state.requests);
+        let c_server = start_mock_upstream(c_state).await;
+        let a = route_snapshot("A", &format!("http://{}/v1", a_server.address()));
+        let b = route_snapshot_with_exclusions(
+            "B",
+            &format!("http://{}/v1", b_server.address()),
+            &["luna"],
+        );
+        let c = route_snapshot("C", &format!("http://{}/v1", c_server.address()));
+        let (template, routing) =
+            fallback_request(false, vec![Arc::clone(&a), Arc::clone(&b), Arc::clone(&c)]);
+        let clock = Arc::new(TestClock::default());
+        let health = Arc::new(super::super::RouteHealthRegistry::new(
+            clock.clone(),
+            Arc::new(super::super::NoopHealthChangeSink),
+        ));
+        let activator = Arc::new(
+            InMemoryFallbackActivator::new(routing.clone()).with_health(Arc::clone(&health)),
+        );
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = DatabaseExecutor::open(directory.path().join("router.sqlite3"))
+            .expect("history database");
+        let history = AsyncHistoryRecorder::new(
+            database.clone(),
+            Arc::new(DiagnosticCapture::default()),
+            Arc::new(NoopHistoryChanges),
+        );
+        let forwarder = ResponsesForwarder::new()
+            .expect("forwarder")
+            .with_runtime_services(
+                history.clone(),
+                Arc::new(DiagnosticCapture::default()),
+                InferenceStatusService::new(Arc::new(NoopInferenceChanges)),
+            )
+            .with_fallback_services(routing.clone(), activator.clone())
+            .with_route_health_registry(Arc::clone(&health));
+
+        for request_number in 1..=5 {
+            let request_id = if request_number == 5 {
+                "excluded-activation".to_owned()
+            } else {
+                format!("luna-failure-{request_number}")
+            };
+            let response = forwarder
+                .handle(request_for_current_route(
+                    &template,
+                    &routing,
+                    &request_id,
+                    "luna",
+                ))
+                .await;
+            if request_number < 5 {
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        }
+
+        assert_eq!(a_requests.lock().expect("A requests").len(), 5);
+        assert_eq!(b_requests.lock().expect("B requests").len(), 0);
+        assert_eq!(c_requests.lock().expect("C requests").len(), 1);
+        assert_eq!(
+            routing.load().active.as_ref().map(|route| &route.route_id),
+            Some(&c.route_id)
+        );
+        assert!(matches!(
+            health.snapshot(&b.route_id),
+            Some(super::super::RouteHealthSnapshot::Open {
+                origin: super::super::RecoveryOrigin::ModelBypassed,
+                recovery_successes: 0,
+                retry_after_seconds: 60,
+            })
+        ));
+
+        let luna_response = forwarder
+            .handle(request_for_current_route(
+                &template,
+                &routing,
+                "luna-after-activation",
+                "luna",
+            ))
+            .await;
+        assert_eq!(luna_response.status(), StatusCode::OK);
+        assert_eq!(a_requests.lock().expect("A requests").len(), 5);
+        assert_eq!(b_requests.lock().expect("B requests").len(), 0);
+        assert_eq!(c_requests.lock().expect("C requests").len(), 2);
+
+        clock.advance(Duration::from_mins(1));
+        let a_probe = forwarder
+            .handle(request_for_current_route(
+                &template,
+                &routing,
+                "sol-a-probe",
+                "sol",
+            ))
+            .await;
+        assert_eq!(a_probe.status(), StatusCode::OK);
+        assert_eq!(a_requests.lock().expect("A requests").len(), 6);
+        assert_eq!(b_requests.lock().expect("B requests").len(), 0);
+        assert_eq!(c_requests.lock().expect("C requests").len(), 3);
+
+        let b_first = forwarder
+            .handle(request_for_current_route(
+                &template,
+                &routing,
+                "sol-b-positive-1",
+                "sol",
+            ))
+            .await;
+        assert_eq!(b_first.status(), StatusCode::OK);
+        assert_eq!(b_requests.lock().expect("B requests").len(), 1);
+        assert_eq!(
+            routing.load().active.as_ref().map(|route| &route.route_id),
+            Some(&c.route_id)
+        );
+        assert!(matches!(
+            health.snapshot(&b.route_id),
+            Some(super::super::RouteHealthSnapshot::Open {
+                origin: super::super::RecoveryOrigin::ModelBypassed,
+                recovery_successes: 1,
+                retry_after_seconds: 0,
+            })
+        ));
+
+        let b_second = forwarder
+            .handle(request_for_current_route(
+                &template,
+                &routing,
+                "sol-b-positive-2",
+                "sol",
+            ))
+            .await;
+        assert_eq!(b_second.status(), StatusCode::OK);
+        assert_eq!(b_requests.lock().expect("B requests").len(), 2);
+        assert_eq!(
+            routing.load().active.as_ref().map(|route| &route.route_id),
+            Some(&b.route_id)
+        );
+        assert_eq!(health.snapshot(&b.route_id), None);
+        assert!(matches!(
+            health.snapshot(&a.route_id),
+            Some(super::super::RouteHealthSnapshot::Open {
+                origin: super::super::RecoveryOrigin::ProviderFailure,
+                ..
+            })
+        ));
+        assert_eq!(
+            activator
+                .activations
+                .lock()
+                .expect("activations")
+                .as_slice(),
+            &[
+                (a.route_id.clone(), c.route_id.clone()),
+                (c.route_id.clone(), b.route_id.clone()),
+            ]
+        );
+
+        history.shutdown().await;
+        assert_eq!(
+            history.failure_snapshot().dropped_records,
+            0,
+            "history fixture must not drop metadata"
+        );
+        assert_eq!(history.failure_snapshot().write_failures, 0);
+
+        let activation_detail = database
+            .usage_request_detail("excluded-activation".to_owned())
+            .await
+            .expect("activation detail");
+        assert_eq!(
+            activation_detail
+                .attempts
+                .iter()
+                .map(|attempt| attempt.route_id.clone())
+                .collect::<Vec<_>>(),
+            vec![a.route_id.clone(), c.route_id.clone()]
+        );
+        assert!(
+            activation_detail
+                .attempts
+                .iter()
+                .all(|attempt| attempt.route_id != b.route_id),
+            "the excluded route must own no attempt, latency, token, or cost row"
+        );
+        let expected_skip = RoutingTransitionSkip {
+            route_id: b.route_id.clone(),
+            route_name: "B".to_owned(),
+        };
+        assert_eq!(
+            activation_detail.attempts[0].routing_transition,
+            Some(AttemptRoutingTransition {
+                kind: RoutingTransitionKind::ActivateNext,
+                target_route_id: c.route_id.clone(),
+                target_route_name: "C".to_owned(),
+                skipped_routes: vec![expected_skip.clone()],
+            })
+        );
+        assert_eq!(
+            activation_detail.attempts[0].routing_decision,
+            Some(RoutingDecision::ActivateNext {
+                target_route_id: c.route_id.clone(),
+                target_route_name: "C".to_owned(),
+                skipped_routes: vec![expected_skip],
+            })
+        );
+
+        let excluded_follow_up = database
+            .usage_request_detail("luna-after-activation".to_owned())
+            .await
+            .expect("excluded follow-up detail");
+        assert_eq!(excluded_follow_up.attempts.len(), 1);
+        assert_eq!(excluded_follow_up.attempts[0].route_id, c.route_id);
+
+        let a_probe_detail = database
+            .usage_request_detail("sol-a-probe".to_owned())
+            .await
+            .expect("A probe detail");
+        assert_eq!(a_probe_detail.attempts.len(), 2);
+        assert_eq!(a_probe_detail.attempts[0].route_id, a.route_id);
+        assert_eq!(
+            a_probe_detail.attempts[0].attempt_role,
+            AttemptRole::RecoveryProbe
+        );
+        assert_eq!(a_probe_detail.attempts[1].route_id, c.route_id);
+        assert_eq!(
+            a_probe_detail.attempts[1].attempt_role,
+            AttemptRole::Ordinary
+        );
+
+        let first_positive = database
+            .usage_request_detail("sol-b-positive-1".to_owned())
+            .await
+            .expect("first B positive detail");
+        assert_eq!(first_positive.attempts.len(), 1);
+        assert_eq!(first_positive.attempts[0].route_id, b.route_id);
+        assert_eq!(
+            first_positive.attempts[0].attempt_role,
+            AttemptRole::RecoveryProbe
+        );
+        let second_positive = database
+            .usage_request_detail("sol-b-positive-2".to_owned())
+            .await
+            .expect("second B positive detail");
+        assert_eq!(second_positive.attempts.len(), 1);
+        assert_eq!(second_positive.attempts[0].route_id, b.route_id);
+        assert_eq!(
+            second_positive.attempts[0].attempt_role,
+            AttemptRole::RecoveryProbe
+        );
+        assert_eq!(
+            second_positive.attempts[0].routing_decision,
+            Some(RoutingDecision::Recover {
+                target_route_id: b.route_id.clone(),
+                target_route_name: "B".to_owned(),
+            })
+        );
+
+        a_server.shutdown().await;
+        b_server.shutdown().await;
+        c_server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_precontact_activation_is_recorded_on_the_original_source_attempt() {
+        let a_state = mock_upstream(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            br#"{"error":{"code":"server_error"}}"#.as_slice(),
+        );
+        let a_requests = Arc::clone(&a_state.requests);
+        let a_server = start_mock_upstream(a_state).await;
+        let b_state = mock_upstream(
+            StatusCode::OK,
+            br#"{"status":"completed","model":"gpt-test"}"#.as_slice(),
+        );
+        let b_requests = Arc::clone(&b_state.requests);
+        let b_server = start_mock_upstream(b_state).await;
+        let a = route_snapshot("A", &format!("http://{}/v1", a_server.address()));
+        let b = route_snapshot("B", &format!("http://{}/v1", b_server.address()));
+        let (mut request, routing) = fallback_request(false, vec![Arc::clone(&a), Arc::clone(&b)]);
+        let health = Arc::new(super::super::RouteHealthRegistry::default());
+        for _ in 0..4 {
+            let _ = health.record_ordinary_failure(
+                &a.route_id,
+                routing.load().health_generation,
+                super::super::HealthFailureClass::Service,
+                true,
+                false,
+            );
+        }
+        assert_eq!(
+            health.record_ordinary_failure_for_attempt(
+                &a.route_id,
+                routing.load().health_generation,
+                super::super::HealthFailureClass::Service,
+                true,
+                false,
+                super::super::HealthAttemptRef {
+                    request_id: "original-source".to_owned(),
+                    attempt_index: 4,
+                },
+            ),
+            super::super::StrikeResult::Pending
+        );
+        let activator = Arc::new(
+            InMemoryFallbackActivator::new(routing.clone()).with_health(Arc::clone(&health)),
+        );
+        let history = Arc::new(DecisionHistoryCapture::default());
+        let forwarder = ResponsesForwarder::new()
+            .expect("forwarder")
+            .with_runtime_services(
+                history.clone(),
+                Arc::new(DiagnosticCapture::default()),
+                InferenceStatusService::new(Arc::new(NoopInferenceChanges)),
+            )
+            .with_fallback_services(routing.clone(), activator)
+            .with_route_health_registry(health);
+        request.request_id = "pending-consumer".to_owned();
+
+        let response = forwarder.handle(request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(a_requests.lock().expect("A requests").len(), 0);
+        assert_eq!(b_requests.lock().expect("B requests").len(), 1);
+        assert_eq!(
+            history.transitions.lock().expect("transitions").as_slice(),
+            &[AttemptRoutingTransitionRecord {
+                request_id: "original-source".to_owned(),
+                attempt_index: 4,
+                transition: AttemptRoutingTransition {
+                    kind: RoutingTransitionKind::ActivateNext,
+                    target_route_id: b.route_id.clone(),
+                    target_route_name: "B".to_owned(),
+                    skipped_routes: Vec::new(),
+                },
+            }]
+        );
+
+        a_server.shutdown().await;
+        b_server.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn mixed_policy_fallback_selects_body_and_forwarded_tier_per_attempt() {
         let a_state = mock_upstream(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3805,6 +5777,7 @@ mod tests {
             participants: vec![a, b],
             enabled: true,
             selection_generation: 7,
+            health_generation: 7,
             config_revision: 11,
             images_generation_enabled: false,
             images_route: None,
@@ -4531,6 +6504,7 @@ mod tests {
             participants: current.participants.clone(),
             enabled: false,
             selection_generation: current.selection_generation,
+            health_generation: current.health_generation.saturating_add(1),
             config_revision: current.config_revision.saturating_add(1),
             images_generation_enabled: current.images_generation_enabled,
             images_route: current.images_route.clone(),
@@ -5049,6 +7023,39 @@ mod tests {
         assert_eq!(
             records[0].attempts[0].delivery_state,
             DeliveryState::Completed
+        );
+    }
+
+    #[test]
+    fn non_streaming_tool_handoff_projection_matches_streaming_allow_list() {
+        let metadata = project_non_streaming_metadata(
+            br#"{"status":"completed","output":[{"type":"local_shell_call"},{"type":"shell_call"},{"type":"file_search_call"}]}"#,
+        );
+        assert!(metadata.terminal_success);
+        assert!(metadata.tool_handoff.has_client());
+        assert!(metadata.tool_handoff.has_shell());
+
+        let reporter = crate::proxy::LogicalRequestActivityReporter::default();
+        mark_activity_terminal(Some(&reporter), &metadata, false, true);
+        assert_eq!(
+            reporter.reported_disposition_for_test(),
+            Some(RequestActivityDisposition::ClientToolHandoff)
+        );
+
+        let hosted_shell = project_non_streaming_metadata(
+            br#"{"status":"completed","output":[{"type":"shell_call"}]}"#,
+        );
+        let hosted_reporter = crate::proxy::LogicalRequestActivityReporter::default();
+        mark_activity_terminal(Some(&hosted_reporter), &hosted_shell, false, true);
+        assert_eq!(
+            hosted_reporter.reported_disposition_for_test(),
+            Some(RequestActivityDisposition::Final)
+        );
+        let local_reporter = crate::proxy::LogicalRequestActivityReporter::default();
+        mark_activity_terminal(Some(&local_reporter), &hosted_shell, true, true);
+        assert_eq!(
+            local_reporter.reported_disposition_for_test(),
+            Some(RequestActivityDisposition::ClientToolHandoff)
         );
     }
 }

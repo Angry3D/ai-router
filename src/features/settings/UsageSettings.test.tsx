@@ -355,11 +355,22 @@ describe("UsageSettings interactions", () => {
     await renderSettings();
 
     fireEvent.click(screen.getByRole("button", { name: "用量" }));
-    expect(screen.getByLabelText("时间范围")).toHaveValue("7d");
-    expect(screen.getByLabelText("完成状态")).toBeInTheDocument();
+    const timeRange = screen.getByLabelText("时间范围");
+    expect(timeRange).toHaveValue("7d");
     expect(
-      screen.getByRole("combobox", { name: "路由" }),
-    ).toBeInTheDocument();
+      within(timeRange)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual([
+      "今天",
+      "昨天",
+      "最近 24 小时",
+      "最近 7 天",
+      "最近 30 天",
+      "全部记录",
+    ]);
+    expect(screen.getByLabelText("完成状态")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "路由" })).toBeInTheDocument();
     expect(screen.getByLabelText("模型包含")).toBeInTheDocument();
     const partialCost = await screen.findByText("至少 $0.000028");
     expect(
@@ -441,6 +452,33 @@ describe("UsageSettings interactions", () => {
           kind: "activate_next",
           targetRouteId: base.routeId,
           targetRouteName: longRouteName,
+          skippedRoutes: [
+            {
+              routeId: base.routeId,
+              routeName: "不兼容路由",
+              reason: "model_fallback_excluded",
+            },
+          ],
+        },
+      },
+      {
+        ...base,
+        attemptIndex: 2,
+        attemptRole: "recovery_probe",
+        routingDecision: {
+          kind: "resume_captured",
+          targetRouteId: base.routeId,
+          targetRouteName: "当前路由",
+        },
+      },
+      {
+        ...base,
+        attemptIndex: 3,
+        attemptRole: "recovery_probe",
+        routingDecision: {
+          kind: "recover",
+          targetRouteId: base.routeId,
+          targetRouteName: "优先路由",
         },
       },
       ...(
@@ -452,15 +490,29 @@ describe("UsageSettings interactions", () => {
           ["stale_policy", "未切换 · 路由配置已经变化"],
           ["activation_failed", "切换至 目标备用路由 失败 · 状态未保存"],
           ["attempt_index_exhausted", "未切换 · 请求尝试次数已达系统上限"],
+          [
+            "failure_threshold_not_reached",
+            "未切换 · 当前路由可归因失败尚未达到 5 次",
+          ],
+          [
+            "failure_threshold_reached_pending",
+            "未继续切换 · 已达到失败阈值，等待下一次可执行机会",
+          ],
+          ["recovery_confirmation_pending", "未切换 · 恢复验证成功 1/2"],
+          [
+            "model_fallback_excluded",
+            "已停止 Fallback · 该模型在此路由不参与 Fallback",
+          ],
         ] as const
       ).map(([reason], index) => ({
         ...base,
-        attemptIndex: index + 2,
+        attemptIndex: index + 4,
         routingDecision: {
           kind: "stop" as const,
           reason,
           targetRouteId: reason === "activation_failed" ? base.routeId : null,
-          targetRouteName: reason === "activation_failed" ? "目标备用路由" : null,
+          targetRouteName:
+            reason === "activation_failed" ? "目标备用路由" : null,
         },
       })),
     ];
@@ -473,7 +525,19 @@ describe("UsageSettings interactions", () => {
     expect(
       await screen.findByText("重试当前路由（第 2/4 次）"),
     ).toBeInTheDocument();
-    expect(screen.getByText(`已自动切换至 ${longRouteName}`)).toBeInTheDocument();
+    expect(
+      screen.getByText(`已自动切换至 ${longRouteName}`),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("已跳过 不兼容路由 · 该模型在此路由不参与 Fallback"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("恢复验证未通过 · 继续使用 当前路由"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("恢复验证完成 · 已恢复至 优先路由"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/恢复验证 ·/u)).toHaveLength(2);
     for (const copy of [
       "未切换 · Fallback 已关闭",
       "未切换 · 当前错误不符合切换条件",
@@ -482,6 +546,10 @@ describe("UsageSettings interactions", () => {
       "未切换 · 路由配置已经变化",
       "切换至 目标备用路由 失败 · 状态未保存",
       "未切换 · 请求尝试次数已达系统上限",
+      "未切换 · 当前路由可归因失败尚未达到 5 次",
+      "未继续切换 · 已达到失败阈值，等待下一次可执行机会",
+      "未切换 · 恢复验证成功 1/2",
+      "已停止 Fallback · 该模型在此路由不参与 Fallback",
     ]) {
       expect(screen.getByText(copy)).toBeInTheDocument();
     }
@@ -541,6 +609,79 @@ describe("UsageSettings interactions", () => {
     expect(applied.finishedAtOrBeforeMs - applied.finishedAtOrAfterMs!).toBe(
       30 * 24 * 60 * 60 * 1_000,
     );
+  });
+
+  it("applies today's local calendar bounds to history and statistics", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date(2026, 7, 19, 9, 0, 0, 0));
+      await renderSettings();
+      fireEvent.click(screen.getByRole("button", { name: "用量" }));
+      await screen.findByText("至少 $0.000028");
+      ipc.getUsageHistory.mockClear();
+
+      fireEvent.change(screen.getByLabelText("时间范围"), {
+        target: { value: "today" },
+      });
+      expect(ipc.getUsageHistory).not.toHaveBeenCalled();
+
+      const applyAnchor = new Date(2026, 7, 19, 15, 30, 45, 678).getTime();
+      vi.setSystemTime(applyAnchor);
+      fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+      await waitFor(() => expect(ipc.getUsageHistory).toHaveBeenCalledTimes(1));
+
+      const historyQuery = ipc.getUsageHistory.mock.calls[0][0];
+      expect(historyQuery).toMatchObject({
+        finishedAtOrAfterMs: new Date(2026, 7, 19).getTime(),
+        finishedAtOrBeforeMs: applyAnchor,
+      });
+
+      fireEvent.click(screen.getByRole("tab", { name: "用量统计" }));
+      await waitFor(() =>
+        expect(ipc.getUsageStatistics).toHaveBeenCalledTimes(1),
+      );
+      expect(ipc.getUsageStatistics.mock.calls[0][0]).toMatchObject({
+        finishedAtOrAfterMs: historyQuery.finishedAtOrAfterMs,
+        finishedAtOrBeforeMs: historyQuery.finishedAtOrBeforeMs,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses local calendar operations for yesterday across a DST transition", async () => {
+    const originalTimeZone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-03-09T16:00:00.000Z"));
+      await renderSettings();
+      fireEvent.click(screen.getByRole("button", { name: "用量" }));
+      await screen.findByText("至少 $0.000028");
+      ipc.getUsageHistory.mockClear();
+
+      fireEvent.change(screen.getByLabelText("时间范围"), {
+        target: { value: "yesterday" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+      await waitFor(() => expect(ipc.getUsageHistory).toHaveBeenCalledTimes(1));
+
+      const query = ipc.getUsageHistory.mock.calls[0][0];
+      expect(query).toMatchObject({
+        finishedAtOrAfterMs: Date.parse("2026-03-08T05:00:00.000Z"),
+        finishedAtOrBeforeMs: Date.parse("2026-03-09T03:59:59.999Z"),
+      });
+      expect(query.finishedAtOrBeforeMs - query.finishedAtOrAfterMs).toBe(
+        23 * 60 * 60 * 1_000 - 1,
+      );
+    } finally {
+      vi.useRealTimers();
+      if (originalTimeZone === undefined) {
+        delete process.env.TZ;
+      } else {
+        process.env.TZ = originalTimeZone;
+      }
+    }
   });
 
   it("shares one applied filter snapshot across records and statistics tabs", async () => {
@@ -791,6 +932,9 @@ describe("UsageSettings interactions", () => {
     expect(await screen.findByText("第 1 / 1 页，共 1 条")).toBeInTheDocument();
     ipc.getUsageHistory.mockClear();
 
+    fireEvent.change(screen.getByLabelText("时间范围"), {
+      target: { value: "yesterday" },
+    });
     fireEvent.change(screen.getByLabelText("完成状态"), {
       target: { value: "failed" },
     });

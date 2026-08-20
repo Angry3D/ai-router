@@ -3,6 +3,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { GripVertical } from "lucide-react";
 
 import type { RouteId, SettingsSnapshotDto } from "../../generated";
+import type { RouteHealthPresentation } from "./routeHealthPresentation";
 import { toRouteOrderItemId } from "./routeOrderSequence";
 
 type RouteSummary = SettingsSnapshotDto["routes"][number];
@@ -10,7 +11,7 @@ type RouteSummary = SettingsSnapshotDto["routes"][number];
 interface RouteRowVisualProps {
   route: RouteSummary;
   fallbackPosition: number | null;
-  active: boolean;
+  healthPresentation: RouteHealthPresentation;
   selected: boolean;
   overlay?: boolean;
 }
@@ -32,12 +33,16 @@ function RouteIdentity({ route }: { route: RouteSummary }) {
 
 function RouteMarkers({
   fallbackPosition,
-  active,
-}: Pick<RouteRowVisualProps, "fallbackPosition" | "active">) {
+  healthPresentation,
+}: Pick<RouteRowVisualProps, "fallbackPosition" | "healthPresentation">) {
   return (
     <span className="settings-route-markers">
       {fallbackPosition !== null ? <b>Fallback {fallbackPosition}</b> : null}
-      {active ? <em>当前</em> : null}
+      {healthPresentation.marker ? (
+        <em className={`is-${healthPresentation.tone}`}>
+          {healthPresentation.marker}
+        </em>
+      ) : null}
     </span>
   );
 }
@@ -45,7 +50,7 @@ function RouteMarkers({
 export function RouteRowOverlay({
   route,
   fallbackPosition,
-  active,
+  healthPresentation,
   selected,
 }: RouteRowVisualProps) {
   return (
@@ -59,7 +64,10 @@ export function RouteRowOverlay({
       </span>
       <span className="settings-route-select">
         <RouteIdentity route={route} />
-        <RouteMarkers fallbackPosition={fallbackPosition} active={active} />
+        <RouteMarkers
+          fallbackPosition={fallbackPosition}
+          healthPresentation={healthPresentation}
+        />
       </span>
     </div>
   );
@@ -68,7 +76,7 @@ export function RouteRowOverlay({
 export function SortableRouteRow({
   route,
   fallbackPosition,
-  active,
+  healthPresentation,
   selected,
   disabled,
   routeIndex,
@@ -115,10 +123,18 @@ export function SortableRouteRow({
       <button
         type="button"
         className="settings-route-select"
+        aria-label={
+          healthPresentation.detail
+            ? `${route.name}，${route.baseUrlHost}，${healthPresentation.detail}`
+            : undefined
+        }
         onClick={() => onSelectRoute(route.routeId)}
       >
         <RouteIdentity route={route} />
-        <RouteMarkers fallbackPosition={fallbackPosition} active={active} />
+        <RouteMarkers
+          fallbackPosition={fallbackPosition}
+          healthPresentation={healthPresentation}
+        />
       </button>
     </div>
   );

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::Read,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
@@ -50,6 +51,7 @@ use self::history::{
 };
 
 mod fallback;
+mod health;
 mod history;
 mod images;
 mod sse;
@@ -58,8 +60,16 @@ pub(crate) mod upstream;
 mod activity;
 
 pub use activity::{
-    LogicalRequestActivitySink, LogicalRequestActivityTracker, LogicalRequestActivityTransition,
-    NoopLogicalRequestActivitySink,
+    LogicalRequestActivityReporter, LogicalRequestActivitySink, LogicalRequestActivityTracker,
+    LogicalRequestActivityTransition, NoopLogicalRequestActivitySink, RequestActivityDisposition,
+};
+pub use health::{
+    ACTIVATION_WRITE_RETRY_DELAY, ActivatedSkipHealth, ActivatedSkipKind, CandidateHealth,
+    FAILURE_THRESHOLD, HealthActivationProof, HealthActivationReservation, HealthAttemptRef,
+    HealthChangeSink, HealthChangeSink as RouteHealthChangeSink, HealthFailureClass,
+    LaterProbeLeaseResult, MonotonicClock, NoopHealthChangeSink, PendingProof, ProbeCompletion,
+    ProbeLease, ProbeLeaseResult, RECOVERY_EVIDENCE_DEADLINE, RecoveryOrigin, RouteHealthRegistry,
+    RouteHealthSnapshot, StrikeResult, SystemMonotonicClock, TripLease,
 };
 pub use history::{
     AsyncHistoryRecorder, HistorySink, HistorySummaryChangeSink, InferenceStatusChangeSink,
@@ -78,6 +88,7 @@ pub struct RouteSnapshot {
     pub base_url: BaseUrl,
     pub api_key: Arc<ApiKey>,
     pub service_tier_policy: ServiceTierPolicy,
+    pub fallback_excluded_models: Arc<HashSet<String>>,
 }
 
 pub struct RoutingSnapshot {
@@ -85,6 +96,7 @@ pub struct RoutingSnapshot {
     pub participants: Vec<Arc<RouteSnapshot>>,
     pub enabled: bool,
     pub selection_generation: u64,
+    pub health_generation: u64,
     pub config_revision: u64,
     pub images_generation_enabled: bool,
     pub images_route: Option<Arc<RouteSnapshot>>,
@@ -128,6 +140,7 @@ impl Default for RoutingSnapshotStore {
             participants: Vec::new(),
             enabled: false,
             selection_generation: 0,
+            health_generation: 0,
             config_revision: 0,
             images_generation_enabled: false,
             images_route: None,
@@ -172,6 +185,23 @@ pub struct FallbackActivationRequest {
     pub routing: Arc<RoutingSnapshot>,
     pub current_route_id: RouteId,
     pub target_route: Arc<RouteSnapshot>,
+    pub requested_model: String,
+    pub skipped_routes: Vec<FallbackActivationSkip>,
+    pub mode: FallbackActivationMode,
+    pub health_proof: Option<HealthActivationProof>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FallbackActivationMode {
+    Advance,
+    AdvanceRecovered,
+    Recover,
+}
+
+#[derive(Clone)]
+pub struct FallbackActivationSkip {
+    pub route: Arc<RouteSnapshot>,
+    pub kind: ActivatedSkipKind,
 }
 
 pub trait RequestTransitionSink: Send + Sync {
@@ -215,6 +245,8 @@ pub struct ValidatedProxyRequest {
     pub started_at_ms: i64,
     pub request_started: Instant,
     pub turn_id: Option<String>,
+    pub activity_reporter: Option<LogicalRequestActivityReporter>,
+    pub request_declares_local_shell: bool,
     pub body: Bytes,
     pub body_without_service_tier: Option<Bytes>,
     pub model: String,
@@ -272,6 +304,7 @@ impl ProxyIngressState {
             participants,
             enabled: false,
             selection_generation: 0,
+            health_generation: 0,
             config_revision: 0,
             images_generation_enabled: false,
             images_route: None,
@@ -506,8 +539,11 @@ async fn responses_handler(State(state): State<ProxyIngressState>, request: Requ
     )
     .await
     {
-        Ok(request) => {
-            let activity = state.activity.acquire();
+        Ok(mut request) => {
+            let activity = state.activity.acquire_turn(request.turn_id.as_deref());
+            request.activity_reporter = activity
+                .as_ref()
+                .map(activity::LogicalRequestActivityGuard::reporter);
             let response = state.upstream.handle(request).await;
             match activity {
                 Some(activity) => response.map(|body| {
@@ -568,6 +604,10 @@ async fn responses_handler(State(state): State<ProxyIngressState>, request: Requ
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ingress decoder keeps bounded body and metadata validation ordered"
+)]
 async fn validate_request(
     state: &ProxyIngressState,
     request: Request,
@@ -644,6 +684,7 @@ async fn validate_request(
         )
     })?;
     validate_request_model(&metadata.model)?;
+    let request_declares_local_shell = metadata.request_declares_local_shell;
     let reasoning_effort = request_reasoning_effort(metadata.reasoning_effort);
     let routing = state.routing.load();
     let route = routing.active.clone().ok_or_else(|| {
@@ -665,6 +706,8 @@ async fn validate_request(
         started_at_ms,
         request_started,
         turn_id,
+        activity_reporter: None,
+        request_declares_local_shell,
         body: Bytes::from(decoded),
         body_without_service_tier,
         model: metadata.model,
@@ -820,10 +863,33 @@ struct RequestMetadata {
     stream: Option<bool>,
     #[serde(
         default,
+        rename = "tools",
+        deserialize_with = "deserialize_declares_local_shell"
+    )]
+    request_declares_local_shell: bool,
+    #[serde(
+        default,
         rename = "reasoning",
         deserialize_with = "deserialize_reasoning_effort"
     )]
     reasoning_effort: Option<String>,
+}
+
+fn deserialize_declares_local_shell<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_array().is_some_and(|tools| {
+        tools.iter().any(|tool| {
+            tool.get("type").and_then(serde_json::Value::as_str) == Some("shell")
+                && tool
+                    .get("environment")
+                    .and_then(|environment| environment.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("local")
+        })
+    }))
 }
 
 fn deserialize_reasoning_effort<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -1172,6 +1238,45 @@ mod tests {
     }
 
     #[test]
+    fn request_metadata_projects_only_explicit_local_shell_environment() {
+        let local = serde_json::from_value::<RequestMetadata>(serde_json::json!({
+            "model": "gpt-5",
+            "tools": [
+                {"type": "shell", "environment": {"type": "local"}},
+                {"type": "function"}
+            ]
+        }))
+        .expect("local shell request metadata");
+        assert!(local.request_declares_local_shell);
+
+        for environment in [
+            serde_json::json!({"type": "container_auto"}),
+            serde_json::json!({"type": "container_reference", "container_id": "synthetic"}),
+            serde_json::json!({}),
+        ] {
+            let hosted = serde_json::from_value::<RequestMetadata>(serde_json::json!({
+                "model": "gpt-5",
+                "tools": [{"type": "shell", "environment": environment}]
+            }))
+            .expect("hosted shell request metadata");
+            assert!(!hosted.request_declares_local_shell);
+        }
+
+        for tools in [
+            serde_json::Value::Null,
+            serde_json::json!({"type": "shell"}),
+            serde_json::json!([null, "shell", 1, {"type": "shell", "environment": []}]),
+        ] {
+            let malformed = serde_json::from_value::<RequestMetadata>(serde_json::json!({
+                "model": "gpt-5",
+                "tools": tools
+            }))
+            .expect("unknown tool shapes stay request-compatible");
+            assert!(!malformed.request_declares_local_shell);
+        }
+    }
+
+    #[test]
     fn service_tier_omit_resolves_an_escaped_top_level_key() {
         let body = remove_top_level_service_tier(
             br#"{"model":"gpt-5","\u0073ervice_tier":"priority","keep":1}"#,
@@ -1257,6 +1362,25 @@ mod tests {
         snapshots: Mutex<Vec<(usize, u64)>>,
     }
 
+    #[derive(Default)]
+    struct ToolThenFinalUpstream(AtomicUsize);
+
+    #[async_trait]
+    impl UpstreamRequestHandler for ToolThenFinalUpstream {
+        async fn handle(&self, request: ValidatedProxyRequest) -> Response {
+            let disposition = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                RequestActivityDisposition::ClientToolHandoff
+            } else {
+                RequestActivityDisposition::Final
+            };
+            request
+                .activity_reporter
+                .expect("validated request activity reporter")
+                .mark_terminal(disposition);
+            (StatusCode::OK, "upstream").into_response()
+        }
+    }
+
     #[async_trait]
     impl UpstreamRequestHandler for MultiAttemptUpstream {
         async fn handle(&self, _request: ValidatedProxyRequest) -> Response {
@@ -1295,6 +1419,7 @@ mod tests {
             base_url: BaseUrl::parse("https://api.example.test/v1").expect("valid base URL"),
             api_key: Arc::new(ApiKey::parse("upstream-key").expect("valid API key")),
             service_tier_policy: ServiceTierPolicy::Passthrough,
+            fallback_excluded_models: Arc::new(HashSet::new()),
         })
     }
 
@@ -1522,6 +1647,46 @@ mod tests {
         assert_eq!(tracker.snapshot(), (1, 1));
         drop(response);
         assert_eq!(tracker.snapshot(), (0, 2));
+        assert_eq!(activity.0.lock().expect("activity mutex").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn responses_activity_continues_across_same_turn_tool_handoff_without_flicker() {
+        let activity = Arc::new(RecordingActivity::default());
+        let tracker = LogicalRequestActivityTracker::new(activity.clone());
+        let state = ProxyIngressState::new(TOKEN, Arc::new(ToolThenFinalUpstream::default()))
+            .with_activity_tracker(tracker.clone());
+        state.set_active_route(Some(route("primary")));
+        let router = build_proxy_router(state);
+        let request = || {
+            let mut request = authorized_request(
+                Method::POST,
+                "/v1/responses",
+                Body::from(r#"{"model":"gpt-5"}"#),
+            );
+            request.headers_mut().insert(
+                "x-codex-turn-metadata",
+                HeaderValue::from_static(r#"{"turn_id":"turn-tool"}"#),
+            );
+            request
+        };
+
+        let first = router
+            .clone()
+            .oneshot(request())
+            .await
+            .expect("tool response");
+        let _ = to_bytes(first.into_body(), 1024)
+            .await
+            .expect("tool response body");
+        assert_eq!(tracker.snapshot().0, 1);
+        assert_eq!(activity.0.lock().expect("activity mutex").len(), 1);
+
+        let final_response = router.oneshot(request()).await.expect("final response");
+        let _ = to_bytes(final_response.into_body(), 1024)
+            .await
+            .expect("final response body");
+        assert_eq!(tracker.snapshot().0, 0);
         assert_eq!(activity.0.lock().expect("activity mutex").len(), 2);
     }
 
@@ -1796,12 +1961,14 @@ mod tests {
                 .expect("image base URL"),
             api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
             service_tier_policy: ServiceTierPolicy::Passthrough,
+            fallback_excluded_models: Arc::new(HashSet::new()),
         });
         let routing = RoutingSnapshotStore::new(RoutingSnapshot {
             active: None,
             participants: Vec::new(),
             enabled: false,
             selection_generation: 0,
+            health_generation: 0,
             config_revision: 0,
             images_generation_enabled: true,
             images_route: Some(image_route),

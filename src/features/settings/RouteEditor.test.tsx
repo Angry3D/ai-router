@@ -507,7 +507,13 @@ describe("RouteEditor interactions", () => {
     ).toEqual(["本地代理", "图片生成", "Codex 配置", "断开恢复配置"]);
     fireEvent.click(screen.getByRole("button", { name: "路由" }));
     await screen.findByLabelText("模型 ID 1");
-    fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+    const customModelSection = screen
+      .getByRole("heading", { name: "自定义模型", level: 3 })
+      .closest("section");
+    if (!customModelSection) throw new Error("custom model section not found");
+    fireEvent.click(
+      within(customModelSection).getByRole("button", { name: "添加模型" }),
+    );
     expect(screen.getByLabelText("模型 ID 3")).toHaveFocus();
     expect(screen.getByRole("button", { name: "删除模型 3" })).toHaveAttribute(
       "title",
@@ -523,17 +529,75 @@ describe("RouteEditor interactions", () => {
     );
     await screen.findByText("尚未添加自定义模型");
     expect(screen.getByText("尚未添加自定义模型")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+    const customModelSection = screen
+      .getByRole("heading", { name: "自定义模型", level: 3 })
+      .closest("section");
+    if (!customModelSection) throw new Error("custom model section not found");
+    const addModelButton = within(customModelSection).getByRole("button", {
+      name: "添加模型",
+    });
+    fireEvent.click(addModelButton);
     fireEvent.change(screen.getByLabelText("模型 ID 1"), {
       target: { value: "duplicate" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+    fireEvent.click(addModelButton);
     fireEvent.change(screen.getByLabelText("模型 ID 2"), {
       target: { value: "duplicate" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     expect(screen.getByText("模型 ID 不能重复。")).toBeInTheDocument();
     expect(ipc.saveRoute).not.toHaveBeenCalled();
+  });
+
+  it("edits fallback-excluded models as compact tags with exact validation", async () => {
+    await renderSettings();
+    const section = screen
+      .getByRole("heading", {
+        name: "跳过 Fallback 的模型",
+        level: 3,
+      })
+      .closest("section");
+    if (!section) throw new Error("fallback model section not found");
+    const input = within(section).getByLabelText("添加跳过 Fallback 的模型");
+    const add = within(section).getByRole("button", { name: "添加模型" });
+
+    expect(input).toHaveAttribute("placeholder", "输入模型 ID");
+    expect(add).toBeDisabled();
+    fireEvent.change(input, { target: { value: " gpt-5.6-luna " } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    expect(within(section).getByText("gpt-5.6-luna")).toBeInTheDocument();
+    expect(input).toHaveValue("");
+    expect(section).toHaveTextContent("1 个 · 未保存");
+
+    fireEvent.change(input, { target: { value: "gpt-5.6-luna" } });
+    fireEvent.click(add);
+    expect(within(section).getByRole("alert")).toHaveTextContent(
+      "模型 ID 不能重复。",
+    );
+    expect(within(section).getAllByRole("listitem")).toHaveLength(1);
+
+    fireEvent.click(
+      within(section).getByRole("button", {
+        name: "移除跳过 Fallback 的模型：gpt-5.6-luna",
+      }),
+    );
+    expect(within(section).queryByRole("listitem")).not.toBeInTheDocument();
+  });
+
+  it("includes valid pending fallback-excluded input in the route save", async () => {
+    await renderSettings();
+    fireEvent.change(screen.getByLabelText("添加跳过 Fallback 的模型"), {
+      target: { value: "  gpt-5.6-sol  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(ipc.saveRoute).toHaveBeenCalledTimes(1));
+    expect(ipc.saveRoute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fallbackExcludedModels: ["gpt-5.6-sol"],
+      }),
+    );
+    expect(screen.getByLabelText("添加跳过 Fallback 的模型")).toHaveValue("");
   });
 
   it("saves route fields and normalized model values in one action and reports restart", async () => {

@@ -22,6 +22,8 @@ const TRAY_ICONS = [
   "tray-active-static",
   "tray-active-a",
   "tray-active-b",
+  "tray-active-c",
+  "tray-active-d",
 ];
 
 function runTauriIcon(source, output) {
@@ -123,4 +125,4 @@ await cp(
   join(projectRoot, "src-tauri/icons/icon.png"),
 );
 
-console.log("Generated production, QA, and active tray icons.");
+console.log("Generated production, QA, and four-frame active tray icons.");

@@ -10,7 +10,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -342,7 +342,6 @@ function MenuConfirmDialog({
 export function MenuPopover() {
   const applicationUpdate = useApplicationUpdateSnapshot();
   const shellRef = useRef<HTMLElement>(null);
-  const routeScrollerRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
   const bootstrap = useBootstrapSnapshot();
   const databaseBlocked = isDatabaseSnapshotBlocked(
@@ -389,24 +388,6 @@ export function MenuPopover() {
     () => new Set(query.data?.balanceEnabledRouteIds ?? []),
     [query.data?.balanceEnabledRouteIds],
   );
-
-  useEffect(() => {
-    if (generation === 0) return;
-    const scroller = routeScrollerRef.current;
-    if (!scroller || !query.data?.bootstrap.activeRouteId) {
-      if (scroller) scroller.scrollTop = 0;
-      return;
-    }
-    const active = scroller.querySelector<HTMLElement>(
-      `[data-route-id="${CSS.escape(query.data.bootstrap.activeRouteId)}"]`,
-    );
-    if (!active) return;
-    const row = active.getBoundingClientRect();
-    const viewport = scroller.getBoundingClientRect();
-    if (row.top < viewport.top || row.bottom > viewport.bottom) {
-      active.scrollIntoView({ block: "nearest", behavior: "instant" });
-    }
-  }, [generation, query.data]);
 
   const refreshMenu = async () => {
     await queryClient.invalidateQueries({ queryKey: queryKeys.menu });
@@ -791,7 +772,6 @@ export function MenuPopover() {
           <AppScrollArea
             className="menu-routes"
             viewportClassName="menu-routes-viewport"
-            viewportRef={routeScrollerRef}
             viewportProps={{ role: "listbox", "aria-label": "路由" }}
           >
             {query.data.bootstrap.routes.map((route, index) => {

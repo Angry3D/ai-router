@@ -4,4 +4,4 @@ import type { CodexModelDto } from "./CodexModelDto";
 import type { RouteId } from "./RouteId";
 import type { ServiceTierPolicy } from "./ServiceTierPolicy";
 
-export type RouteSaveInputDto = { routeId: RouteId | null, name: string, baseUrl: string, apiKey: string, serviceTierPolicy: ServiceTierPolicy, balanceQuery: BalanceQueryEditDto | null, acceptScriptRisk: boolean, models: Array<CodexModelDto>, retryToken: string | null, };
+export type RouteSaveInputDto = { routeId: RouteId | null, name: string, baseUrl: string, apiKey: string, serviceTierPolicy: ServiceTierPolicy, balanceQuery: BalanceQueryEditDto | null, acceptScriptRisk: boolean, fallbackExcludedModels: Array<string>, models: Array<CodexModelDto>, retryToken: string | null, };

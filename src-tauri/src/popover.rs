@@ -1378,6 +1378,7 @@ mod tests {
                     failure_reason: None,
                     observed_at_ms: None,
                 },
+                health: None,
             }]
         });
         BootstrapSnapshotDto {
@@ -2228,6 +2229,14 @@ mod tests {
             (
                 "active-b",
                 include_bytes!("../icons/tray-active-b.png").as_slice(),
+            ),
+            (
+                "active-c",
+                include_bytes!("../icons/tray-active-c.png").as_slice(),
+            ),
+            (
+                "active-d",
+                include_bytes!("../icons/tray-active-d.png").as_slice(),
             ),
         ] {
             let image = tauri::image::Image::from_bytes(bytes).expect("valid tray PNG");

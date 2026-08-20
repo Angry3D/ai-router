@@ -36,13 +36,16 @@ vi.mock("./RouteEditor", () => ({
     routeId,
     newRoute,
     externalBusy,
+    healthDetail,
   }: {
     routeId: RouteId | null;
     newRoute: boolean;
     externalBusy: boolean;
+    healthDetail?: { text: string } | null;
   }) => (
     <section aria-label="路由编辑器" data-route-id={routeId ?? ""}>
       <span>{newRoute ? "新路由" : routeId}</span>
+      {healthDetail ? <span>{healthDetail.text}</span> : null}
       <button type="button" disabled={externalBusy}>
         删除路由
       </button>
@@ -500,8 +503,41 @@ describe("RoutesSettings unified dragging", () => {
       name: "说明自动 Fallback 切换规则",
     });
     fireEvent.focus(help);
-    expect(screen.getByRole("tooltip")).toHaveTextContent(
-      "请求失败且符合切换条件时，将按顺序尝试后续路由；到最后一条后停止，不会回到前面的路由。",
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip.tagName).toBe("DIV");
+    expect(tooltip.querySelectorAll("li")).toHaveLength(3);
+    expect(tooltip).toHaveTextContent(
+      "5 次可归因失败后，按顺序切换后续路由。兼容请求验证成功 2 次后，恢复更前路由。手动切换后，重新计数。",
     );
+  });
+
+  it("keeps route health in the existing marker and selected title detail", () => {
+    const activeRoute = previewSettingsSnapshot.routes[0];
+    renderRoutes({
+      ...previewSettingsSnapshot,
+      routes: previewSettingsSnapshot.routes.map((route) =>
+        route.routeId === activeRoute.routeId
+          ? {
+              ...route,
+              health: { kind: "striking", failureCount: 3 },
+            }
+          : route,
+      ),
+    });
+
+    expect(screen.getByText("当前 · 3/5")).toHaveClass("is-warning");
+    const healthDetail = screen.getByText(
+      "已累计失败 3/5 · 仍使用当前路由，不切换",
+    );
+    expect(healthDetail).toBeInTheDocument();
+    expect(healthDetail).not.toHaveAttribute("role", "status");
+    expect(
+      screen.getByRole("button", {
+        name: new RegExp(
+          `${activeRoute.name}.*已累计失败 3/5 · 仍使用当前路由，不切换`,
+          "u",
+        ),
+      }),
+    ).toBeInTheDocument();
   });
 });

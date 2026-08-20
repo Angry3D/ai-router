@@ -25,7 +25,7 @@ pub const MAX_VALID_POINTS: usize = 5;
 pub const RECOVERY_RETENTION: Duration = Duration::from_hours(720);
 pub const RECOVERY_QUIET_PERIOD: Duration = Duration::from_millis(250);
 
-const APPLICATION_TABLES: [&str; 14] = [
+const APPLICATION_TABLES: [&str; 16] = [
     "app_settings",
     "balance_queries",
     "codex_baseline",
@@ -36,10 +36,12 @@ const APPLICATION_TABLES: [&str; 14] = [
     "proxy_requests",
     "recovery_point_metadata",
     "recovery_revision",
+    "route_fallback_excluded_models",
     "route_state",
     "routes",
     "secrets",
     "upstream_attempts",
+    "upstream_attempt_routing_skips",
 ];
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1240,6 +1242,38 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
             },
         )
     };
+    let fallback_excluded_models_valid = {
+        let mut statement = connection.prepare(
+            "SELECT route_id, model_id, sort_order
+             FROM route_fallback_excluded_models ORDER BY route_id, sort_order",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut grouped = std::collections::BTreeMap::<String, Vec<(String, i64)>>::new();
+        for (route_id, model_id, sort_order) in rows {
+            grouped
+                .entry(route_id)
+                .or_default()
+                .push((model_id, sort_order));
+        }
+        grouped.into_values().all(|rows| {
+            let contiguous = rows.iter().enumerate().all(|(index, (_, sort_order))| {
+                i64::try_from(index).is_ok_and(|index| *sort_order == index)
+            });
+            contiguous
+                && crate::storage::normalize_fallback_excluded_models(
+                    rows.into_iter().map(|(model, _)| model).collect(),
+                )
+                .is_ok()
+        })
+    };
     let notice_valid: bool = connection.query_row(
         "SELECT NOT EXISTS(
             SELECT 1 FROM codex_restart_notice n
@@ -1269,6 +1303,7 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         || settings.6.is_some_and(|timestamp| timestamp < 0)
         || !balance_queries_valid
         || !codex_models_valid
+        || !fallback_excluded_models_valid
         || !notice_valid
     {
         return Err(RecoveryError::DomainValidation);
@@ -1547,18 +1582,22 @@ mod tests {
     )]
     async fn seed_critical_and_history(database: &DatabaseExecutor) {
         let route = database
-            .create_route(CreateRouteInput {
-                name: "Synthetic".to_owned(),
-                base_url: "https://example.invalid/v1".to_owned(),
-                api_key: ApiKey::parse("synthetic-route-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Omit,
-                balance_query: Some(BalanceQueryInput {
-                    mode: BalanceQueryMode::CustomJs,
-                    enabled: true,
-                    custom_source: "({ request: {}, extractor: () => ({}) })".to_owned(),
-                }),
-                accept_script_risk: true,
-            })
+            .create_route_with_models_and_fallback_exclusions(
+                CreateRouteInput {
+                    name: "Synthetic".to_owned(),
+                    base_url: "https://example.invalid/v1".to_owned(),
+                    api_key: ApiKey::parse("synthetic-route-key").expect("key"),
+                    service_tier_policy: ServiceTierPolicy::Omit,
+                    balance_query: Some(BalanceQueryInput {
+                        mode: BalanceQueryMode::CustomJs,
+                        enabled: true,
+                        custom_source: "({ request: {}, extractor: () => ({}) })".to_owned(),
+                    }),
+                    accept_script_risk: true,
+                },
+                Vec::new(),
+                vec!["luna".to_owned(), "sol".to_owned()],
+            )
             .await
             .expect("route");
         let timeout = ImagesGenerationTimeout::parse(900).expect("image timeout");
@@ -1626,6 +1665,7 @@ mod tests {
                 attempts: vec![AttemptHistoryRecord {
                     attempt_id: UpstreamAttemptId::new(),
                     attempt_index: 0,
+                    attempt_role: crate::storage::AttemptRole::Ordinary,
                     route_id: route.route_id,
                     route_name: EXCLUDED_SENTINEL.to_owned(),
                     started_at_ms: 1,
@@ -2049,6 +2089,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one restore scenario verifies critical state, exclusions, and history removal"
+    )]
     async fn restore_preserves_point_and_codex_file_while_dropping_history() {
         let (root, primary, database, manager) = setup();
         seed_critical_and_history(&database).await;
@@ -2130,13 +2174,20 @@ mod tests {
             .expect("route");
         assert_eq!(
             restored
-                .list_codex_models(restored_route.route_id)
+                .list_codex_models(restored_route.route_id.clone())
                 .await
                 .expect("Codex models")
                 .iter()
                 .map(|model| model.model_id.as_str())
                 .collect::<Vec<_>>(),
             ["relay-b", "relay-a"]
+        );
+        assert_eq!(
+            restored
+                .list_fallback_excluded_models(restored_route.route_id)
+                .await
+                .expect("Fallback exclusions"),
+            ["luna", "sol"]
         );
         assert_eq!(
             restored
@@ -2401,14 +2452,14 @@ mod tests {
             )
             .expect("sanitized update cadence");
         assert_eq!(update_cadence, None);
-        let counts: (i64, i64, i64, i64, i64, i64, i64) = connection
+        let counts: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = connection
             .query_row(
-                "SELECT (SELECT COUNT(*) FROM routes), (SELECT COUNT(*) FROM secrets), (SELECT COUNT(*) FROM codex_baseline), (SELECT COUNT(*) FROM codex_recovery_config), (SELECT COUNT(*) FROM codex_models), (SELECT COUNT(*) FROM proxy_requests), (SELECT COUNT(*) FROM upstream_attempts)",
+                "SELECT (SELECT COUNT(*) FROM routes), (SELECT COUNT(*) FROM secrets), (SELECT COUNT(*) FROM codex_baseline), (SELECT COUNT(*) FROM codex_recovery_config), (SELECT COUNT(*) FROM codex_models), (SELECT COUNT(*) FROM route_fallback_excluded_models), (SELECT COUNT(*) FROM proxy_requests), (SELECT COUNT(*) FROM upstream_attempts), (SELECT COUNT(*) FROM upstream_attempt_routing_skips)",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
             )
             .expect("counts");
-        assert_eq!(counts, (1, 2, 1, 1, 2, 0, 0));
+        assert_eq!(counts, (1, 2, 1, 1, 2, 2, 0, 0, 0));
         let query: (String, bool, String) = connection
             .query_row(
                 "SELECT mode, enabled, custom_source FROM balance_queries",

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="-2 -2 28 28">
-  <!-- Lucide 0.468.0 Route plus approved activity frame B. -->
+  <!-- Lucide 0.468.0 Route plus approved activity middle frame B. -->
   <g
     fill="none"
     stroke="#000000"
@@ -11,5 +11,5 @@
     <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/>
     <circle cx="18" cy="5" r="3"/>
   </g>
-  <circle cx="15" cy="12" r="1.8" fill="#000000"/>
+  <circle cx="9" cy="12" r="2.6" fill="#000000"/>
 </svg>

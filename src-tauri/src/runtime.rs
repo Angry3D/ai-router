@@ -36,19 +36,21 @@ use router_core::{
     },
     domain::{
         ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, CodexModelValidationError,
-        ImagesGenerationTimeout, ReachabilityResult, RouteId, ValidationError,
+        FallbackExcludedModelValidationError, ImagesGenerationTimeout, ReachabilityResult, RouteId,
+        ValidationError,
     },
     lifecycle::{
         AppCoordinator, AppLifecycleIssue, AppLifecyclePhase, AppLifecycleServices,
         AppLifecycleSnapshot, LifecycleFailure,
     },
     proxy::{
-        AsyncHistoryRecorder, FallbackActivationError, FallbackActivationRequest,
-        FallbackActivator, InferenceStatusService, LogicalRequestActivitySink,
-        LogicalRequestActivityTracker, ProxyIngressState, ProxyPortError, ProxyPortStore,
-        ProxyServerHandle, ReachabilityProbe, RequestTransitionSink, ResponsesForwarder,
-        RouteSnapshot, RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticEvent,
-        RuntimeDiagnosticSink, build_proxy_router, transition_proxy_port,
+        ActivatedSkipHealth, AsyncHistoryRecorder, FallbackActivationError, FallbackActivationMode,
+        FallbackActivationRequest, FallbackActivator, HealthActivationProof,
+        InferenceStatusService, LogicalRequestActivitySink, LogicalRequestActivityTracker,
+        ProxyIngressState, ProxyPortError, ProxyPortStore, ProxyServerHandle, ReachabilityProbe,
+        RequestTransitionSink, ResponsesForwarder, RouteHealthRegistry, RouteSnapshot,
+        RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
+        build_proxy_router, transition_proxy_port,
     },
     qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     recovery::{
@@ -67,6 +69,7 @@ use router_core::{
     storage::{
         BalanceQueryInput, CodexModelRecord, CodexRestartNoticeRecord, CreateRouteInput,
         DeleteRouteResult, StorageError, UpdateRouteInput, normalize_codex_model_records,
+        normalize_fallback_excluded_models,
     },
     storage::{DatabaseExecutor, SecretStore, SqliteBalanceRouteSource, SqliteSecretStore},
 };
@@ -239,6 +242,7 @@ pub struct DesktopLifecycleServices {
     inference: tokio::sync::Mutex<Option<InferenceStatusService>>,
     ingress: tokio::sync::Mutex<Option<ProxyIngressState>>,
     routing: RoutingSnapshotStore,
+    route_health: Arc<RouteHealthRegistry>,
     routing_write_gate: Arc<tokio::sync::Mutex<()>>,
     codex_projection_gate: Arc<tokio::sync::Mutex<()>>,
     balance_settings_write_gate: tokio::sync::Mutex<()>,
@@ -321,6 +325,10 @@ impl DesktopLifecycleServices {
         activity_sink: Arc<dyn LogicalRequestActivitySink>,
     ) -> Arc<Self> {
         let codex_home = profile.codex_home(&app_data_dir, user_home);
+        let route_health = Arc::new(RouteHealthRegistry::new(
+            Arc::new(router_core::proxy::SystemMonotonicClock::default()),
+            runtime_state.clone(),
+        ));
         Arc::new(Self {
             app_data_dir,
             codex_home,
@@ -336,6 +344,7 @@ impl DesktopLifecycleServices {
             inference: tokio::sync::Mutex::new(None),
             ingress: tokio::sync::Mutex::new(None),
             routing: RoutingSnapshotStore::default(),
+            route_health,
             routing_write_gate: Arc::new(tokio::sync::Mutex::new(())),
             codex_projection_gate: Arc::new(tokio::sync::Mutex::new(())),
             balance_settings_write_gate: tokio::sync::Mutex::new(()),
@@ -418,9 +427,10 @@ impl DesktopLifecycleServices {
                         },
                         |service| service.status(&route.route_id, now_millis()),
                     ),
-                    route_id: route.route_id,
+                    route_id: route.route_id.clone(),
                     name: route.name,
                     base_url_host: base_url.host(),
+                    health: self.route_health.snapshot(&route.route_id).map(Into::into),
                 })
             })
             .collect()
@@ -494,6 +504,7 @@ impl DesktopLifecycleServices {
         Ok(mutation)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn load_routing_snapshot(
         &self,
         database: &DatabaseExecutor,
@@ -501,6 +512,10 @@ impl DesktopLifecycleServices {
         let routes = database.list_routes().await.map_err(map_storage_error)?;
         let state = database.routing_state().await.map_err(map_storage_error)?;
         let settings = database.app_settings().await.map_err(map_storage_error)?;
+        let fallback_exclusions = database
+            .all_fallback_excluded_models()
+            .await
+            .map_err(map_storage_error)?;
         let participant_count = usize::try_from(state.fallback.participant_count)
             .map_err(|_| map_storage_error(StorageError::Initialization))?;
         if participant_count > routes.len() {
@@ -520,6 +535,14 @@ impl DesktopLifecycleServices {
                     .map_err(|error| map_validation_error(&error))?,
                 api_key: Arc::new(api_key),
                 service_tier_policy: route.service_tier_policy,
+                fallback_excluded_models: Arc::new(
+                    fallback_exclusions
+                        .get(&route.route_id)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                ),
             }));
         }
         let active = if let Some(active_route_id) = state.active_route_id.as_ref() {
@@ -543,6 +566,14 @@ impl DesktopLifecycleServices {
                         .map_err(|error| map_validation_error(&error))?,
                     api_key: Arc::new(api_key),
                     service_tier_policy: route.service_tier_policy,
+                    fallback_excluded_models: Arc::new(
+                        fallback_exclusions
+                            .get(&route.route_id)
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect(),
+                    ),
                 }))
             } else {
                 None
@@ -573,6 +604,14 @@ impl DesktopLifecycleServices {
                             .map_err(|error| map_validation_error(&error))?,
                         api_key: Arc::new(api_key),
                         service_tier_policy: route.service_tier_policy,
+                        fallback_excluded_models: Arc::new(
+                            fallback_exclusions
+                                .get(&route.route_id)
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                        ),
                     }))
                 } else {
                     return Err(map_storage_error(StorageError::Initialization));
@@ -585,6 +624,7 @@ impl DesktopLifecycleServices {
             enabled: state.fallback.enabled && participants.len() >= 2,
             participants,
             selection_generation: state.selection_generation,
+            health_generation: self.route_health.health_generation(),
             config_revision: state.fallback.config_revision,
             images_generation_enabled: settings.images_generation_enabled,
             images_route,
@@ -1011,10 +1051,12 @@ impl DesktopLifecycleServices {
                 enabled: query.enabled,
                 custom_source: query.custom_source,
             }),
+            fallback_excluded_models: edit.fallback_excluded_models,
             models: edit.models.into_iter().map(Into::into).collect(),
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn save_route(
         &self,
         input: RouteSaveInputDto,
@@ -1028,6 +1070,10 @@ impl DesktopLifecycleServices {
             custom_source: query.custom_source,
         });
         let retry_token = input.retry_token;
+        let fallback_excluded_models =
+            normalize_fallback_excluded_models(input.fallback_excluded_models)
+                .map_err(|error| map_fallback_excluded_model_validation_error(&error))?;
+        let creating_route = input.route_id.is_none();
         let candidate =
             normalize_codex_model_records(input.models.into_iter().map(Into::into).collect())
                 .map_err(|error| map_codex_model_validation_error(&error))?;
@@ -1047,9 +1093,9 @@ impl DesktopLifecycleServices {
         } else {
             Vec::new()
         };
-        let route_id = if let Some(route_id) = input.route_id {
-            database
-                .update_route_with_models(
+        let (route_id, route_changed) = if let Some(route_id) = input.route_id {
+            let changed = database
+                .update_route_with_models_and_fallback_exclusions(
                     UpdateRouteInput {
                         route_id: route_id.clone(),
                         name: input.name,
@@ -1060,13 +1106,14 @@ impl DesktopLifecycleServices {
                         accept_script_risk: input.accept_script_risk,
                     },
                     candidate.clone(),
+                    fallback_excluded_models.clone(),
                 )
                 .await
                 .map_err(map_storage_error)?;
-            route_id
+            (route_id, changed)
         } else {
-            database
-                .create_route_with_models(
+            let route_id = database
+                .create_route_with_models_and_fallback_exclusions(
                     CreateRouteInput {
                         name: input.name,
                         base_url: input.base_url,
@@ -1076,13 +1123,27 @@ impl DesktopLifecycleServices {
                         accept_script_risk: input.accept_script_risk,
                     },
                     candidate.clone(),
+                    fallback_excluded_models,
                 )
                 .await
                 .map_err(map_storage_error)?
-                .route_id
+                .route_id;
+            (route_id, true)
         };
-        if let Some(balance) = self.balance.lock().await.as_ref() {
+        if route_changed && let Some(balance) = self.balance.lock().await.as_ref() {
             balance.invalidate_route(&route_id);
+        }
+        if creating_route {
+            self.route_health.advance_generation_and_clear();
+        } else if route_changed {
+            let routing = self.load_routing_snapshot(&database).await?;
+            let participants = routing
+                .participants
+                .iter()
+                .map(|route| route.route_id.clone())
+                .collect::<Vec<_>>();
+            self.route_health
+                .invalidate_route_and_rebase(&route_id, &participants);
         }
         let mutation = self.refresh_route_projection(&database).await?;
         let active_after = database
@@ -1134,6 +1195,7 @@ impl DesktopLifecycleServices {
         if let Some(inference) = self.inference.lock().await.as_ref() {
             inference.remove_route(&route_id);
         }
+        self.route_health.advance_generation_and_clear();
         let mutation = self.refresh_route_projection(&database).await?;
         if deleting_active {
             let _ = self
@@ -1154,6 +1216,7 @@ impl DesktopLifecycleServices {
             .activate_route(route_id.clone())
             .await
             .map_err(map_storage_error)?;
+        self.route_health.advance_generation_and_clear();
         let mutation = self.refresh_route_projection(&database).await?;
         if let Some(balance) = self.balance.lock().await.clone() {
             tauri::async_runtime::spawn(async move {
@@ -1295,6 +1358,7 @@ impl DesktopLifecycleServices {
             .activate_route(permit.target_route_id.clone())
             .await
             .map_err(map_storage_error)?;
+        self.route_health.advance_generation_and_clear();
         let mutation = self.refresh_route_projection(&database).await?;
         let catalog = if source_fingerprint == target_fingerprint {
             inactive_codex_models_result(target_models)
@@ -1336,10 +1400,14 @@ impl DesktopLifecycleServices {
     ) -> Result<MutationResultDto, IpcErrorDto> {
         let database = self.database_for_ipc().await?;
         let _routing_write = self.routing_write_gate.lock().await;
-        database
+        let previous_revision = self.routing.load().config_revision;
+        let fallback = database
             .set_fallback_enabled(enabled)
             .await
             .map_err(map_storage_error)?;
+        if fallback.config_revision != previous_revision {
+            self.route_health.advance_generation_and_clear();
+        }
         self.refresh_route_projection(&database).await
     }
 
@@ -1354,6 +1422,9 @@ impl DesktopLifecycleServices {
             .set_fallback_participant_count(participant_count)
             .await
             .map_err(map_storage_error)?;
+        if changed {
+            self.route_health.advance_generation_and_clear();
+        }
         if !changed {
             let durable_revision = database
                 .routing_state()
@@ -1476,6 +1547,7 @@ impl DesktopLifecycleServices {
                 revision: self.runtime_state.bootstrap_snapshot().revision,
             });
         }
+        self.route_health.advance_generation_and_clear();
         self.refresh_route_projection(&database).await
     }
 
@@ -2446,6 +2518,7 @@ impl RequestTransitionSink for FallbackTransitionCoordinator {
     }
 }
 
+#[derive(Clone)]
 struct DesktopFallbackActivator {
     database: DatabaseExecutor,
     routing: RoutingSnapshotStore,
@@ -2455,41 +2528,73 @@ struct DesktopFallbackActivator {
     app_data_dir: PathBuf,
     codex_home: PathBuf,
     transitions: FallbackTransitionCoordinator,
+    route_health: Arc<RouteHealthRegistry>,
 }
 
-#[async_trait]
-impl FallbackActivator for DesktopFallbackActivator {
-    async fn activate_next(
+impl DesktopFallbackActivator {
+    fn skipped_health(request: &FallbackActivationRequest) -> Vec<ActivatedSkipHealth> {
+        request
+            .skipped_routes
+            .iter()
+            .map(|skip| ActivatedSkipHealth {
+                route_id: skip.route.route_id.clone(),
+                kind: skip.kind,
+            })
+            .collect()
+    }
+
+    fn activation_proof_matches_mode(
+        request: &FallbackActivationRequest,
+        health_proof: &HealthActivationProof,
+    ) -> bool {
+        matches!(
+            (&request.mode, health_proof),
+            (
+                FallbackActivationMode::Advance,
+                HealthActivationProof::Advance { .. }
+            ) | (
+                FallbackActivationMode::AdvanceRecovered,
+                HealthActivationProof::AdvanceRecovered { .. }
+            ) | (
+                FallbackActivationMode::Recover,
+                HealthActivationProof::Recover { .. }
+            )
+        )
+    }
+
+    fn commit_health_activation(
+        &self,
+        request: &FallbackActivationRequest,
+        reservation: &router_core::proxy::HealthActivationReservation,
+        health_proof: &HealthActivationProof,
+        snapshot: &RoutingSnapshot,
+        skipped_health: &[ActivatedSkipHealth],
+    ) {
+        let participant_ids = snapshot
+            .participants
+            .iter()
+            .map(|route| route.route_id.clone())
+            .collect::<Vec<_>>();
+        let committed = self.route_health.commit_activation(
+            reservation,
+            health_proof,
+            &request.target_route.route_id,
+            snapshot.health_generation,
+            &participant_ids,
+            skipped_health,
+        );
+        if !committed {
+            self.route_health
+                .clear_to_generation(snapshot.health_generation);
+        }
+    }
+
+    async fn publish_activation(
         &self,
         request: FallbackActivationRequest,
-    ) -> Result<Option<Arc<RoutingSnapshot>>, FallbackActivationError> {
-        let _routing_write = self.routing_write_gate.lock().await;
-        let latest_projection = self.routing.load();
-        let changed = self
-            .database
-            .conditional_activate_next(
-                request.current_route_id.clone(),
-                request.routing.selection_generation,
-                request.routing.config_revision,
-                request.target_route.route_id.clone(),
-            )
-            .await
-            .map_err(|_| FallbackActivationError::Persistence)?;
-        if !changed {
-            return Ok(None);
-        }
-        let snapshot = Arc::new(RoutingSnapshot {
-            active: Some(Arc::clone(&request.target_route)),
-            participants: request.routing.participants.clone(),
-            enabled: request.routing.enabled,
-            selection_generation: request.routing.selection_generation.saturating_add(1),
-            config_revision: request.routing.config_revision,
-            images_generation_enabled: latest_projection.images_generation_enabled,
-            images_route: latest_projection.images_route.clone(),
-            images_generation_timeout: latest_projection.images_generation_timeout,
-        });
-        let projected_fallback =
-            fallback_state(&snapshot).map_err(|_| FallbackActivationError::Persistence)?;
+        snapshot: Arc<RoutingSnapshot>,
+        projected_fallback: FallbackStateDto,
+    ) {
         self.routing.store(Arc::clone(&snapshot));
         let active_route_id = snapshot.active.as_ref().map(|route| route.route_id.clone());
         let _ = self.runtime_state.apply_committed::<_, ()>(
@@ -2501,15 +2606,15 @@ impl FallbackActivator for DesktopFallbackActivator {
                 ..RuntimeProjectionUpdate::default()
             },
         );
-        let target_route = snapshot.active.as_ref().expect("activated route");
         self.transitions
             .record_activation(
                 request.request_id.clone(),
-                target_route.route_id.clone(),
-                target_route.name.clone(),
+                request.target_route.route_id.clone(),
+                request.target_route.name.clone(),
                 snapshot.selection_generation,
             )
             .await;
+
         let database = self.database.clone();
         let app_data_dir = self.app_data_dir.clone();
         let codex_home = self.codex_home.clone();
@@ -2518,7 +2623,7 @@ impl FallbackActivator for DesktopFallbackActivator {
         let transitions = self.transitions.clone();
         let request_id = request.request_id;
         let source_route_id = request.current_route_id;
-        let target_route_id = target_route.route_id.clone();
+        let target_route_id = request.target_route.route_id.clone();
         let selection_generation = snapshot.selection_generation;
         tauri::async_runtime::spawn(async move {
             let fingerprint = project_fallback_catalog(
@@ -2539,7 +2644,99 @@ impl FallbackActivator for DesktopFallbackActivator {
                 .projection_finished(&request_id, selection_generation, fingerprint)
                 .await;
         });
+    }
+
+    async fn activate_next_inner(
+        &self,
+        request: FallbackActivationRequest,
+    ) -> Result<Option<Arc<RoutingSnapshot>>, FallbackActivationError> {
+        let _routing_write = self.routing_write_gate.lock().await;
+        let Some(health_proof) = request.health_proof.as_ref() else {
+            return Ok(None);
+        };
+        let skipped_health = Self::skipped_health(&request);
+        if !Self::activation_proof_matches_mode(&request, health_proof) {
+            return Ok(None);
+        }
+        let Some(health_reservation) = self.route_health.begin_activation(
+            health_proof,
+            &request.current_route_id,
+            &request.target_route.route_id,
+            &skipped_health,
+        ) else {
+            return Ok(None);
+        };
+        let latest_projection = self.routing.load();
+        let snapshot = Arc::new(RoutingSnapshot {
+            active: Some(Arc::clone(&request.target_route)),
+            participants: request.routing.participants.clone(),
+            enabled: request.routing.enabled,
+            selection_generation: request.routing.selection_generation.saturating_add(1),
+            health_generation: request.routing.health_generation.saturating_add(1),
+            config_revision: request.routing.config_revision,
+            images_generation_enabled: latest_projection.images_generation_enabled,
+            images_route: latest_projection.images_route.clone(),
+            images_generation_timeout: latest_projection.images_generation_timeout,
+        });
+        let Ok(projected_fallback) = fallback_state(&snapshot) else {
+            self.route_health.cancel_activation(&health_reservation);
+            return Err(FallbackActivationError::Persistence);
+        };
+        let Ok(changed) = self
+            .database
+            .conditional_activate_forward(
+                request.current_route_id.clone(),
+                request.routing.selection_generation,
+                request.routing.config_revision,
+                request.target_route.route_id.clone(),
+                request
+                    .skipped_routes
+                    .iter()
+                    .map(|skip| skip.route.route_id.clone())
+                    .collect(),
+                request
+                    .skipped_routes
+                    .iter()
+                    .filter(|skip| {
+                        skip.kind == router_core::proxy::ActivatedSkipKind::ModelFallbackExcluded
+                    })
+                    .map(|skip| skip.route.route_id.clone())
+                    .collect(),
+                request.requested_model.clone(),
+                request.mode == FallbackActivationMode::Recover,
+            )
+            .await
+        else {
+            self.route_health.cancel_activation(&health_reservation);
+            return Err(FallbackActivationError::Persistence);
+        };
+        if !changed {
+            self.route_health.cancel_activation(&health_reservation);
+            return Ok(None);
+        }
+        self.commit_health_activation(
+            &request,
+            &health_reservation,
+            health_proof,
+            &snapshot,
+            &skipped_health,
+        );
+        self.publish_activation(request, Arc::clone(&snapshot), projected_fallback)
+            .await;
         Ok(Some(snapshot))
+    }
+}
+
+#[async_trait]
+impl FallbackActivator for DesktopFallbackActivator {
+    async fn activate_next(
+        &self,
+        request: FallbackActivationRequest,
+    ) -> Result<Option<Arc<RoutingSnapshot>>, FallbackActivationError> {
+        let activator = self.clone();
+        tokio::spawn(async move { activator.activate_next_inner(request).await })
+            .await
+            .unwrap_or(Err(FallbackActivationError::Persistence))
     }
 }
 
@@ -2725,12 +2922,14 @@ impl AppLifecycleServices for DesktopLifecycleServices {
             app_data_dir: self.app_data_dir.clone(),
             codex_home: self.codex_home.clone(),
             transitions: transitions.clone(),
+            route_health: Arc::clone(&self.route_health),
         });
         let transition_sink: Arc<dyn RequestTransitionSink> = Arc::new(transitions);
         let forwarder = ResponsesForwarder::new()
             .map_err(|_| LifecycleFailure::Proxy)?
             .with_runtime_services(history.clone(), self.diagnostics.clone(), inference.clone())
             .with_fallback_services(self.routing.clone(), activator)
+            .with_route_health_registry(Arc::clone(&self.route_health))
             .with_request_transition_sink(transition_sink);
         let ingress = self.proxy_ingress(&gateway_token, forwarder, history.clone());
         let summaries = routes
@@ -2743,6 +2942,7 @@ impl AppLifecycleServices for DesktopLifecycleServices {
                     name: route.name.clone(),
                     base_url_host: base_url.host(),
                     inference_status: inference.status(&route.route_id, now_millis()),
+                    health: self.route_health.snapshot(&route.route_id).map(Into::into),
                 })
             })
             .collect::<Result<Vec<_>, LifecycleFailure>>()?;
@@ -3388,6 +3588,9 @@ fn map_storage_error(error: StorageError) -> IpcErrorDto {
     match error {
         StorageError::Validation(error) => map_validation_error(&error),
         StorageError::CodexModelValidation(error) => map_codex_model_validation_error(&error),
+        StorageError::FallbackExcludedModelValidation(error) => {
+            map_fallback_excluded_model_validation_error(&error)
+        }
         StorageError::InvalidUsageQuery => {
             ipc_error("usage_query_invalid", "用量筛选条件无效。", false)
         }
@@ -3434,6 +3637,23 @@ fn map_codex_model_validation_error(error: &CodexModelValidationError) -> IpcErr
         "codex_model_display_name_control_character" => "显示名称不能包含控制字符。",
         "codex_model_context_window_invalid" => "上下文窗口必须是正整数。",
         _ => "模型配置无效。",
+    };
+    IpcErrorDto {
+        code: error.code.to_owned(),
+        message: message.to_owned(),
+        retryable: false,
+        field: Some(error.field.clone()),
+    }
+}
+
+fn map_fallback_excluded_model_validation_error(
+    error: &FallbackExcludedModelValidationError,
+) -> IpcErrorDto {
+    let message = match error.code {
+        "fallback_excluded_model_required" => "请输入模型 ID。",
+        "fallback_excluded_model_control_character" => "模型 ID 不能包含控制字符。",
+        "fallback_excluded_model_duplicate" => "模型 ID 不能重复。",
+        _ => "Fallback 模型配置无效。",
     };
     IpcErrorDto {
         code: error.code.to_owned(),
@@ -3860,6 +4080,108 @@ mod tests {
             .route_id
     }
 
+    fn route_save_health_input(route_id: &RouteId, name: &str) -> RouteSaveInputDto {
+        RouteSaveInputDto {
+            route_id: Some(route_id.clone()),
+            name: name.to_owned(),
+            base_url: "https://A.example/v1".to_owned(),
+            api_key: "A-key".to_owned(),
+            service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+            balance_query: None,
+            accept_script_risk: false,
+            fallback_excluded_models: Vec::new(),
+            models: Vec::new(),
+            retry_token: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn route_save_preserves_exact_health_and_invalidates_only_changed_route() {
+        let directory = TempDir::new().expect("app data fixture");
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink))),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let database = services.database().await.expect("database");
+        let routes = [
+            create_fallback_test_route(&database, "A").await,
+            create_fallback_test_route(&database, "B").await,
+        ];
+        database
+            .set_fallback_enabled(true)
+            .await
+            .expect("enable fallback");
+        services
+            .refresh_route_projection(&database)
+            .await
+            .expect("routing projection");
+        let generation = services.routing.load().health_generation;
+        assert_eq!(
+            services.route_health.record_ordinary_failure(
+                &routes[0],
+                generation,
+                router_core::proxy::HealthFailureClass::Service,
+                true,
+                true,
+            ),
+            router_core::proxy::StrikeResult::BelowThreshold { failure_count: 1 }
+        );
+        assert_eq!(
+            services.route_health.record_ordinary_failure(
+                &routes[1],
+                generation,
+                router_core::proxy::HealthFailureClass::Service,
+                true,
+                true,
+            ),
+            router_core::proxy::StrikeResult::BelowThreshold { failure_count: 1 }
+        );
+
+        services
+            .save_route(route_save_health_input(&routes[0], "A"))
+            .await
+            .expect("exact route save");
+
+        assert_eq!(
+            services.route_health.snapshot(&routes[0]),
+            Some(router_core::proxy::RouteHealthSnapshot::Striking { failure_count: 1 })
+        );
+        assert_eq!(services.routing.load().health_generation, generation);
+
+        services
+            .save_route(route_save_health_input(&routes[0], "A changed"))
+            .await
+            .expect("changed route save");
+
+        assert_eq!(services.route_health.snapshot(&routes[0]), None);
+        assert_eq!(
+            services.route_health.snapshot(&routes[1]),
+            Some(router_core::proxy::RouteHealthSnapshot::Striking { failure_count: 1 })
+        );
+        assert_eq!(
+            services.route_health.record_ordinary_failure(
+                &routes[0],
+                generation,
+                router_core::proxy::HealthFailureClass::Timeout,
+                true,
+                true,
+            ),
+            router_core::proxy::StrikeResult::Stale
+        );
+        assert_eq!(
+            services.routing.load().health_generation,
+            generation.saturating_add(1)
+        );
+        services.close_database().await;
+    }
+
     struct ImageMcpRepairFixture {
         _directory: TempDir,
         services: Arc<DesktopLifecycleServices>,
@@ -3971,7 +4293,159 @@ mod tests {
             app_data_dir: services.app_data_dir.clone(),
             codex_home: services.codex_home.clone(),
             transitions: FallbackTransitionCoordinator::new(database.clone(), Arc::clone(runtime)),
+            route_health: Arc::clone(&services.route_health),
         }
+    }
+
+    fn fallback_test_advance_proof(
+        services: &DesktopLifecycleServices,
+        route_id: &RouteId,
+        health_generation: u64,
+    ) -> router_core::proxy::HealthActivationProof {
+        let mut trip = None;
+        for _ in 0..5 {
+            if let router_core::proxy::StrikeResult::TripAcquired(lease) =
+                services.route_health.record_ordinary_failure(
+                    route_id,
+                    health_generation,
+                    router_core::proxy::HealthFailureClass::Service,
+                    true,
+                    true,
+                )
+            {
+                trip = Some(lease);
+            }
+        }
+        let trip = trip.expect("route reaches the test threshold");
+        assert!(services.route_health.reserve_trip(&trip));
+        router_core::proxy::HealthActivationProof::Advance { source: trip }
+    }
+
+    struct FallbackBoundaryFixture {
+        _directory: TempDir,
+        runtime: Arc<AppRuntimeState>,
+        services: Arc<DesktopLifecycleServices>,
+        database: DatabaseExecutor,
+        route_ids: Vec<RouteId>,
+    }
+
+    async fn fallback_boundary_fixture(initial_count: u32) -> FallbackBoundaryFixture {
+        let directory = TempDir::new().expect("app data fixture");
+        let runtime = Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink)));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let database = services.database().await.expect("database");
+        let mut route_ids = Vec::new();
+        for name in ["A", "B", "C"] {
+            route_ids.push(create_fallback_test_route(&database, name).await);
+        }
+        database
+            .set_fallback_participant_count(initial_count)
+            .await
+            .expect("initial boundary");
+        database
+            .set_fallback_enabled(true)
+            .await
+            .expect("enable fallback");
+        services
+            .refresh_route_projection(&database)
+            .await
+            .expect("routing projection");
+        FallbackBoundaryFixture {
+            _directory: directory,
+            runtime,
+            services,
+            database,
+            route_ids,
+        }
+    }
+
+    async fn assert_boundary_automatic_activation_order(
+        initial_count: u32,
+        next_count: u32,
+        boundary_first: bool,
+    ) {
+        let fixture = fallback_boundary_fixture(initial_count).await;
+        let captured = fixture.services.routing.load();
+        let health_proof = fallback_test_advance_proof(
+            &fixture.services,
+            &fixture.route_ids[0],
+            captured.health_generation,
+        );
+        let first = captured.active.as_ref().expect("active route");
+        let second = captured
+            .next_after(&first.route_id)
+            .expect("next fallback route");
+        let activator =
+            fallback_test_activator(&fixture.services, &fixture.database, &fixture.runtime);
+        let automatic_request = FallbackActivationRequest {
+            request_id: format!("boundary-race-{initial_count}-{next_count}-{boundary_first}"),
+            routing: captured,
+            current_route_id: fixture.route_ids[0].clone(),
+            target_route: second,
+            requested_model: "test-model".to_owned(),
+            skipped_routes: Vec::new(),
+            mode: FallbackActivationMode::Advance,
+            health_proof: Some(health_proof),
+        };
+
+        let automatic_result = if boundary_first {
+            let boundary = fixture.services.set_fallback_participant_count(next_count);
+            let automatic = activator.activate_next_inner(automatic_request);
+            let (boundary_result, automatic_result) = tokio::join!(biased; boundary, automatic);
+            boundary_result.expect("boundary mutation");
+            automatic_result
+        } else {
+            let automatic = activator.activate_next_inner(automatic_request);
+            let boundary = fixture.services.set_fallback_participant_count(next_count);
+            let (automatic_result, boundary_result) = tokio::join!(biased; automatic, boundary);
+            boundary_result.expect("boundary mutation");
+            automatic_result
+        }
+        .expect("automatic activation result");
+
+        assert_eq!(automatic_result.is_some(), !boundary_first);
+        let expected_active = if boundary_first {
+            &fixture.route_ids[0]
+        } else {
+            &fixture.route_ids[1]
+        };
+        let durable = fixture
+            .database
+            .routing_state()
+            .await
+            .expect("durable routing");
+        assert_eq!(durable.active_route_id.as_ref(), Some(expected_active));
+        assert_eq!(durable.fallback.participant_count, next_count);
+        let published = fixture.services.routing.load();
+        assert_eq!(published.config_revision, durable.fallback.config_revision);
+        assert_eq!(published.selection_generation, durable.selection_generation);
+        assert_eq!(
+            published.participants.len(),
+            usize::try_from(next_count).expect("participant count")
+        );
+        assert_eq!(
+            published.active.as_ref().map(|route| &route.route_id),
+            Some(expected_active)
+        );
+        let bootstrap = fixture.runtime.bootstrap_snapshot();
+        assert_eq!(bootstrap.active_route_id.as_ref(), Some(expected_active));
+        assert_eq!(bootstrap.fallback.participant_count, next_count);
+        assert_eq!(
+            bootstrap.fallback.active_position,
+            Some(if boundary_first { 1 } else { 2 })
+        );
+        assert!(bootstrap.fallback.has_next);
+        fixture.services.close_database().await;
     }
 
     #[test]
@@ -5482,6 +5956,8 @@ mod tests {
             .expect("initial routing projection");
 
         let captured = services.routing.load();
+        let health_proof =
+            fallback_test_advance_proof(&services, &routes[0].route_id, captured.health_generation);
         let target = captured
             .next_after(&routes[0].route_id)
             .expect("next fallback route");
@@ -5500,6 +5976,10 @@ mod tests {
                 routing: captured,
                 current_route_id: routes[0].route_id.clone(),
                 target_route: target,
+                requested_model: "test-model".to_owned(),
+                skipped_routes: Vec::new(),
+                mode: router_core::proxy::FallbackActivationMode::Advance,
+                health_proof: Some(health_proof),
             })
             .await
             .expect("fallback activation")
@@ -5605,6 +6085,7 @@ mod tests {
                     base_url: BaseUrl::parse("https://example.test/v1").expect("base URL"),
                     api_key: Arc::new(ApiKey::parse("test-key").expect("API key")),
                     service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                    fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
                 })
             })
             .collect::<Vec<_>>();
@@ -5613,6 +6094,7 @@ mod tests {
             participants,
             enabled: true,
             selection_generation: 1,
+            health_generation: 1,
             config_revision: 1,
             images_generation_enabled: false,
             images_route: None,
@@ -5991,98 +6473,12 @@ mod tests {
     async fn boundary_and_automatic_activation_serialize_in_both_commit_orders() {
         for (initial_count, next_count) in [(2, 3), (3, 2)] {
             for boundary_first in [true, false] {
-                let directory = TempDir::new().expect("app data fixture");
-                let runtime = Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink)));
-                let services = DesktopLifecycleServices::new(
-                    directory.path().to_path_buf(),
-                    directory.path(),
-                    DesktopRuntimeProfile::Isolated,
-                    Arc::clone(&runtime),
-                    Arc::new(NoopDiagnosticSink),
-                );
-                services
-                    .initialize_database()
-                    .await
-                    .expect("initialize database");
-                let database = services.database().await.expect("database");
-                let mut route_ids = Vec::new();
-                for name in ["A", "B", "C"] {
-                    route_ids.push(create_fallback_test_route(&database, name).await);
-                }
-                database
-                    .set_fallback_participant_count(initial_count)
-                    .await
-                    .expect("initial boundary");
-                database
-                    .set_fallback_enabled(true)
-                    .await
-                    .expect("enable fallback");
-                services
-                    .refresh_route_projection(&database)
-                    .await
-                    .expect("routing projection");
-                let captured = services.routing.load();
-                let first = captured.active.as_ref().expect("active route");
-                let second = captured
-                    .next_after(&first.route_id)
-                    .expect("next fallback route");
-                let activator = fallback_test_activator(&services, &database, &runtime);
-                let automatic_request = FallbackActivationRequest {
-                    request_id: format!(
-                        "boundary-race-{initial_count}-{next_count}-{boundary_first}"
-                    ),
-                    routing: captured,
-                    current_route_id: route_ids[0].clone(),
-                    target_route: second,
-                };
-
-                let automatic_result = if boundary_first {
-                    let boundary = services.set_fallback_participant_count(next_count);
-                    let automatic = activator.activate_next(automatic_request);
-                    let (boundary_result, automatic_result) =
-                        tokio::join!(biased; boundary, automatic);
-                    boundary_result.expect("boundary mutation");
-                    automatic_result
-                } else {
-                    let automatic = activator.activate_next(automatic_request);
-                    let boundary = services.set_fallback_participant_count(next_count);
-                    let (automatic_result, boundary_result) =
-                        tokio::join!(biased; automatic, boundary);
-                    boundary_result.expect("boundary mutation");
-                    automatic_result
-                }
-                .expect("automatic activation result");
-
-                assert_eq!(automatic_result.is_some(), !boundary_first);
-                let expected_active = if boundary_first {
-                    &route_ids[0]
-                } else {
-                    &route_ids[1]
-                };
-                let durable = database.routing_state().await.expect("durable routing");
-                assert_eq!(durable.active_route_id.as_ref(), Some(expected_active));
-                assert_eq!(durable.fallback.participant_count, next_count);
-                let published = services.routing.load();
-                assert_eq!(published.config_revision, durable.fallback.config_revision);
-                assert_eq!(published.selection_generation, durable.selection_generation);
-                assert_eq!(
-                    published.participants.len(),
-                    usize::try_from(next_count).expect("participant count")
-                );
-                assert_eq!(
-                    published.active.as_ref().map(|route| &route.route_id),
-                    Some(expected_active)
-                );
-                let bootstrap = runtime.bootstrap_snapshot();
-                assert_eq!(bootstrap.active_route_id.as_ref(), Some(expected_active));
-                assert_eq!(bootstrap.fallback.participant_count, next_count);
-                assert_eq!(
-                    bootstrap.fallback.active_position,
-                    Some(if boundary_first { 1 } else { 2 })
-                );
-                assert!(bootstrap.fallback.has_next);
-
-                services.close_database().await;
+                assert_boundary_automatic_activation_order(
+                    initial_count,
+                    next_count,
+                    boundary_first,
+                )
+                .await;
             }
         }
     }
@@ -6128,6 +6524,8 @@ mod tests {
             .await
             .expect("routing projection");
         let captured = services.routing.load();
+        let health_proof =
+            fallback_test_advance_proof(&services, &routes[0].route_id, captured.health_generation);
         let first = captured.active.as_ref().expect("active route");
         let second = captured
             .next_after(&first.route_id)
@@ -6144,12 +6542,17 @@ mod tests {
                 database.clone(),
                 Arc::clone(&services.runtime_state),
             ),
+            route_health: Arc::clone(&services.route_health),
         };
         let automatic_request = FallbackActivationRequest {
             request_id: "fallback-race".to_owned(),
             routing: captured,
             current_route_id: routes[0].route_id.clone(),
             target_route: second,
+            requested_model: "test-model".to_owned(),
+            skipped_routes: Vec::new(),
+            mode: router_core::proxy::FallbackActivationMode::Advance,
+            health_proof: Some(health_proof),
         };
 
         let manual = services.activate_route(routes[2].route_id.clone());
