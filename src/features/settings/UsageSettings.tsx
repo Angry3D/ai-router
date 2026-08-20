@@ -21,6 +21,7 @@ import {
 } from "../../api/query";
 import type {
   CompletionState,
+  FallbackStopReasonDto,
   UsageCostDto,
   UsageHistoryCursorDto,
   UsageHistoryQueryDto,
@@ -54,7 +55,8 @@ import {
   formatUsd,
 } from "./usageFormatting";
 
-type TimeRange = "24h" | "7d" | "30d" | "all";
+type RollingTimeRange = "24h" | "7d" | "30d";
+type TimeRange = "today" | "yesterday" | RollingTimeRange | "all";
 type UsageTab = "records" | "statistics";
 
 interface UsageFilters {
@@ -71,11 +73,33 @@ const DEFAULT_FILTERS: UsageFilters = {
   routeId: "",
   model: "",
 };
-const RANGE_MS: Record<Exclude<TimeRange, "all">, number> = {
+const RANGE_MS: Record<RollingTimeRange, number> = {
   "24h": 24 * 60 * 60 * 1_000,
   "7d": 7 * 24 * 60 * 60 * 1_000,
   "30d": 30 * 24 * 60 * 60 * 1_000,
 };
+
+function timeRangeBounds(range: TimeRange, anchorMs: number) {
+  if (range === "all") {
+    return { afterMs: null, beforeMs: anchorMs };
+  }
+  if (range === "today" || range === "yesterday") {
+    const todayStart = new Date(anchorMs);
+    todayStart.setHours(0, 0, 0, 0);
+
+    if (range === "today") {
+      return { afterMs: todayStart.getTime(), beforeMs: anchorMs };
+    }
+
+    const yesterdayStart = new Date(todayStart);
+    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+    return {
+      afterMs: yesterdayStart.getTime(),
+      beforeMs: todayStart.getTime() - 1,
+    };
+  }
+  return { afterMs: anchorMs - RANGE_MS[range], beforeMs: anchorMs };
+}
 
 const completionLabels: Record<CompletionState, string> = {
   completed: "已完成",
@@ -120,6 +144,10 @@ export function UsageSettings() {
   const [retainedStatistics, setRetainedStatistics] =
     useState<UsageStatisticsDto>();
   const routeOptions = useUsageRouteOptions();
+  const rangeBounds = useMemo(
+    () => timeRangeBounds(appliedFilters.range, anchorMs),
+    [anchorMs, appliedFilters.range],
+  );
 
   const resetPagination = () => {
     setCursor(null);
@@ -136,11 +164,8 @@ export function UsageSettings() {
   };
   const query = useMemo<UsageHistoryQueryDto>(
     () => ({
-      finishedAtOrAfterMs:
-        appliedFilters.range === "all"
-          ? null
-          : anchorMs - RANGE_MS[appliedFilters.range],
-      finishedAtOrBeforeMs: anchorMs,
+      finishedAtOrAfterMs: rangeBounds.afterMs,
+      finishedAtOrBeforeMs: rangeBounds.beforeMs,
       completionState:
         appliedFilters.status === "all" ? null : appliedFilters.status,
       routeId: appliedFilters.routeId === "" ? null : appliedFilters.routeId,
@@ -148,23 +173,20 @@ export function UsageSettings() {
       cursor,
       limit: PAGE_SIZE,
     }),
-    [anchorMs, appliedFilters, cursor],
+    [appliedFilters, cursor, rangeBounds],
   );
   const history = useUsageHistory(query);
   const statisticsQuery = useMemo<UsageStatisticsQueryDto>(
     () => ({
-      finishedAtOrAfterMs:
-        appliedFilters.range === "all"
-          ? null
-          : anchorMs - RANGE_MS[appliedFilters.range],
-      finishedAtOrBeforeMs: anchorMs,
+      finishedAtOrAfterMs: rangeBounds.afterMs,
+      finishedAtOrBeforeMs: rangeBounds.beforeMs,
       routeId: appliedFilters.routeId === "" ? null : appliedFilters.routeId,
       modelContains: appliedFilters.model === "" ? null : appliedFilters.model,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
       attributionDimension: "model",
       attributionMetric,
     }),
-    [anchorMs, appliedFilters, attributionMetric],
+    [appliedFilters, attributionMetric, rangeBounds],
   );
   const statisticsDisabled =
     appliedFilters.status !== "all" && appliedFilters.status !== "completed";
@@ -212,6 +234,8 @@ export function UsageSettings() {
                 }));
               }}
             >
+              <option value="today">今天</option>
+              <option value="yesterday">昨天</option>
               <option value="24h">最近 24 小时</option>
               <option value="7d">最近 7 天</option>
               <option value="30d">最近 30 天</option>
@@ -748,7 +772,11 @@ function UsageDetail({
           <li key={`${attempt.attemptIndex}-${attempt.routeId}`}>
             <header>
               <strong>
-                尝试 {attempt.attemptIndex + 1} · {attempt.routeName}
+                {attempt.attemptRole === "recovery_probe"
+                  ? "恢复验证"
+                  : `尝试 ${attempt.attemptIndex + 1}`}
+                {" · "}
+                {attempt.routeName}
               </strong>
               <SettingsStatus
                 tone={
@@ -814,7 +842,30 @@ function RoutingDecisionBand({ decision }: { decision: RoutingDecisionDto }) {
     return (
       <div className="usage-routing-decision usage-routing-decision-accent">
         <ArrowRight aria-hidden="true" />
-        <span>已自动切换至 {decision.targetRouteName}</span>
+        <div className="usage-routing-decision-copy">
+          <span>已自动切换至 {decision.targetRouteName}</span>
+          {(decision.skippedRoutes ?? []).map((route) => (
+            <small key={route.routeId}>
+              已跳过 {route.routeName} · 该模型在此路由不参与 Fallback
+            </small>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (decision.kind === "resume_captured") {
+    return (
+      <div className="usage-routing-decision usage-routing-decision-neutral">
+        <RotateCcw aria-hidden="true" />
+        <span>恢复验证未通过 · 继续使用 {decision.targetRouteName}</span>
+      </div>
+    );
+  }
+  if (decision.kind === "recover") {
+    return (
+      <div className="usage-routing-decision usage-routing-decision-accent">
+        <ArrowLeft aria-hidden="true" />
+        <span>恢复验证完成 · 已恢复至 {decision.targetRouteName}</span>
       </div>
     );
   }
@@ -855,7 +906,34 @@ function RoutingDecisionBand({ decision }: { decision: RoutingDecisionDto }) {
       tone: "warning",
       copy: "未切换 · 请求尝试次数已达系统上限",
     },
-  } as const;
+    failure_threshold_not_reached: {
+      icon: CircleStop,
+      tone: "neutral",
+      copy: "未切换 · 当前路由可归因失败尚未达到 5 次",
+    },
+    failure_threshold_reached_pending: {
+      icon: CircleStop,
+      tone: "warning",
+      copy: "未继续切换 · 已达到失败阈值，等待下一次可执行机会",
+    },
+    recovery_confirmation_pending: {
+      icon: CircleStop,
+      tone: "neutral",
+      copy: "未切换 · 恢复验证成功 1/2",
+    },
+    model_fallback_excluded: {
+      icon: CircleStop,
+      tone: "neutral",
+      copy: "已停止 Fallback · 该模型在此路由不参与 Fallback",
+    },
+  } as const satisfies Record<
+    FallbackStopReasonDto,
+    {
+      icon: typeof CircleStop;
+      tone: "neutral" | "warning" | "danger";
+      copy: string;
+    }
+  >;
   const presentation = stopPresentation[decision.reason];
   const Icon = presentation.icon;
   return (

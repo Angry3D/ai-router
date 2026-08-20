@@ -1208,6 +1208,35 @@ body[data-view="settings"] .app-variant-badge {
   align-items: center;
 }
 
+.settings-page-title-band.has-detail {
+  display: grid;
+  align-content: center;
+}
+
+.settings-page-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page-title-detail {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page-title-detail-warning {
+  color: var(--orange);
+}
+
+.settings-page-title-detail-accent {
+  color: var(--blue);
+}
+
 .route-list-pane > header > .settings-page-title-band {
   position: relative;
   z-index: 1;
@@ -1363,6 +1392,14 @@ body[data-view="settings"] .app-variant-badge {
   font-size: 12px;
   font-style: normal;
   white-space: nowrap;
+}
+
+.settings-route-row em.is-warning {
+  color: var(--orange);
+}
+
+.settings-route-row em.is-accent {
+  color: var(--blue);
 }
 
 .settings-route-markers {
@@ -1522,6 +1559,12 @@ body[data-view="settings"] .app-variant-badge {
   bottom: calc(100% + 7px);
   left: auto;
   width: 200px;
+}
+
+.route-fallback-switch-help .settings-help-tooltip-content ul {
+  margin: 0;
+  padding-left: 16px;
+  list-style: disc;
 }
 
 .route-tools .settings-switch-row {
@@ -2410,6 +2453,118 @@ body[data-view="settings"] .app-variant-badge {
 
 .route-model-section {
   min-width: 0;
+}
+
+.route-fallback-model-section {
+  min-width: 0;
+}
+
+.fallback-model-notice {
+  margin: 0 0 9px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.fallback-model-field {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  max-height: 90px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--settings-control-border);
+  border-radius: var(--settings-control-radius);
+}
+
+.fallback-model-field:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.fallback-model-field[data-invalid="true"] {
+  border-color: var(--red);
+}
+
+.fallback-model-tags {
+  display: contents;
+}
+
+.fallback-model-tag {
+  display: inline-grid;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  align-items: center;
+  overflow: hidden;
+  background: var(--surface-subtle);
+  border: 1px solid var(--settings-control-border);
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.fallback-model-tag > span {
+  min-width: 0;
+  padding: 3px 3px 3px 7px;
+  overflow-wrap: anywhere;
+}
+
+.fallback-model-remove {
+  display: grid;
+  width: 20px;
+  height: 22px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  place-items: center;
+}
+
+.fallback-model-remove:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.fallback-model-remove:focus-visible {
+  color: var(--blue);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.fallback-model-input {
+  min-width: 112px;
+  min-height: 24px;
+  flex: 1 1 112px;
+  padding: 2px 4px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  outline: none;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.fallback-model-field > .settings-icon-button {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  flex-basis: 24px;
+}
+
+.fallback-model-error-slot {
+  min-height: 15px;
+  margin-top: 2px;
+  color: var(--red);
+  font-size: 11px;
+  line-height: 15px;
 }
 
 .codex-model-row .settings-text-input {
@@ -3414,6 +3569,19 @@ body[data-view="settings"] .app-variant-badge {
 
 .usage-routing-decision span {
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.usage-routing-decision-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.usage-routing-decision-copy small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
   overflow-wrap: anywhere;
 }
 

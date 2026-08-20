@@ -12,9 +12,10 @@ use crate::{
     recovery::{DatabaseStartupIssue, RecoveryHealth, RecoveryHealthKind},
     state::{BootstrapSnapshotDto, FallbackStateDto, RouteSummaryDto},
     storage::{
-        FallbackStopReason, RoutingDecision, UsageAttemptDetail, UsageHistoryCursor,
-        UsageHistoryPage, UsageHistoryQuery, UsageHistoryRow, UsageRequestDetail, UsageRouteOption,
-        UsageStatistics, UsageStatisticsAttributionDimension, UsageStatisticsAttributionMetric,
+        AttemptRole, FallbackStopReason, RoutingDecision, RoutingTransitionSkip,
+        UsageAttemptDetail, UsageHistoryCursor, UsageHistoryPage, UsageHistoryQuery,
+        UsageHistoryRow, UsageRequestDetail, UsageRouteOption, UsageStatistics,
+        UsageStatisticsAttributionDimension, UsageStatisticsAttributionMetric,
         UsageStatisticsGranularity, UsageStatisticsQuery, UsageStatisticsTokens,
     },
 };
@@ -237,6 +238,7 @@ pub struct UsageRouteOptionDto {
 #[ts(rename_all = "camelCase")]
 pub struct UsageAttemptDto {
     pub attempt_index: u32,
+    pub attempt_role: AttemptRoleDto,
     pub route_id: RouteId,
     pub route_name: String,
     #[ts(type = "number")]
@@ -257,6 +259,14 @@ pub struct UsageAttemptDto {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+pub enum AttemptRoleDto {
+    Ordinary,
+    RecoveryProbe,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub enum FallbackStopReasonDto {
     FallbackDisabled,
     FailureNotEligible,
@@ -265,6 +275,19 @@ pub enum FallbackStopReasonDto {
     StalePolicy,
     ActivationFailed,
     AttemptIndexExhausted,
+    FailureThresholdNotReached,
+    FailureThresholdReachedPending,
+    RecoveryConfirmationPending,
+    ModelFallbackExcluded,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct RoutingSkippedRouteDto {
+    pub route_id: RouteId,
+    pub route_name: String,
+    pub reason: FallbackStopReasonDto,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -284,6 +307,15 @@ pub enum RoutingDecisionDto {
         max_attempts: u32,
     },
     ActivateNext {
+        target_route_id: RouteId,
+        target_route_name: String,
+        skipped_routes: Vec<RoutingSkippedRouteDto>,
+    },
+    ResumeCaptured {
+        target_route_id: RouteId,
+        target_route_name: String,
+    },
+    Recover {
         target_route_id: RouteId,
         target_route_name: String,
     },
@@ -466,7 +498,23 @@ impl From<RoutingDecision> for RoutingDecisionDto {
             RoutingDecision::ActivateNext {
                 target_route_id,
                 target_route_name,
+                skipped_routes,
             } => Self::ActivateNext {
+                target_route_id,
+                target_route_name,
+                skipped_routes: skipped_routes.into_iter().map(Into::into).collect(),
+            },
+            RoutingDecision::ResumeCaptured {
+                target_route_id,
+                target_route_name,
+            } => Self::ResumeCaptured {
+                target_route_id,
+                target_route_name,
+            },
+            RoutingDecision::Recover {
+                target_route_id,
+                target_route_name,
+            } => Self::Recover {
                 target_route_id,
                 target_route_name,
             },
@@ -493,6 +541,31 @@ impl From<FallbackStopReason> for FallbackStopReasonDto {
             FallbackStopReason::StalePolicy => Self::StalePolicy,
             FallbackStopReason::ActivationFailed => Self::ActivationFailed,
             FallbackStopReason::AttemptIndexExhausted => Self::AttemptIndexExhausted,
+            FallbackStopReason::FailureThresholdNotReached => Self::FailureThresholdNotReached,
+            FallbackStopReason::FailureThresholdReachedPending => {
+                Self::FailureThresholdReachedPending
+            }
+            FallbackStopReason::RecoveryConfirmationPending => Self::RecoveryConfirmationPending,
+            FallbackStopReason::ModelFallbackExcluded => Self::ModelFallbackExcluded,
+        }
+    }
+}
+
+impl From<AttemptRole> for AttemptRoleDto {
+    fn from(value: AttemptRole) -> Self {
+        match value {
+            AttemptRole::Ordinary => Self::Ordinary,
+            AttemptRole::RecoveryProbe => Self::RecoveryProbe,
+        }
+    }
+}
+
+impl From<RoutingTransitionSkip> for RoutingSkippedRouteDto {
+    fn from(value: RoutingTransitionSkip) -> Self {
+        Self {
+            route_id: value.route_id,
+            route_name: value.route_name,
+            reason: FallbackStopReasonDto::ModelFallbackExcluded,
         }
     }
 }
@@ -517,6 +590,7 @@ impl From<UsageAttemptDetail> for UsageAttemptDto {
         );
         Self {
             attempt_index: value.attempt_index,
+            attempt_role: value.attempt_role.into(),
             route_id: value.route_id,
             route_name: value.route_name,
             started_at_ms: value.started_at_ms,
@@ -626,6 +700,7 @@ pub struct RouteEditDto {
     pub api_key: String,
     pub service_tier_policy: ServiceTierPolicy,
     pub balance_query: Option<BalanceQueryEditDto>,
+    pub fallback_excluded_models: Vec<String>,
     pub models: Vec<CodexModelDto>,
 }
 
@@ -640,6 +715,7 @@ pub struct RouteSaveInputDto {
     pub service_tier_policy: ServiceTierPolicy,
     pub balance_query: Option<BalanceQueryEditDto>,
     pub accept_script_risk: bool,
+    pub fallback_excluded_models: Vec<String>,
     pub models: Vec<CodexModelDto>,
     pub retry_token: Option<String>,
 }

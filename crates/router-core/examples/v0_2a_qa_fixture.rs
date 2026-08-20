@@ -331,6 +331,7 @@ async fn seed_usage_history(
                 attempt_id: UpstreamAttemptId::from_string(format!(
                     "qa-attempt-{batch_id}-{index:04}"
                 )),
+                attempt_role: router_core::storage::AttemptRole::Ordinary,
                 attempt_index: 0,
                 route_id: route_id.clone(),
                 route_name: route_name.clone(),

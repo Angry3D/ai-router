@@ -666,6 +666,7 @@ mod tests {
             base_url: BaseUrl::parse(base_url).expect("base URL"),
             api_key: Arc::new(ApiKey::parse(key).expect("API key")),
             service_tier_policy: ServiceTierPolicy::Passthrough,
+            fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
         })
     }
 
@@ -690,6 +691,7 @@ mod tests {
             participants: Vec::new(),
             enabled: false,
             selection_generation: 0,
+            health_generation: 0,
             config_revision: 0,
             images_generation_enabled,
             images_route,
@@ -774,6 +776,7 @@ mod tests {
             participants: vec![active],
             enabled: true,
             selection_generation: 9,
+            health_generation: 0,
             config_revision: 4,
             images_generation_enabled: true,
             images_route: Some(selected),
@@ -847,6 +850,7 @@ mod tests {
             participants: current.participants.clone(),
             enabled: current.enabled,
             selection_generation: current.selection_generation,
+            health_generation: current.health_generation,
             config_revision: current.config_revision,
             images_generation_enabled: current.images_generation_enabled,
             images_route: Some(second),

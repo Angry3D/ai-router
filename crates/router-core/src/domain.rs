@@ -539,6 +539,39 @@ pub struct CodexModelValidationError {
     pub field: String,
 }
 
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[error("invalid field {field}: {code}")]
+pub struct FallbackExcludedModelValidationError {
+    pub code: &'static str,
+    pub field: String,
+}
+
+impl FallbackExcludedModelValidationError {
+    #[must_use]
+    pub fn required(index: usize) -> Self {
+        Self {
+            code: "fallback_excluded_model_required",
+            field: format!("fallbackExcludedModels.{index}"),
+        }
+    }
+
+    #[must_use]
+    pub fn control_character(index: usize) -> Self {
+        Self {
+            code: "fallback_excluded_model_control_character",
+            field: format!("fallbackExcludedModels.{index}"),
+        }
+    }
+
+    #[must_use]
+    pub fn duplicate(index: usize) -> Self {
+        Self {
+            code: "fallback_excluded_model_duplicate",
+            field: format!("fallbackExcludedModels.{index}"),
+        }
+    }
+}
+
 impl CodexModelValidationError {
     fn new(code: &'static str, field: String) -> Self {
         Self { code, field }

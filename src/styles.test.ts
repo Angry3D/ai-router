@@ -376,6 +376,13 @@ describe("cross-window style isolation", () => {
     expect(tooltipRule).toContain("bottom: calc(100% + 7px);");
     expect(tooltipRule).toContain("left: auto;");
     expect(tooltipRule).toContain("width: 200px;");
+    const tooltipListRule =
+      styles.match(
+        /\.route-fallback-switch-help \.settings-help-tooltip-content ul \{([^}]*)\}/u,
+      )?.[1] ?? "";
+    expect(tooltipListRule).toContain("margin: 0;");
+    expect(tooltipListRule).toContain("padding-left: 16px;");
+    expect(tooltipListRule).toContain("list-style: disc;");
     expect(styles).not.toMatch(
       /:root\[data-theme="(?:light|dark)"\][^{]*\.route-fallback-switch-help/u,
     );

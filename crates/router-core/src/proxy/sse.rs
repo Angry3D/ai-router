@@ -18,6 +18,39 @@ pub(super) const MAX_MODEL_CHARS: usize = 256;
 pub(super) const MAX_STATUS_CHARS: usize = 64;
 pub(super) const MAX_ERROR_CODE_CHARS: usize = 128;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResponseToolHandoff {
+    #[default]
+    None,
+    Client,
+    Shell,
+    ClientAndShell,
+}
+
+impl ResponseToolHandoff {
+    pub(super) const fn with_client(self) -> Self {
+        match self {
+            Self::None | Self::Client => Self::Client,
+            Self::Shell | Self::ClientAndShell => Self::ClientAndShell,
+        }
+    }
+
+    pub(super) const fn with_shell(self) -> Self {
+        match self {
+            Self::None | Self::Shell => Self::Shell,
+            Self::Client | Self::ClientAndShell => Self::ClientAndShell,
+        }
+    }
+
+    pub(super) const fn has_client(self) -> bool {
+        matches!(self, Self::Client | Self::ClientAndShell)
+    }
+
+    pub(super) const fn has_shell(self) -> bool {
+        matches!(self, Self::Shell | Self::ClientAndShell)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponseMetadata {
     pub response_id: Option<String>,
@@ -31,6 +64,8 @@ pub struct ResponseMetadata {
     pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: Option<u64>,
     pub first_output_latency_ms: Option<u64>,
+    pub tool_handoff: ResponseToolHandoff,
+    pub terminal_success: bool,
     pub complete: bool,
 }
 
@@ -48,6 +83,8 @@ impl Default for ResponseMetadata {
             cached_input_tokens: None,
             cache_write_input_tokens: None,
             first_output_latency_ms: None,
+            tool_handoff: ResponseToolHandoff::None,
+            terminal_success: false,
             complete: true,
         }
     }
@@ -424,6 +461,7 @@ impl SseObserver {
         }
         if self.data == b"[DONE]" {
             self.terminal_state = self.terminal_state.success();
+            self.metadata.terminal_success = true;
             if self.preflight_state == SsePreflightState::Pending {
                 self.preflight_commit_reason = Some(SsePreflightCommitReason::TerminalSuccess);
             }
@@ -480,6 +518,7 @@ impl SseObserver {
         match event_type {
             Some("response.completed") => {
                 self.terminal_state = self.terminal_state.success();
+                self.metadata.terminal_success = true;
                 if self.preflight_state == SsePreflightState::Pending {
                     self.preflight_commit_reason = Some(SsePreflightCommitReason::TerminalSuccess);
                 }
@@ -518,7 +557,11 @@ impl SseObserver {
                 self.metadata.first_output_latency_ms = Some(latency_ms);
             }
         }
+        observe_output_item(&mut self.metadata, projection.item.as_ref());
         if let Some(response) = projection.response {
+            for item in &response.output {
+                observe_output_item(&mut self.metadata, Some(item));
+            }
             replace_bounded(
                 &mut self.metadata.response_id,
                 response.id,
@@ -633,6 +676,7 @@ struct SseEventProjection {
     #[serde(rename = "type")]
     event_type: Option<String>,
     response: Option<SseResponseProjection>,
+    item: Option<SseOutputItemProjection>,
     error: Option<SseErrorProjection>,
     code: Option<String>,
     codex_error_info: Option<String>,
@@ -649,6 +693,24 @@ struct SseResponseProjection {
     status: Option<String>,
     usage: Option<SseUsageProjection>,
     error: Option<SseErrorProjection>,
+    #[serde(default)]
+    output: Vec<SseOutputItemProjection>,
+}
+
+#[derive(Deserialize)]
+struct SseOutputItemProjection {
+    #[serde(rename = "type")]
+    item_type: Option<String>,
+}
+
+fn observe_output_item(metadata: &mut ResponseMetadata, item: Option<&SseOutputItemProjection>) {
+    match item.and_then(|item| item.item_type.as_deref()) {
+        Some("function_call" | "custom_tool_call" | "local_shell_call" | "computer_call") => {
+            metadata.tool_handoff = metadata.tool_handoff.with_client();
+        }
+        Some("shell_call") => metadata.tool_handoff = metadata.tool_handoff.with_shell(),
+        _ => {}
+    }
 }
 
 #[derive(Deserialize)]
@@ -1444,5 +1506,35 @@ mod tests {
                 Some("server_overloaded")
             );
         }
+    }
+
+    #[test]
+    fn structured_output_items_project_only_supported_client_handoffs() {
+        let mut observer = SseObserver::new(MAX_SSE_EVENT_BYTES);
+        observer.feed(
+            br#"data: {"type":"response.output_item.added","item":{"type":"function_call"}}
+
+data: {"type":"response.output_item.done","item":{"type":"shell_call"}}
+
+data: {"type":"response.output_item.done","item":{"type":"web_search_call"}}
+
+data: {"type":"response.completed","response":{"status":"completed"}}
+
+"#,
+        );
+
+        assert!(observer.metadata().tool_handoff.has_client());
+        assert!(observer.metadata().tool_handoff.has_shell());
+        assert!(observer.metadata().terminal_success);
+
+        let mut terminal_output = SseObserver::new(MAX_SSE_EVENT_BYTES);
+        terminal_output.feed(
+            br#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"custom_tool_call"},{"type":"computer_call"}]}}
+
+"#,
+        );
+        assert!(terminal_output.metadata().tool_handoff.has_client());
+        assert!(!terminal_output.metadata().tool_handoff.has_shell());
+        assert!(terminal_output.metadata().terminal_success);
     }
 }

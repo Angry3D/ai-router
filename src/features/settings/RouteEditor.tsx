@@ -7,6 +7,7 @@ import {
   Route,
   Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -133,7 +134,13 @@ interface RouteFormState {
   queryMode: BalanceQueryMode;
   queryEnabled: boolean;
   customSource: string;
+  fallbackExcludedModels: string[];
   models: CodexModelDraft[];
+}
+
+export interface RouteEditorHealthDetail {
+  text: string;
+  tone: "warning" | "accent";
 }
 
 type BalanceTestFeedback =
@@ -148,6 +155,7 @@ const emptyRouteForm: RouteFormState = {
   queryMode: "general_v1",
   queryEnabled: false,
   customSource: "",
+  fallbackExcludedModels: [],
   models: [],
 };
 
@@ -160,6 +168,7 @@ function formFromEdit(edit: RouteEditDto): RouteFormState {
     queryMode: edit.balanceQuery?.mode ?? "general_v1",
     queryEnabled: edit.balanceQuery?.enabled ?? false,
     customSource: edit.balanceQuery?.customSource ?? "",
+    fallbackExcludedModels: edit.fallbackExcludedModels ?? [],
     models: codexModelDrafts(edit.models),
   };
 }
@@ -170,6 +179,7 @@ export function RouteEditor(props: {
   activeRouteId: RouteId | null;
   riskConfirmed: boolean;
   externalBusy: boolean;
+  healthDetail?: RouteEditorHealthDetail | null;
   onDirtyChange: (dirty: boolean) => void;
   onCancel: () => void;
   onSaved: (routeId: RouteId) => void;
@@ -229,6 +239,7 @@ function RouteForm(props: {
   activeRouteId: RouteId | null;
   riskConfirmed: boolean;
   externalBusy: boolean;
+  healthDetail?: RouteEditorHealthDetail | null;
   initial: RouteFormState;
   onDirtyChange: (dirty: boolean) => void;
   onCancel: () => void;
@@ -250,17 +261,28 @@ function RouteForm(props: {
   const [confirmation, setSettingsConfirmation] =
     useState<SettingsConfirmation | null>(null);
   const [modelErrors, setModelErrors] = useState<CodexModelErrors>({});
+  const [fallbackModelInput, setFallbackModelInput] = useState("");
+  const [fallbackModelError, setFallbackModelError] = useState<string | null>(
+    null,
+  );
   const [retryToken, setRetryToken] = useState<string | null>(null);
   const [modelSuccess, setModelSuccess] = useState<string | null>(null);
   const nextModelKey = useRef(props.initial.models.length);
   const pendingModelFocusKey = useRef<string | null>(null);
   const modelIdRefs = useRef(new Map<string, HTMLInputElement>());
+  const fallbackModelInputRef = useRef<HTMLInputElement>(null);
   const probeGeneration = useRef(0);
   const dirty =
-    retryToken !== null || JSON.stringify(form) !== JSON.stringify(baseline);
+    retryToken !== null ||
+    fallbackModelInput.trim().length > 0 ||
+    JSON.stringify(form) !== JSON.stringify(baseline);
   const modelsDirty =
     retryToken !== null ||
     JSON.stringify(form.models) !== JSON.stringify(baseline.models);
+  const fallbackModelsDirty =
+    fallbackModelInput.trim().length > 0 ||
+    JSON.stringify(form.fallbackExcludedModels) !==
+      JSON.stringify(baseline.fallbackExcludedModels);
   const locked = busy || props.externalBusy;
 
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
@@ -350,8 +372,55 @@ function RouteForm(props: {
     setModelSuccess(null);
   };
 
+  const validateFallbackModel = (value: string) => {
+    const modelId = value.trim();
+    if (!modelId) return null;
+    if (containsControlCharacter(modelId)) return "不能包含控制字符。";
+    if (form.fallbackExcludedModels.includes(modelId)) {
+      return "模型 ID 不能重复。";
+    }
+    return null;
+  };
+
+  const addFallbackModel = () => {
+    const modelId = fallbackModelInput.trim();
+    if (!modelId) return;
+    const validation = validateFallbackModel(modelId);
+    if (validation) {
+      setFallbackModelError(validation);
+      return;
+    }
+    patchForm("fallbackExcludedModels", [
+      ...form.fallbackExcludedModels,
+      modelId,
+    ]);
+    setFallbackModelInput("");
+    setFallbackModelError(null);
+    requestAnimationFrame(() => fallbackModelInputRef.current?.focus());
+  };
+
+  const removeFallbackModel = (modelId: string) => {
+    patchForm(
+      "fallbackExcludedModels",
+      form.fallbackExcludedModels.filter((candidate) => candidate !== modelId),
+    );
+    setFallbackModelError(null);
+    requestAnimationFrame(() => fallbackModelInputRef.current?.focus());
+  };
+
   const commitSave = async (acceptScriptRisk: boolean) => {
     if (locked) return;
+    const pendingFallbackModel = fallbackModelInput.trim();
+    const fallbackValidation = pendingFallbackModel
+      ? validateFallbackModel(pendingFallbackModel)
+      : null;
+    if (fallbackValidation) {
+      setFallbackModelError(fallbackValidation);
+      return;
+    }
+    const fallbackExcludedModels = pendingFallbackModel
+      ? [...form.fallbackExcludedModels, pendingFallbackModel]
+      : form.fallbackExcludedModels;
     const validation = validateCodexModels(form.models);
     setModelErrors(validation);
     if (Object.keys(validation).length > 0) return;
@@ -376,6 +445,7 @@ function RouteForm(props: {
         serviceTierPolicy: form.serviceTierPolicy,
         balanceQuery,
         acceptScriptRisk,
+        fallbackExcludedModels,
         models: form.models.map((row) => ({
           modelId: row.modelId.trim(),
           displayName: row.displayName.trim() || null,
@@ -403,10 +473,13 @@ function RouteForm(props: {
         baseUrl: canonicalBaseUrl.valid
           ? canonicalBaseUrl.canonicalPrefix
           : form.baseUrl,
+        fallbackExcludedModels,
         models: savedModels,
       };
       setForm(savedForm);
       setBaseline(savedForm);
+      setFallbackModelInput("");
+      setFallbackModelError(null);
       setRetryToken(null);
       setModelSuccess(modelActivationMessage(result.catalog.activation));
       await Promise.all([
@@ -417,6 +490,9 @@ function RouteForm(props: {
       props.onSaved(result.routeId);
     } catch (reason) {
       const normalized = normalizeIpcError(reason);
+      if (normalized.field?.startsWith("fallbackExcludedModels.")) {
+        setFallbackModelError(normalized.message);
+      }
       const match = normalized.field?.match(/^models\.(\d+)\.(.+)$/u);
       if (match) {
         const row = form.models[Number(match[1])];
@@ -550,7 +626,11 @@ function RouteForm(props: {
         viewportClassName="route-form-scroll-viewport"
       >
         <fieldset className="route-form-fields" disabled={locked}>
-          <SettingsPageTitle title={props.newRoute ? "新建路由" : form.name} />
+          <SettingsPageTitle
+            title={props.newRoute ? "新建路由" : form.name}
+            detail={props.newRoute ? null : props.healthDetail?.text}
+            detailTone={props.healthDetail?.tone}
+          />
           <SettingsFieldRow label="路由名称" htmlFor="route-name">
             <SettingsTextInput
               id="route-name"
@@ -645,6 +725,96 @@ function RouteForm(props: {
               </SettingsStatus>
             ) : null}
           </SettingsActionGroup>
+          <SettingsDivider />
+          <section
+            className="route-fallback-model-section"
+            aria-labelledby="route-fallback-model-heading"
+          >
+            <div className="settings-section-heading">
+              <h3
+                id="route-fallback-model-heading"
+                className="settings-section-title"
+              >
+                跳过 Fallback 的模型
+              </h3>
+              <SettingsStatus>
+                {fallbackModelsDirty
+                  ? `${form.fallbackExcludedModels.length} 个 · 未保存`
+                  : `${form.fallbackExcludedModels.length} 个`}
+              </SettingsStatus>
+            </div>
+            <p className="fallback-model-notice">
+              当前路由收到这些模型时不会自动切换；作为候选路由时会被跳过。
+            </p>
+            <div
+              className="fallback-model-field"
+              data-invalid={fallbackModelError ? "true" : undefined}
+            >
+              <div className="fallback-model-tags" role="list">
+                {form.fallbackExcludedModels.map((modelId) => (
+                  <span
+                    className="fallback-model-tag"
+                    role="listitem"
+                    key={modelId}
+                  >
+                    <span>{modelId}</span>
+                    <button
+                      type="button"
+                      className="fallback-model-remove"
+                      aria-label={`移除跳过 Fallback 的模型：${modelId}`}
+                      title={`移除 ${modelId}`}
+                      onClick={() => removeFallbackModel(modelId)}
+                    >
+                      <X aria-hidden="true" size={13} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <input
+                ref={fallbackModelInputRef}
+                className="fallback-model-input"
+                aria-label="添加跳过 Fallback 的模型"
+                aria-invalid={Boolean(fallbackModelError)}
+                aria-describedby={
+                  fallbackModelError ? "fallback-model-error" : undefined
+                }
+                maxLength={256}
+                placeholder={
+                  form.fallbackExcludedModels.length === 0
+                    ? "输入模型 ID"
+                    : undefined
+                }
+                value={fallbackModelInput}
+                onChange={(event) => {
+                  setFallbackModelInput(event.currentTarget.value);
+                  setFallbackModelError(null);
+                  setError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  addFallbackModel();
+                }}
+              />
+              <SettingsIconButton
+                type="button"
+                label="添加模型"
+                title="添加模型"
+                disabled={!fallbackModelInput.trim()}
+                onClick={addFallbackModel}
+              >
+                <Plus aria-hidden="true" size={14} />
+              </SettingsIconButton>
+            </div>
+            <div className="fallback-model-error-slot">
+              {fallbackModelError ? (
+                <span id="fallback-model-error" role="alert">
+                  {fallbackModelError}
+                </span>
+              ) : null}
+            </div>
+          </section>
+
           <SettingsDivider />
           <section
             className="route-model-section"

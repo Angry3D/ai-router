@@ -4,7 +4,7 @@ mod runtime;
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use std::time::Duration;
 
@@ -44,6 +44,9 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State, ipc::Channel};
 
 const STATE_CHANGED_EVENT: &str = "router-state-changed";
 const PROJECT_REPOSITORY_URL: &str = "https://github.com/Angry3D/ai-router";
+const ACTIVE_TRAY_FRAME_COUNT: usize = 4;
+const TRAY_ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(300);
+const REDUCE_MOTION_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
 struct TauriStateEventSink {
     app_handle: AppHandle,
@@ -57,12 +60,12 @@ struct TrayRefreshCoordinator {
     apply_gate: Mutex<()>,
     activity: Mutex<TrayActivityProjection>,
     animation: Mutex<TrayAnimationProjection>,
-    reduce_motion: AtomicBool,
+    reduce_motion: AtomicU8,
     assets: TrayIconAssets,
 }
 
 impl TrayRefreshCoordinator {
-    fn new(assets: TrayIconAssets, reduce_motion: bool) -> Self {
+    fn new(assets: TrayIconAssets, reduce_motion: Option<bool>) -> Self {
         Self {
             latest_revision: AtomicU64::new(0),
             refresh_gate: tokio::sync::Mutex::const_new(()),
@@ -70,7 +73,7 @@ impl TrayRefreshCoordinator {
             apply_gate: Mutex::new(()),
             activity: Mutex::new(TrayActivityProjection::default()),
             animation: Mutex::new(TrayAnimationProjection::default()),
-            reduce_motion: AtomicBool::new(reduce_motion),
+            reduce_motion: AtomicU8::new(ReduceMotionState::from_observation(reduce_motion) as u8),
             assets,
         }
     }
@@ -129,12 +132,31 @@ impl TrayRefreshCoordinator {
             .active
     }
 
-    fn set_reduce_motion(&self, reduce_motion: bool) -> bool {
-        self.reduce_motion.swap(reduce_motion, Ordering::AcqRel) != reduce_motion
+    fn observe_reduce_motion(&self, reduce_motion: Option<bool>) -> Option<(bool, bool)> {
+        let state = ReduceMotionState::from_observation(reduce_motion);
+        if state == ReduceMotionState::Unknown {
+            return None;
+        }
+        let previous = self.reduce_motion.swap(state as u8, Ordering::AcqRel);
+        Some((state.blocks_animation(), previous != state as u8))
     }
 
     fn reduce_motion(&self) -> bool {
-        self.reduce_motion.load(Ordering::Acquire)
+        ReduceMotionState::from_raw(self.reduce_motion.load(Ordering::Acquire)).blocks_animation()
+    }
+
+    fn activity_is_current(&self, revision: u64) -> bool {
+        let activity = self
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        activity.active
+            && activity.revision == revision
+            && !self
+                .animation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown
     }
 
     fn transition_projection(&self, visual_state: TrayVisualState) -> TrayProjectionDecision {
@@ -205,6 +227,36 @@ impl TrayRefreshCoordinator {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum ReduceMotionState {
+    Unknown = 0,
+    Enabled = 1,
+    Disabled = 2,
+}
+
+impl ReduceMotionState {
+    const fn from_observation(value: Option<bool>) -> Self {
+        match value {
+            Some(true) => Self::Enabled,
+            Some(false) => Self::Disabled,
+            None => Self::Unknown,
+        }
+    }
+
+    const fn from_raw(value: u8) -> Self {
+        match value {
+            1 => Self::Enabled,
+            2 => Self::Disabled,
+            _ => Self::Unknown,
+        }
+    }
+
+    const fn blocks_animation(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
 #[derive(Default)]
 struct TrayActivityProjection {
     active: bool,
@@ -233,8 +285,7 @@ struct TrayProjectionDecision {
 struct TrayIconAssets {
     ready: tauri::image::Image<'static>,
     active_static: tauri::image::Image<'static>,
-    active_a: tauri::image::Image<'static>,
-    active_b: tauri::image::Image<'static>,
+    active_frames: [tauri::image::Image<'static>; 4],
 }
 
 impl TrayIconAssets {
@@ -242,8 +293,12 @@ impl TrayIconAssets {
         Ok(Self {
             ready: decode_tray_icon(include_bytes!("../icons/tray-route.png"))?,
             active_static: decode_tray_icon(include_bytes!("../icons/tray-active-static.png"))?,
-            active_a: decode_tray_icon(include_bytes!("../icons/tray-active-a.png"))?,
-            active_b: decode_tray_icon(include_bytes!("../icons/tray-active-b.png"))?,
+            active_frames: [
+                decode_tray_icon(include_bytes!("../icons/tray-active-a.png"))?,
+                decode_tray_icon(include_bytes!("../icons/tray-active-b.png"))?,
+                decode_tray_icon(include_bytes!("../icons/tray-active-c.png"))?,
+                decode_tray_icon(include_bytes!("../icons/tray-active-d.png"))?,
+            ],
         })
     }
 
@@ -281,16 +336,14 @@ impl LogicalRequestActivitySink for TauriLogicalRequestActivitySink {
         if self.tray_refresh.apply_activity_transition(transition) {
             if transition.active {
                 self.tray_refresh.invalidate_animation();
-                self.tray_refresh.set_reduce_motion(true);
                 if !schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh)) {
                     return;
                 }
-                let app_handle = self.app_handle.clone();
-                let refresh = Arc::clone(&self.tray_refresh);
-                tauri::async_runtime::spawn(async move {
-                    let _ = refresh_system_reduce_motion(&refresh).await;
-                    let _ = schedule_tray_refresh(app_handle, refresh);
-                });
+                start_reduce_motion_monitor(
+                    self.app_handle.clone(),
+                    Arc::clone(&self.tray_refresh),
+                    transition.revision,
+                );
                 return;
             }
             let _ = schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh));
@@ -346,7 +399,7 @@ fn apply_tray_projection(
     };
     if decision.changed {
         let image = if decision.animated {
-            refresh.assets.active_a.clone()
+            refresh.assets.active_frames[0].clone()
         } else {
             refresh.assets.static_image(presentation.visual_state)
         };
@@ -366,24 +419,11 @@ fn start_tray_animation(
     generation: u64,
 ) {
     tauri::async_runtime::spawn(async move {
-        let mut frame_b = true;
-        let mut ticks_until_motion_check = 1_u8;
+        let mut frame_index = 1;
         loop {
-            tokio::time::sleep(Duration::from_millis(600)).await;
+            tokio::time::sleep(TRAY_ANIMATION_FRAME_INTERVAL).await;
             if !refresh.animation_is_current(generation) {
                 return;
-            }
-            if ticks_until_motion_check == 1 {
-                let (reduce_motion, changed) = refresh_system_reduce_motion(&refresh).await;
-                ticks_until_motion_check = 5;
-                if changed {
-                    let _ = schedule_tray_refresh(app_handle.clone(), Arc::clone(&refresh));
-                }
-                if reduce_motion || !refresh.animation_is_current(generation) {
-                    return;
-                }
-            } else {
-                ticks_until_motion_check -= 1;
             }
             let _apply_guard = refresh
                 .apply_gate
@@ -393,27 +433,55 @@ fn start_tray_animation(
                 return;
             }
             if let Some(tray) = app_handle.tray_by_id("main") {
-                let image = if frame_b {
-                    refresh.assets.active_b.clone()
-                } else {
-                    refresh.assets.active_a.clone()
-                };
+                let image = refresh.assets.active_frames[frame_index].clone();
                 let _ = tray.set_icon_with_as_template(Some(image), true);
             }
-            frame_b = !frame_b;
+            frame_index = next_active_frame_index(frame_index);
         }
     });
 }
 
-async fn refresh_system_reduce_motion(refresh: &Arc<TrayRefreshCoordinator>) -> (bool, bool) {
+const fn next_active_frame_index(current: usize) -> usize {
+    (current + 1) % ACTIVE_TRAY_FRAME_COUNT
+}
+
+fn start_reduce_motion_monitor(
+    app_handle: AppHandle,
+    refresh: Arc<TrayRefreshCoordinator>,
+    activity_revision: u64,
+) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if !refresh.activity_is_current(activity_revision) {
+                return;
+            }
+            if refresh_system_reduce_motion(&refresh, activity_revision)
+                .await
+                .is_some_and(|(_, changed)| changed)
+            {
+                let _ = schedule_tray_refresh(app_handle.clone(), Arc::clone(&refresh));
+            }
+            tokio::time::sleep(REDUCE_MOTION_REFRESH_INTERVAL).await;
+        }
+    });
+}
+
+async fn refresh_system_reduce_motion(
+    refresh: &Arc<TrayRefreshCoordinator>,
+    activity_revision: u64,
+) -> Option<(bool, bool)> {
     let _query_guard = refresh.reduce_motion_gate.lock().await;
-    let reduce_motion = tauri::async_runtime::spawn_blocking(system_reduce_motion)
+    if !refresh.activity_is_current(activity_revision) {
+        return None;
+    }
+    let observation = tauri::async_runtime::spawn_blocking(system_reduce_motion)
         .await
         .ok()
-        .flatten()
-        .unwrap_or(true);
-    let changed = refresh.set_reduce_motion(reduce_motion);
-    (reduce_motion, changed)
+        .flatten();
+    if !refresh.activity_is_current(activity_revision) {
+        return None;
+    }
+    refresh.observe_reduce_motion(observation)
 }
 
 #[cfg(target_os = "macos")]
@@ -430,7 +498,7 @@ fn system_reduce_motion() -> Option<bool> {
             _ => None,
         };
     }
-    let error = String::from_utf8_lossy(&output.stderr);
+    let error = String::from_utf8(output.stderr).ok()?;
     error.contains("does not exist").then_some(false)
 }
 
@@ -686,7 +754,7 @@ fn setup_application(
     tray_builder.build(app)?;
     let tray_refresh = Arc::new(TrayRefreshCoordinator::new(
         tray_assets,
-        system_reduce_motion().unwrap_or(true),
+        system_reduce_motion(),
     ));
     app.manage(Arc::clone(&tray_refresh));
     let sink = Arc::new(TauriStateEventSink {
@@ -754,8 +822,10 @@ mod tests {
 
     #[test]
     fn tray_refresh_revision_never_regresses() {
-        let refresh =
-            TrayRefreshCoordinator::new(TrayIconAssets::decode().expect("tray assets"), false);
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
         let first = refresh.request().expect("first refresh");
         let second = refresh.request().expect("second refresh");
 
@@ -769,8 +839,10 @@ mod tests {
 
     #[test]
     fn tray_activity_rejects_stale_transitions_and_keeps_latest_state() {
-        let refresh =
-            TrayRefreshCoordinator::new(TrayIconAssets::decode().expect("tray assets"), false);
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
         assert!(
             refresh.apply_activity_transition(LogicalRequestActivityTransition {
                 active: true,
@@ -786,12 +858,35 @@ mod tests {
             })
         );
         assert!(refresh.active());
+        assert!(refresh.activity_is_current(3));
+
+        assert!(
+            refresh.apply_activity_transition(LogicalRequestActivityTransition {
+                active: false,
+                count: 0,
+                revision: 4,
+            })
+        );
+        assert!(!refresh.activity_is_current(3));
+
+        assert!(
+            refresh.apply_activity_transition(LogicalRequestActivityTransition {
+                active: true,
+                count: 1,
+                revision: 5,
+            })
+        );
+        assert!(refresh.activity_is_current(5));
+        refresh.shutdown();
+        assert!(!refresh.activity_is_current(5));
     }
 
     #[test]
     fn tray_animation_generation_cancels_stale_ticks_and_reduce_motion_is_static() {
-        let refresh =
-            TrayRefreshCoordinator::new(TrayIconAssets::decode().expect("tray assets"), false);
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
         let active = refresh.transition_projection(TrayVisualState::Active);
         assert!(active.changed);
         assert!(active.animated);
@@ -806,17 +901,48 @@ mod tests {
         refresh.invalidate_animation();
         assert!(!refresh.animation_is_current(restarted.generation));
 
-        assert!(refresh.set_reduce_motion(true));
+        assert_eq!(
+            refresh.observe_reduce_motion(Some(true)),
+            Some((true, true))
+        );
         let reduced = refresh.transition_projection(TrayVisualState::Active);
         assert!(reduced.changed);
         assert!(!reduced.animated);
         assert!(!refresh.animation_is_current(reduced.generation));
 
-        refresh.set_reduce_motion(false);
+        refresh.observe_reduce_motion(Some(false));
         let before_shutdown = refresh.transition_projection(TrayVisualState::Active);
         assert!(refresh.animation_is_current(before_shutdown.generation));
         refresh.shutdown();
         assert!(!refresh.animation_is_current(before_shutdown.generation));
+    }
+
+    #[test]
+    fn tray_reduce_motion_unknown_and_failed_reads_preserve_static_safe_state() {
+        let refresh =
+            TrayRefreshCoordinator::new(TrayIconAssets::decode().expect("tray assets"), None);
+        assert!(refresh.reduce_motion());
+        assert_eq!(refresh.observe_reduce_motion(None), None);
+        assert!(refresh.reduce_motion());
+        assert_eq!(
+            refresh.observe_reduce_motion(Some(false)),
+            Some((false, true))
+        );
+        assert!(!refresh.reduce_motion());
+        assert_eq!(refresh.observe_reduce_motion(None), None);
+        assert!(!refresh.reduce_motion());
+    }
+
+    #[test]
+    fn tray_animation_uses_the_approved_four_frame_sequence() {
+        let mut frame = 0;
+        let mut sequence = vec![frame];
+        for _ in 0..4 {
+            frame = next_active_frame_index(frame);
+            sequence.push(frame);
+        }
+        assert_eq!(sequence, [0, 1, 2, 3, 0]);
+        assert_eq!(TRAY_ANIMATION_FRAME_INTERVAL, Duration::from_millis(300));
     }
 
     #[test]

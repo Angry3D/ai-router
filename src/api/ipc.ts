@@ -252,10 +252,14 @@ export async function retryDatabaseStartup(): Promise<AppLifecycleSnapshot> {
 
 export async function getRouteEdit(routeId: RouteId): Promise<RouteEditDto> {
   if (import.meta.env.DEV && !isTauriRuntime()) {
-    const { previewRouteEdits } = await import("../previewFixtures");
-    const edit = previewRouteEdits.find(
-      (candidate) => candidate.routeId === routeId,
-    );
+    const { previewFallbackUiRouteEdits, previewRouteEdits } =
+      await import("../previewFixtures");
+    const edits =
+      new URLSearchParams(window.location.search).get("fallback-ui") ===
+      "preview"
+        ? previewFallbackUiRouteEdits
+        : previewRouteEdits;
+    const edit = edits.find((candidate) => candidate.routeId === routeId);
     if (edit) return structuredClone(edit);
   }
   return invoke<RouteEditDto>(IPC_COMMANDS.getRouteEdit, { routeId });

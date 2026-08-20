@@ -138,15 +138,31 @@ export function SettingsPage({
 export function SettingsPageTitle({
   title,
   titleId,
+  detail,
+  detailTone = "warning",
 }: {
   title: string;
   titleId?: string;
+  detail?: string | null;
+  detailTone?: "warning" | "accent";
 }) {
   return (
-    <div className="settings-page-title-band" data-tauri-drag-region>
+    <div
+      className={`settings-page-title-band${detail ? " has-detail" : ""}`}
+      data-tauri-drag-region
+    >
       <h2 className="settings-page-title" id={titleId} data-tauri-drag-region>
         {title}
       </h2>
+      {detail ? (
+        <span
+          className={`settings-page-title-detail settings-page-title-detail-${detailTone}`}
+          title={detail}
+          data-tauri-drag-region
+        >
+          {detail}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -202,13 +218,13 @@ export function SettingsHelpTooltip({
         <CircleHelp aria-hidden="true" size={15} />
       </button>
       {visible ? (
-        <span
+        <div
           id={tooltipId}
           className="settings-help-tooltip-content"
           role="tooltip"
         >
           {children}
-        </span>
+        </div>
       ) : null}
     </span>
   );

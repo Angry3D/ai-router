@@ -235,6 +235,7 @@ async fn record_synthetic_history(
             attempts: vec![AttemptHistoryRecord {
                 attempt_id: UpstreamAttemptId::new(),
                 attempt_index: 0,
+                attempt_role: router_core::storage::AttemptRole::Ordinary,
                 route_id,
                 route_name: SYNTHETIC_HISTORY_SENTINEL.to_owned(),
                 started_at_ms: 10,

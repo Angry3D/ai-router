@@ -94,6 +94,7 @@ function bootstrap(
           failureReason: null,
           observedAtMs: null,
         },
+        health: null,
       },
     ],
     activeRouteId: routeId,
@@ -247,10 +248,6 @@ beforeEach(() => {
   });
   ipc.setMenuUsagePreview.mockResolvedValue(undefined);
   ipc.prepareListener = undefined;
-  Object.defineProperty(globalThis, "CSS", {
-    configurable: true,
-    value: { escape: (value: string) => value },
-  });
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
     value: vi.fn(),
@@ -1056,63 +1053,206 @@ describe("P8 menu interactions", () => {
     animationFrame.mockRestore();
   });
 
-  it.each([
-    ["above", -24, 20, true],
-    ["inside", 40, 88, false],
-    ["below", 184, 224, true],
-  ])(
-    "scrolls an active route %s the viewport only when needed",
-    async (_, top, bottom, scrolls) => {
-      const snapshot = menuSnapshot();
-      ipc.getMenuSnapshot.mockResolvedValue(snapshot);
-      renderMenu(snapshot, snapshot.bootstrap);
-
-      const scroller = screen.getByRole("listbox", { name: "路由" });
-      const row = screen.getByRole("option");
-      vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({
-        top: 0,
-        bottom: 200,
-      } as DOMRect);
-      vi.spyOn(row, "getBoundingClientRect").mockReturnValue({
-        top,
-        bottom,
-      } as DOMRect);
-      const scrollIntoView = vi.mocked(row.scrollIntoView);
-
-      await waitFor(() => expect(ipc.prepareListener).toBeTypeOf("function"));
-      act(() => ipc.prepareListener?.({ generation: 8 }));
-      await waitFor(() =>
-        expect(ipc.completeMenuShow).toHaveBeenCalledWith(
-          8,
-          expect.any(Number),
-        ),
-      );
-
-      if (scrolls) {
-        expect(scrollIntoView).toHaveBeenCalledWith({
-          block: "nearest",
-          behavior: "instant",
-        });
-      } else {
-        expect(scrollIntoView).not.toHaveBeenCalled();
-      }
-    },
-  );
-
-  it("returns the route list to the top when there is no active route", async () => {
-    const snapshot = menuSnapshot({ activeRoute: false });
+  it("does not reveal the active route when the menu is prepared or reopened", async () => {
+    const snapshot = menuSnapshot();
+    const routes = populateRoutes(snapshot, 8);
+    snapshot.bootstrap.activeRouteId = routes[7].routeId;
     ipc.getMenuSnapshot.mockResolvedValue(snapshot);
     renderMenu(snapshot, snapshot.bootstrap);
+
     const scroller = screen.getByRole("listbox", { name: "路由" });
-    scroller.scrollTop = 96;
+    const activeRow = screen.getByRole("option", { name: /测试路由 8/ });
+    vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 200,
+    } as DOMRect);
+    vi.spyOn(activeRow, "getBoundingClientRect").mockReturnValue({
+      top: 240,
+      bottom: 280,
+    } as DOMRect);
+    const scrollIntoView = vi.mocked(activeRow.scrollIntoView);
+    scroller.scrollTop = 144;
 
     await waitFor(() => expect(ipc.prepareListener).toBeTypeOf("function"));
+    act(() => ipc.prepareListener?.({ generation: 8 }));
+    await waitFor(() =>
+      expect(ipc.completeMenuShow).toHaveBeenCalledWith(8, expect.any(Number)),
+    );
     act(() => ipc.prepareListener?.({ generation: 9 }));
     await waitFor(() =>
       expect(ipc.completeMenuShow).toHaveBeenCalledWith(9, expect.any(Number)),
     );
 
-    expect(scroller.scrollTop).toBe(0);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(144);
+  });
+
+  it("preserves the route viewport across a balance snapshot replacement", async () => {
+    const snapshot = menuSnapshot();
+    populateRoutes(snapshot, 8);
+    const view = renderMenu(snapshot, snapshot.bootstrap);
+    const scroller = screen.getByRole("listbox", { name: "路由" });
+    const activeRow = screen.getByRole("option", { name: /测试路由 1/ });
+    vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 200,
+    } as DOMRect);
+    vi.spyOn(activeRow, "getBoundingClientRect").mockReturnValue({
+      top: -48,
+      bottom: -8,
+    } as DOMRect);
+    const scrollIntoView = vi.mocked(activeRow.scrollIntoView);
+    scroller.scrollTop = 160;
+
+    act(() =>
+      view.client.setQueryData(queryKeys.menu, {
+        ...snapshot,
+        balances: [
+          {
+            routeId: snapshot.bootstrap.activeRouteId!,
+            value: {
+              isValid: true,
+              remaining: 12.5,
+              used: null,
+              total: null,
+              unit: "USD",
+              planName: null,
+              invalidMessage: null,
+              extra: null,
+            },
+            status: "fresh",
+            lastSuccessAtMs: 1_754_003_000_000,
+            lastCompletionAtMs: 1_754_003_000_000,
+            nextDueAtMs: 1_754_003_030_000,
+            error: null,
+          },
+        ],
+      }),
+    );
+
+    expect(await screen.findByText("$12.50")).toBeInTheDocument();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(160);
+  });
+
+  it("preserves the route viewport across an inference snapshot replacement", async () => {
+    const snapshot = menuSnapshot();
+    populateRoutes(snapshot, 8);
+    const view = renderMenu(snapshot, snapshot.bootstrap);
+    const scroller = screen.getByRole("listbox", { name: "路由" });
+    const activeRow = screen.getByRole("option", { name: /测试路由 1/ });
+    vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 200,
+    } as DOMRect);
+    vi.spyOn(activeRow, "getBoundingClientRect").mockReturnValue({
+      top: -48,
+      bottom: -8,
+    } as DOMRect);
+    const scrollIntoView = vi.mocked(activeRow.scrollIntoView);
+    scroller.scrollTop = 160;
+
+    act(() =>
+      view.client.setQueryData(queryKeys.menu, {
+        ...snapshot,
+        bootstrap: {
+          ...snapshot.bootstrap,
+          routes: snapshot.bootstrap.routes.map((route, index) =>
+            index === 0
+              ? {
+                  ...route,
+                  inferenceStatus: {
+                    kind: "recent_success",
+                    lastOutcome: "success",
+                    failureReason: null,
+                    observedAtMs: 1_754_003_000_000,
+                  },
+                }
+              : route,
+          ),
+        },
+      }),
+    );
+
+    expect(await screen.findByText("最近成功")).toBeInTheDocument();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(160);
+  });
+
+  it("updates the active route marker without moving the route viewport", async () => {
+    const snapshot = menuSnapshot();
+    const routes = populateRoutes(snapshot, 8);
+    const view = renderMenu(snapshot, snapshot.bootstrap);
+    const scroller = screen.getByRole("listbox", { name: "路由" });
+    const originalActiveRow = screen.getByRole("option", {
+      name: /测试路由 1/,
+    });
+    const nextActiveRow = screen.getByRole("option", { name: /测试路由 8/ });
+    vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 200,
+    } as DOMRect);
+    vi.spyOn(nextActiveRow, "getBoundingClientRect").mockReturnValue({
+      top: 240,
+      bottom: 280,
+    } as DOMRect);
+    const scrollIntoView = vi.mocked(nextActiveRow.scrollIntoView);
+    scroller.scrollTop = 160;
+
+    act(() =>
+      view.client.setQueryData(queryKeys.menu, {
+        ...snapshot,
+        bootstrap: {
+          ...snapshot.bootstrap,
+          activeRouteId: routes[7].routeId,
+        },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(originalActiveRow).toHaveAttribute("aria-selected", "false");
+      expect(nextActiveRow).toHaveAttribute("aria-selected", "true");
+    });
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(160);
+  });
+
+  it("does not reset the route viewport when there is no active route", async () => {
+    const snapshot = menuSnapshot({ activeRoute: false });
+    ipc.getMenuSnapshot.mockResolvedValue(snapshot);
+    const view = renderMenu(snapshot, snapshot.bootstrap);
+    const scroller = screen.getByRole("listbox", { name: "路由" });
+    const scrollIntoView = vi.mocked(
+      screen.getByRole("option").scrollIntoView,
+    );
+    scroller.scrollTop = 96;
+
+    await waitFor(() => expect(ipc.prepareListener).toBeTypeOf("function"));
+    act(() => ipc.prepareListener?.({ generation: 10 }));
+    await waitFor(() =>
+      expect(ipc.completeMenuShow).toHaveBeenCalledWith(10, expect.any(Number)),
+    );
+    act(() =>
+      view.client.setQueryData(queryKeys.menu, {
+        ...snapshot,
+        bootstrap: {
+          ...snapshot.bootstrap,
+          revision: 2,
+          routes: snapshot.bootstrap.routes.map((route) => ({
+            ...route,
+            name: "测试路由已更新",
+          })),
+        },
+      }),
+    );
+
+    expect(await screen.findByText("测试路由已更新")).toBeInTheDocument();
+    expect(screen.getByRole("option")).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(96);
   });
 
   it("keeps global refresh usable with mixed scripted routes and a partial result", () => {
@@ -1128,6 +1268,7 @@ describe("P8 menu interactions", () => {
         failureReason: null,
         observedAtMs: null,
       },
+      health: null,
     });
     snapshot.balanceBatch = {
       batchId: "partial-batch",
@@ -1387,6 +1528,7 @@ describe("P8 menu interactions", () => {
         failureReason: null,
         observedAtMs: kind === "unverified" ? null : Date.now(),
       },
+      health: null,
     }));
     snapshot.bootstrap.activeRouteId = snapshot.bootstrap.routes[0].routeId;
     snapshot.balanceEnabledRouteIds = [];

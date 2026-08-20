@@ -24,13 +24,14 @@ use crate::balance::{
 };
 use crate::domain::{
     ApiKey, AppearancePreference, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
-    CodexModelValidationError, CompletionState, DeliveryState, ImagesGenerationTimeout, RouteId,
-    RouteMoveDirection, RouteName, SecretId, ServiceTierPolicy, UpstreamAttemptId, ValidationError,
+    CodexModelValidationError, CompletionState, DeliveryState,
+    FallbackExcludedModelValidationError, ImagesGenerationTimeout, RouteId, RouteMoveDirection,
+    RouteName, SecretId, ServiceTierPolicy, UpstreamAttemptId, ValidationError,
 };
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 const GENERAL_BALANCE_SOURCE_HASHES: [&str; 3] = [
     "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507",
@@ -125,6 +126,7 @@ pub struct RouteEditRecord {
     pub route: RouteRecord,
     pub api_key: ApiKey,
     pub balance_query: Option<BalanceQueryInput>,
+    pub fallback_excluded_models: Vec<String>,
     pub models: Vec<CodexModelRecord>,
 }
 
@@ -211,6 +213,10 @@ pub enum FallbackStopReason {
     StalePolicy,
     ActivationFailed,
     AttemptIndexExhausted,
+    FailureThresholdNotReached,
+    FailureThresholdReachedPending,
+    RecoveryConfirmationPending,
+    ModelFallbackExcluded,
 }
 
 impl FallbackStopReason {
@@ -224,6 +230,10 @@ impl FallbackStopReason {
             Self::StalePolicy => "stale_policy",
             Self::ActivationFailed => "activation_failed",
             Self::AttemptIndexExhausted => "attempt_index_exhausted",
+            Self::FailureThresholdNotReached => "failure_threshold_not_reached",
+            Self::FailureThresholdReachedPending => "failure_threshold_reached_pending",
+            Self::RecoveryConfirmationPending => "recovery_confirmation_pending",
+            Self::ModelFallbackExcluded => "model_fallback_excluded",
         }
     }
 
@@ -236,9 +246,86 @@ impl FallbackStopReason {
             "stale_policy" => Ok(Self::StalePolicy),
             "activation_failed" => Ok(Self::ActivationFailed),
             "attempt_index_exhausted" => Ok(Self::AttemptIndexExhausted),
+            "failure_threshold_not_reached" => Ok(Self::FailureThresholdNotReached),
+            "failure_threshold_reached_pending" => Ok(Self::FailureThresholdReachedPending),
+            "recovery_confirmation_pending" => Ok(Self::RecoveryConfirmationPending),
+            "model_fallback_excluded" => Ok(Self::ModelFallbackExcluded),
             _ => Err(StorageError::Initialization),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AttemptRole {
+    #[default]
+    Ordinary,
+    RecoveryProbe,
+}
+
+impl AttemptRole {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ordinary => "ordinary",
+            Self::RecoveryProbe => "recovery_probe",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "ordinary" => Ok(Self::Ordinary),
+            "recovery_probe" => Ok(Self::RecoveryProbe),
+            _ => Err(StorageError::Initialization),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoutingTransitionKind {
+    ActivateNext,
+    ResumeCaptured,
+    Recover,
+}
+
+impl RoutingTransitionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActivateNext => "activate_next",
+            Self::ResumeCaptured => "resume_captured",
+            Self::Recover => "recover",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "activate_next" => Ok(Self::ActivateNext),
+            "resume_captured" => Ok(Self::ResumeCaptured),
+            "recover" => Ok(Self::Recover),
+            _ => Err(StorageError::Initialization),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoutingTransitionSkip {
+    pub route_id: RouteId,
+    pub route_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptRoutingTransition {
+    pub kind: RoutingTransitionKind,
+    pub target_route_id: RouteId,
+    pub target_route_name: String,
+    pub skipped_routes: Vec<RoutingTransitionSkip>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptRoutingTransitionRecord {
+    pub request_id: String,
+    pub attempt_index: u32,
+    pub transition: AttemptRoutingTransition,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -254,6 +341,7 @@ pub struct FallbackStopRecord {
 pub struct AttemptHistoryRecord {
     pub attempt_id: UpstreamAttemptId,
     pub attempt_index: u32,
+    pub attempt_role: AttemptRole,
     pub route_id: RouteId,
     pub route_name: String,
     pub started_at_ms: i64,
@@ -400,6 +488,7 @@ pub struct UsageRouteOption {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageAttemptDetail {
     pub attempt_index: u32,
+    pub attempt_role: AttemptRole,
     pub route_id: RouteId,
     pub route_name: String,
     pub started_at_ms: i64,
@@ -418,6 +507,7 @@ pub struct UsageAttemptDetail {
     pub pricing_catalog_version: Option<String>,
     pub cost_status: Option<CostStatus>,
     pub cost_pico_usd: Option<i64>,
+    pub routing_transition: Option<AttemptRoutingTransition>,
     pub routing_decision: Option<RoutingDecision>,
 }
 
@@ -428,6 +518,15 @@ pub enum RoutingDecision {
         max_attempts: u32,
     },
     ActivateNext {
+        target_route_id: RouteId,
+        target_route_name: String,
+        skipped_routes: Vec<RoutingTransitionSkip>,
+    },
+    ResumeCaptured {
+        target_route_id: RouteId,
+        target_route_name: String,
+    },
+    Recover {
         target_route_id: RouteId,
         target_route_name: String,
     },
@@ -457,6 +556,24 @@ fn materialize_routing_decisions(
     const LEGACY_ROUTER_MAX_ATTEMPTS: u32 = 4;
 
     for index in 0..attempts.len() {
+        if let Some(transition) = attempts[index].routing_transition.clone() {
+            attempts[index].routing_decision = Some(match transition.kind {
+                RoutingTransitionKind::ActivateNext => RoutingDecision::ActivateNext {
+                    target_route_id: transition.target_route_id,
+                    target_route_name: transition.target_route_name,
+                    skipped_routes: transition.skipped_routes,
+                },
+                RoutingTransitionKind::ResumeCaptured => RoutingDecision::ResumeCaptured {
+                    target_route_id: transition.target_route_id,
+                    target_route_name: transition.target_route_name,
+                },
+                RoutingTransitionKind::Recover => RoutingDecision::Recover {
+                    target_route_id: transition.target_route_id,
+                    target_route_name: transition.target_route_name,
+                },
+            });
+            continue;
+        }
         let decision = attempts.get(index + 1).map_or_else(
             || {
                 stop_reason.map(|reason| RoutingDecision::Stop {
@@ -481,6 +598,7 @@ fn materialize_routing_decisions(
                     Some(RoutingDecision::ActivateNext {
                         target_route_id: next.route_id.clone(),
                         target_route_name: next.route_name.clone(),
+                        skipped_routes: Vec::new(),
                     })
                 }
             },
@@ -554,12 +672,43 @@ pub fn normalize_codex_model_records(
     Ok(normalized)
 }
 
+/// Normalizes a complete route-owned Fallback exclusion list.
+///
+/// # Errors
+///
+/// Returns a field-addressable error for blank, control-bearing, or duplicate
+/// model identifiers.
+pub fn normalize_fallback_excluded_models(
+    models: Vec<String>,
+) -> Result<Vec<String>, FallbackExcludedModelValidationError> {
+    let mut normalized = Vec::with_capacity(models.len());
+    let mut model_ids = std::collections::HashSet::with_capacity(models.len());
+    for (index, model) in models.into_iter().enumerate() {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(FallbackExcludedModelValidationError::required(index));
+        }
+        if model.chars().any(char::is_control) {
+            return Err(FallbackExcludedModelValidationError::control_character(
+                index,
+            ));
+        }
+        if !model_ids.insert(model.to_owned()) {
+            return Err(FallbackExcludedModelValidationError::duplicate(index));
+        }
+        normalized.push(model.to_owned());
+    }
+    Ok(normalized)
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
     #[error(transparent)]
     CodexModelValidation(#[from] CodexModelValidationError),
+    #[error(transparent)]
+    FallbackExcludedModelValidation(#[from] FallbackExcludedModelValidationError),
     #[error("database executor is closed")]
     ExecutorClosed,
     #[error("database initialization failed")]
@@ -698,6 +847,46 @@ impl DatabaseExecutor {
     ) -> Result<Vec<CodexModelRecord>, StorageError> {
         self.call(move |connection| read_codex_models(connection, &route_id))
             .await
+    }
+
+    /// Loads one route's exact, case-sensitive Fallback exclusion list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, database, or persisted-domain validation error.
+    pub async fn list_fallback_excluded_models(
+        &self,
+        route_id: RouteId,
+    ) -> Result<Vec<String>, StorageError> {
+        self.call(move |connection| read_fallback_excluded_models(connection, &route_id))
+            .await
+    }
+
+    /// Loads all route-owned exclusion lists in stable route order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, database, or persisted-domain validation error.
+    pub async fn all_fallback_excluded_models(
+        &self,
+    ) -> Result<std::collections::HashMap<RouteId, Vec<String>>, StorageError> {
+        self.call(|connection| {
+            let mut statement = connection
+                .prepare("SELECT route_id FROM routes ORDER BY sort_order, created_at_ms")?;
+            let route_ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            route_ids
+                .into_iter()
+                .map(|route_id| {
+                    let route_id = RouteId::from_string(route_id);
+                    let models = read_fallback_excluded_models(connection, &route_id)?;
+                    Ok((route_id, models))
+                })
+                .collect()
+        })
+        .await
     }
 
     /// Loads the active route's catalog, or an empty list when no route is active.
@@ -926,10 +1115,28 @@ impl DatabaseExecutor {
         input: CreateRouteInput,
         models: Vec<CodexModelRecord>,
     ) -> Result<RouteRecord, StorageError> {
+        self.create_route_with_models_and_fallback_exclusions(input, models, Vec::new())
+            .await
+    }
+
+    /// Creates a route, its ordered custom models, and its Fallback exclusions
+    /// in one critical transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns route/model validation, uniqueness, executor, or database errors.
+    pub async fn create_route_with_models_and_fallback_exclusions(
+        &self,
+        input: CreateRouteInput,
+        models: Vec<CodexModelRecord>,
+        fallback_excluded_models: Vec<String>,
+    ) -> Result<RouteRecord, StorageError> {
         let name = RouteName::parse(&input.name)?;
         let base_url = BaseUrl::parse(&input.base_url)?;
         let script = validate_balance_query(input.balance_query)?;
         let models = normalize_codex_model_records(models)?;
+        let fallback_excluded_models =
+            normalize_fallback_excluded_models(fallback_excluded_models)?;
         let route_id = RouteId::new();
         let secret_id = SecretId::new();
         let timestamp = now_millis();
@@ -971,6 +1178,11 @@ impl DatabaseExecutor {
             )?;
             write_balance_query(&transaction, &route_id, script.as_ref(), timestamp)?;
             write_codex_models(&transaction, &route_id, &models)?;
+            write_fallback_excluded_models(
+                &transaction,
+                &route_id,
+                &fallback_excluded_models,
+            )?;
             transaction.execute(
                 "UPDATE route_state SET route_id = ?1, selection_generation = selection_generation + 1, updated_at_ms = ?2 WHERE singleton = 1 AND route_id IS NULL",
                 params![route_id.as_str(), timestamp],
@@ -1010,10 +1222,13 @@ impl DatabaseExecutor {
     pub async fn update_route(&self, input: UpdateRouteInput) -> Result<(), StorageError> {
         let route_id = input.route_id.clone();
         let models = self.list_codex_models(route_id).await?;
-        self.update_route_with_models(input, models).await
+        self.update_route_with_models(input, models)
+            .await
+            .map(|_| ())
     }
 
-    /// Replaces a route and its ordered custom models in one transaction.
+    /// Replaces a route and its ordered custom models in one transaction,
+    /// returning whether route-owned configuration changed.
     ///
     /// # Errors
     ///
@@ -1022,11 +1237,36 @@ impl DatabaseExecutor {
         &self,
         input: UpdateRouteInput,
         models: Vec<CodexModelRecord>,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
+        let fallback_excluded_models = self
+            .list_fallback_excluded_models(input.route_id.clone())
+            .await?;
+        self.update_route_with_models_and_fallback_exclusions(
+            input,
+            models,
+            fallback_excluded_models,
+        )
+        .await
+    }
+
+    /// Replaces a route, its custom models, and its Fallback exclusions in one
+    /// critical transaction, returning whether route-owned configuration changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns route/model validation, not-found, executor, or database errors.
+    pub async fn update_route_with_models_and_fallback_exclusions(
+        &self,
+        input: UpdateRouteInput,
+        models: Vec<CodexModelRecord>,
+        fallback_excluded_models: Vec<String>,
+    ) -> Result<bool, StorageError> {
         let name = RouteName::parse(&input.name)?;
         let base_url = BaseUrl::parse(&input.base_url)?;
         let script = validate_balance_query(input.balance_query)?;
         let models = normalize_codex_model_records(models)?;
+        let fallback_excluded_models =
+            normalize_fallback_excluded_models(fallback_excluded_models)?;
         let key = input.api_key.expose().to_vec();
         let timestamp = now_millis();
 
@@ -1049,18 +1289,21 @@ impl DatabaseExecutor {
             let stored_policy = ServiceTierPolicy::parse_persisted(&stored_policy)?;
             let stored_query = read_balance_query(&transaction, &input.route_id)?;
             let stored_models = read_codex_models(&transaction, &input.route_id)?;
+            let stored_fallback_excluded_models =
+                read_fallback_excluded_models(&transaction, &input.route_id)?;
             if stored_name == name.as_str()
                 && stored_base_url == base_url.as_str()
                 && stored_policy == input.service_tier_policy
                 && stored_key == key
                 && stored_query == script
                 && stored_models == models
+                && stored_fallback_excluded_models == fallback_excluded_models
             {
                 let revision = risk_confirmed
                     .then(|| mark_critical_change(&transaction))
                     .transpose()?;
                 transaction.commit()?;
-                return Ok(((), revision));
+                return Ok((false, revision));
             }
             transaction.execute(
                 "UPDATE secrets SET value = ?1, updated_at_ms = ?2 WHERE secret_id = ?3",
@@ -1072,6 +1315,11 @@ impl DatabaseExecutor {
             )?;
             write_balance_query(&transaction, &input.route_id, script.as_ref(), timestamp)?;
             write_codex_models(&transaction, &input.route_id, &models)?;
+            write_fallback_excluded_models(
+                &transaction,
+                &input.route_id,
+                &fallback_excluded_models,
+            )?;
             if stored_models != models {
                 transaction.execute(
                     "DELETE FROM codex_restart_notice WHERE route_id = ?1 AND EXISTS (SELECT 1 FROM route_state WHERE singleton = 1 AND route_id = ?1)",
@@ -1080,7 +1328,7 @@ impl DatabaseExecutor {
             }
             let revision = mark_critical_change(&transaction)?;
             transaction.commit()?;
-            Ok(((), Some(revision)))
+            Ok((true, Some(revision)))
         })
         .await
     }
@@ -1451,6 +1699,38 @@ impl DatabaseExecutor {
         expected_config_revision: u64,
         target_route_id: RouteId,
     ) -> Result<bool, StorageError> {
+        self.conditional_activate_forward(
+            expected_route_id,
+            expected_selection_generation,
+            expected_config_revision,
+            target_route_id,
+            Vec::new(),
+            Vec::new(),
+            String::new(),
+            false,
+        )
+        .await
+    }
+
+    /// Activates a later participant after revalidating the exact skipped span.
+    /// Model-exclusion skips are checked against the latest persisted policy;
+    /// runtime-health skips are supplied by the versioned health registry.
+    #[allow(clippy::too_many_arguments)]
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or transaction error when the activation cannot be evaluated.
+    pub async fn conditional_activate_forward(
+        &self,
+        expected_route_id: RouteId,
+        expected_selection_generation: u64,
+        expected_config_revision: u64,
+        target_route_id: RouteId,
+        skipped_route_ids: Vec<RouteId>,
+        model_excluded_route_ids: Vec<RouteId>,
+        requested_model: String,
+        allow_earlier_recovery: bool,
+    ) -> Result<bool, StorageError> {
         self.call_critical(move |connection| {
             let transaction = connection.transaction()?;
             let (active_route_id, selection_generation): (Option<String>, i64) = transaction
@@ -1478,13 +1758,49 @@ impl DatabaseExecutor {
                 .query_map([fallback.participant_count], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             drop(statement);
-            let immediate_next = participants
+            let Some(source_index) = participants
                 .iter()
-                .position(|route_id| route_id == expected_route_id.as_str())
-                .and_then(|index| participants.get(index + 1));
-            if immediate_next.map(String::as_str) != Some(target_route_id.as_str()) {
+                .position(|route_id| route_id == expected_route_id.as_str()) else {
                 transaction.commit()?;
                 return Ok((false, None));
+            };
+            let Some(target_index) = participants
+                .iter()
+                .position(|route_id| route_id == target_route_id.as_str()) else {
+                transaction.commit()?;
+                return Ok((false, None));
+            };
+            let valid_span = if allow_earlier_recovery {
+                target_index < source_index && skipped_route_ids.is_empty()
+            } else {
+                let expected_skipped = participants
+                    .get(source_index + 1..target_index)
+                    .unwrap_or_default();
+                target_index > source_index
+                    && expected_skipped.len() == skipped_route_ids.len()
+                    && expected_skipped
+                        .iter()
+                        .zip(&skipped_route_ids)
+                        .all(|(expected, actual)| expected == actual.as_str())
+            };
+            if !valid_span {
+                transaction.commit()?;
+                return Ok((false, None));
+            }
+            for route_id in &model_excluded_route_ids {
+                if !skipped_route_ids.contains(route_id) {
+                    transaction.commit()?;
+                    return Ok((false, None));
+                }
+                let matches = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM route_fallback_excluded_models WHERE route_id = ?1 AND model_id = ?2)",
+                    params![route_id.as_str(), requested_model],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if !matches {
+                    transaction.commit()?;
+                    return Ok((false, None));
+                }
             }
             let changed = transaction.execute(
                 "UPDATE route_state SET route_id = ?1, selection_generation = selection_generation + 1, updated_at_ms = ?2 WHERE singleton = 1 AND route_id = ?3 AND selection_generation = ?4",
@@ -1619,6 +1935,8 @@ impl DatabaseExecutor {
                 })
                 .transpose()?;
             let models = read_codex_models(connection, &route_id)?;
+            let fallback_excluded_models =
+                read_fallback_excluded_models(connection, &route_id)?;
             Ok(RouteEditRecord {
                 route: RouteRecord {
                     route_id,
@@ -1634,6 +1952,7 @@ impl DatabaseExecutor {
                 },
                 api_key: ApiKey::from_stored(api_key),
                 balance_query,
+                fallback_excluded_models,
                 models,
             })
         })
@@ -2314,6 +2633,7 @@ impl DatabaseExecutor {
     /// # Errors
     ///
     /// Returns invalid-query, not-found, executor, or database errors.
+    #[allow(clippy::too_many_lines)]
     pub async fn usage_request_detail(
         &self,
         request_id: String,
@@ -2350,37 +2670,88 @@ impl DatabaseExecutor {
                 .optional()?
                 .ok_or(StorageError::NotFound)?;
             let mut statement = connection.prepare(
-                "SELECT attempt_index, route_id, route_name, started_at_ms, finished_at_ms,
+                "SELECT attempt_id, attempt_index, attempt_role, route_id, route_name,
+                        started_at_ms, finished_at_ms,
                         http_status, error_category, delivery_state, actual_model,
                         forwarded_service_tier, actual_service_tier, input_tokens, output_tokens, total_tokens,
                         cached_input_tokens, cache_write_input_tokens,
-                        pricing_catalog_version, cost_status, cost_pico_usd
+                        pricing_catalog_version, cost_status, cost_pico_usd,
+                        routing_transition_kind, routing_transition_target_route_id,
+                        routing_transition_target_route_name
                  FROM upstream_attempts WHERE request_id = ?1 ORDER BY attempt_index",
             )?;
             let mut attempts = statement
                 .query_map([&request_id], |row| {
+                    let attempt_id = row.get::<_, String>(0)?;
+                    let transition = match (
+                        row.get::<_, Option<String>>(21)?,
+                        row.get::<_, Option<String>>(22)?,
+                        row.get::<_, Option<String>>(23)?,
+                    ) {
+                        (Some(kind), Some(target_route_id), Some(target_route_name)) => {
+                            let kind = RoutingTransitionKind::parse(&kind).map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    21,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?;
+                            let mut skips = connection.prepare(
+                                "SELECT route_id, route_name, reason
+                                 FROM upstream_attempt_routing_skips
+                                 WHERE attempt_id = ?1 ORDER BY skip_order",
+                            )?;
+                            let skipped_routes = skips
+                                .query_map([&attempt_id], |skip| {
+                                    let reason = skip.get::<_, String>(2)?;
+                                    if reason != "model_fallback_excluded" {
+                                        return Err(rusqlite::Error::InvalidQuery);
+                                    }
+                                    Ok(RoutingTransitionSkip {
+                                        route_id: RouteId::from_string(skip.get(0)?),
+                                        route_name: skip.get(1)?,
+                                    })
+                                })?
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Some(AttemptRoutingTransition {
+                                kind,
+                                target_route_id: RouteId::from_string(target_route_id),
+                                target_route_name,
+                                skipped_routes,
+                            })
+                        }
+                        (None, None, None) => None,
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    };
                     Ok(UsageAttemptDetail {
-                        attempt_index: row.get(0)?,
-                        route_id: RouteId::from_string(row.get(1)?),
-                        route_name: row.get(2)?,
-                        started_at_ms: row.get(3)?,
-                        finished_at_ms: row.get(4)?,
-                        http_status: row.get(5)?,
-                        error_category: row.get(6)?,
-                        delivery_state: parse_delivery_state(&row.get::<_, String>(7)?),
-                        actual_model: row.get(8)?,
-                        forwarded_service_tier: row.get(9)?,
-                        actual_service_tier: row.get(10)?,
-                        input_tokens: row.get(11)?,
-                        output_tokens: row.get(12)?,
-                        total_tokens: row.get(13)?,
-                        cached_input_tokens: row.get(14)?,
-                        cache_write_input_tokens: row.get(15)?,
-                        pricing_catalog_version: row.get(16)?,
+                        attempt_index: row.get(1)?,
+                        attempt_role: AttemptRole::parse(&row.get::<_, String>(2)?)
+                            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            ))?,
+                        route_id: RouteId::from_string(row.get(3)?),
+                        route_name: row.get(4)?,
+                        started_at_ms: row.get(5)?,
+                        finished_at_ms: row.get(6)?,
+                        http_status: row.get(7)?,
+                        error_category: row.get(8)?,
+                        delivery_state: parse_delivery_state(&row.get::<_, String>(9)?),
+                        actual_model: row.get(10)?,
+                        forwarded_service_tier: row.get(11)?,
+                        actual_service_tier: row.get(12)?,
+                        input_tokens: row.get(13)?,
+                        output_tokens: row.get(14)?,
+                        total_tokens: row.get(15)?,
+                        cached_input_tokens: row.get(16)?,
+                        cache_write_input_tokens: row.get(17)?,
+                        pricing_catalog_version: row.get(18)?,
                         cost_status: row
-                            .get::<_, Option<String>>(17)?
+                            .get::<_, Option<String>>(19)?
                             .and_then(|value| CostStatus::parse(&value)),
-                        cost_pico_usd: row.get(18)?,
+                        cost_pico_usd: row.get(20)?,
+                        routing_transition: transition,
                         routing_decision: None,
                     })
                 })?
@@ -2516,18 +2887,19 @@ impl DatabaseExecutor {
                 });
                 transaction.execute(
                     "INSERT INTO upstream_attempts (
-                        attempt_id, request_id, attempt_index, route_id, route_name,
+                        attempt_id, request_id, attempt_index, attempt_role, route_id, route_name,
                         started_at_ms, finished_at_ms, http_status, error_category,
                         delivery_state, actual_model, forwarded_service_tier, actual_service_tier, input_tokens,
                         output_tokens, total_tokens, cached_input_tokens,
                         cache_write_input_tokens, pricing_catalog_version, cost_status,
                         cost_pico_usd
                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                              ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                              ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                     params![
                         attempt.attempt_id.as_str(),
                         request_id,
                         attempt.attempt_index,
+                        attempt.attempt_role.as_str(),
                         attempt.route_id.as_str(),
                         attempt.route_name,
                         attempt.started_at_ms,
@@ -2600,9 +2972,9 @@ impl DatabaseExecutor {
     pub async fn record_fallback_stop(
         &self,
         record: FallbackStopRecord,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         self.call(move |connection| {
-            connection.execute(
+            let changed = connection.execute(
                 "UPDATE proxy_requests
                  SET fallback_stop_reason = ?1,
                      fallback_stop_target_route_id = ?2,
@@ -2618,8 +2990,70 @@ impl DatabaseExecutor {
                     record.request_id,
                     record.attempt_index,
                 ],
+            )? == 1;
+            Ok(changed)
+        })
+        .await
+    }
+
+    /// Persists one explicit routing transition on its owning attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor or database error. A transition whose attempt has
+    /// not been persisted is ignored without attaching it to another attempt.
+    pub async fn record_attempt_routing_transition(
+        &self,
+        record: AttemptRoutingTransitionRecord,
+    ) -> Result<bool, StorageError> {
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let attempt_id = transaction
+                .query_row(
+                    "SELECT attempt_id FROM upstream_attempts
+                     WHERE request_id = ?1 AND attempt_index = ?2",
+                    params![record.request_id, record.attempt_index],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(attempt_id) = attempt_id else {
+                transaction.commit()?;
+                return Ok(false);
+            };
+            transaction.execute(
+                "UPDATE upstream_attempts
+                 SET routing_transition_kind = ?1,
+                     routing_transition_target_route_id = ?2,
+                     routing_transition_target_route_name = ?3
+                 WHERE attempt_id = ?4",
+                params![
+                    record.transition.kind.as_str(),
+                    record.transition.target_route_id.as_str(),
+                    record.transition.target_route_name,
+                    attempt_id,
+                ],
             )?;
-            Ok(())
+            transaction.execute(
+                "DELETE FROM upstream_attempt_routing_skips WHERE attempt_id = ?1",
+                [&attempt_id],
+            )?;
+            for (skip_order, skipped) in record.transition.skipped_routes.iter().enumerate() {
+                let skip_order = i64::try_from(skip_order)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                transaction.execute(
+                    "INSERT INTO upstream_attempt_routing_skips
+                     (attempt_id, skip_order, route_id, route_name, reason)
+                     VALUES (?1, ?2, ?3, ?4, 'model_fallback_excluded')",
+                    params![
+                        attempt_id,
+                        skip_order,
+                        skipped.route_id.as_str(),
+                        skipped.route_name,
+                    ],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(true)
         })
         .await
     }
@@ -3161,6 +3595,41 @@ fn write_codex_models(
     Ok(())
 }
 
+fn read_fallback_excluded_models(
+    connection: &Connection,
+    route_id: &RouteId,
+) -> Result<Vec<String>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT model_id FROM route_fallback_excluded_models
+         WHERE route_id = ?1 ORDER BY sort_order",
+    )?;
+    let models = statement
+        .query_map([route_id.as_str()], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    normalize_fallback_excluded_models(models).map_err(StorageError::from)
+}
+
+fn write_fallback_excluded_models(
+    transaction: &Transaction<'_>,
+    route_id: &RouteId,
+    models: &[String],
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "DELETE FROM route_fallback_excluded_models WHERE route_id = ?1",
+        [route_id.as_str()],
+    )?;
+    for (sort_order, model) in models.iter().enumerate() {
+        let sort_order = i64::try_from(sort_order)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        transaction.execute(
+            "INSERT INTO route_fallback_excluded_models
+             (route_id, model_id, sort_order) VALUES (?1, ?2, ?3)",
+            params![route_id.as_str(), model, sort_order],
+        )?;
+    }
+    Ok(())
+}
+
 fn confirm_script_risk_if_needed(
     transaction: &Transaction<'_>,
     query: Option<&BalanceQueryInput>,
@@ -3259,6 +3728,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     }
     if version < 19 {
         migrate_v19(connection)?;
+    }
+    if version < 20 {
+        migrate_v20(connection)?;
     }
     Ok(())
 }
@@ -3749,6 +4221,67 @@ fn migrate_v19(connection: &mut Connection) -> Result<(), StorageError> {
         ALTER TABLE app_settings ADD COLUMN last_automatic_update_check_at_ms INTEGER
             CHECK (last_automatic_update_check_at_ms IS NULL OR last_automatic_update_check_at_ms >= 0);
         PRAGMA user_version = 19;
+        ",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v20(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "
+        CREATE TABLE route_fallback_excluded_models (
+            route_id TEXT NOT NULL REFERENCES routes(route_id) ON DELETE CASCADE,
+            model_id TEXT COLLATE BINARY NOT NULL,
+            sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+            PRIMARY KEY (route_id, model_id),
+            UNIQUE (route_id, sort_order),
+            CHECK (length(trim(model_id)) > 0)
+        );
+
+        ALTER TABLE upstream_attempts ADD COLUMN attempt_role TEXT NOT NULL
+            DEFAULT 'ordinary'
+            CHECK (attempt_role IN ('ordinary', 'recovery_probe'));
+        ALTER TABLE upstream_attempts ADD COLUMN routing_transition_kind TEXT
+            CHECK (routing_transition_kind IS NULL OR routing_transition_kind IN (
+                'activate_next', 'resume_captured', 'recover'
+            ));
+        ALTER TABLE upstream_attempts ADD COLUMN routing_transition_target_route_id TEXT;
+        ALTER TABLE upstream_attempts ADD COLUMN routing_transition_target_route_name TEXT;
+
+        CREATE TABLE upstream_attempt_routing_skips (
+            attempt_id TEXT NOT NULL REFERENCES upstream_attempts(attempt_id) ON DELETE CASCADE,
+            skip_order INTEGER NOT NULL CHECK (skip_order >= 0),
+            route_id TEXT NOT NULL,
+            route_name TEXT NOT NULL,
+            reason TEXT NOT NULL CHECK (reason IN ('model_fallback_excluded')),
+            PRIMARY KEY (attempt_id, skip_order)
+        );
+
+        ALTER TABLE proxy_requests ADD COLUMN fallback_stop_reason_v20 TEXT;
+        UPDATE proxy_requests
+        SET fallback_stop_reason_v20 = fallback_stop_reason;
+        ALTER TABLE proxy_requests DROP COLUMN fallback_stop_reason;
+        ALTER TABLE proxy_requests ADD COLUMN fallback_stop_reason TEXT
+            CHECK (fallback_stop_reason IS NULL OR fallback_stop_reason IN (
+                'fallback_disabled',
+                'failure_not_eligible',
+                'response_committed',
+                'all_participants_attempted',
+                'stale_policy',
+                'activation_failed',
+                'attempt_index_exhausted',
+                'failure_threshold_not_reached',
+                'failure_threshold_reached_pending',
+                'recovery_confirmation_pending',
+                'model_fallback_excluded'
+            ));
+        UPDATE proxy_requests
+        SET fallback_stop_reason = fallback_stop_reason_v20;
+        ALTER TABLE proxy_requests DROP COLUMN fallback_stop_reason_v20;
+
+        PRAGMA user_version = 20;
         ",
     )?;
     transaction.commit()?;
@@ -4366,6 +4899,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         fs,
+        path::Path,
         sync::Arc,
         time::Duration,
     };
@@ -5216,9 +5750,11 @@ mod tests {
             "proxy_requests".to_owned(),
             "recovery_point_metadata".to_owned(),
             "recovery_revision".to_owned(),
+            "route_fallback_excluded_models".to_owned(),
             "route_state".to_owned(),
             "routes".to_owned(),
             "secrets".to_owned(),
+            "upstream_attempt_routing_skips".to_owned(),
             "upstream_attempts".to_owned(),
         ]);
         assert_eq!(tables, expected);
@@ -5340,6 +5876,95 @@ mod tests {
             .expect("load");
         assert_eq!(loaded[0].context_window, None);
         assert_eq!(loaded[1].context_window, Some(128_000));
+    }
+
+    #[tokio::test]
+    async fn fallback_excluded_models_round_trip_in_order_and_reject_duplicates_atomically() {
+        let (_directory, database) = database();
+        let route = database
+            .create_route_with_models_and_fallback_exclusions(
+                route("Fallback", "fallback-key"),
+                Vec::new(),
+                vec![" luna ".to_owned(), "sol".to_owned()],
+            )
+            .await
+            .expect("route with exclusions");
+        assert_eq!(
+            database
+                .list_fallback_excluded_models(route.route_id.clone())
+                .await
+                .expect("stored exclusions"),
+            vec!["luna".to_owned(), "sol".to_owned()]
+        );
+
+        let error = database
+            .update_route_with_models_and_fallback_exclusions(
+                UpdateRouteInput {
+                    route_id: route.route_id.clone(),
+                    name: "Fallback renamed".to_owned(),
+                    base_url: "https://changed.example/v1".to_owned(),
+                    api_key: ApiKey::parse("changed-key").expect("key"),
+                    service_tier_policy: ServiceTierPolicy::Passthrough,
+                    balance_query: None,
+                    accept_script_risk: false,
+                },
+                Vec::new(),
+                vec!["duplicate".to_owned(), " duplicate ".to_owned()],
+            )
+            .await
+            .expect_err("duplicate exclusion");
+        assert!(matches!(
+            error,
+            StorageError::FallbackExcludedModelValidation(_)
+        ));
+        assert_eq!(
+            database
+                .list_fallback_excluded_models(route.route_id)
+                .await
+                .expect("unchanged exclusions"),
+            vec!["luna".to_owned(), "sol".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn route_update_reports_exact_no_op_without_critical_change() {
+        let (_directory, database) = database();
+        let route = database
+            .create_route_with_models_and_fallback_exclusions(
+                route("Fallback", "fallback-key"),
+                Vec::new(),
+                vec!["luna".to_owned(), "sol".to_owned()],
+            )
+            .await
+            .expect("route with exclusions");
+        let revision = database.critical_revision().await.expect("revision");
+
+        let changed = database
+            .update_route_with_models_and_fallback_exclusions(
+                UpdateRouteInput {
+                    route_id: route.route_id,
+                    name: "Fallback".to_owned(),
+                    base_url: "https://example.com/v1".to_owned(),
+                    api_key: ApiKey::parse("fallback-key").expect("key"),
+                    service_tier_policy: ServiceTierPolicy::Passthrough,
+                    balance_query: Some(BalanceQueryInput {
+                        mode: BalanceQueryMode::CustomJs,
+                        enabled: true,
+                        custom_source: "({ request: {}, extractor: () => ({}) })".to_owned(),
+                    }),
+                    accept_script_risk: false,
+                },
+                Vec::new(),
+                vec!["luna".to_owned(), "sol".to_owned()],
+            )
+            .await
+            .expect("route no-op");
+
+        assert!(!changed);
+        assert_eq!(
+            database.critical_revision().await.expect("no-op revision"),
+            revision
+        );
     }
 
     #[tokio::test]
@@ -5821,6 +6446,289 @@ mod tests {
             .expect("cadence");
         assert_eq!(version, 19);
         assert_eq!(value, None);
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct MigratedV20Route {
+        name: String,
+        base_url: String,
+        sort_order: i64,
+        created_at_ms: i64,
+        updated_at_ms: i64,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct MigratedV20Request {
+        started_at_ms: i64,
+        finished_at_ms: Option<i64>,
+        requested_model: Option<String>,
+        actual_model: Option<String>,
+        final_route_id: Option<String>,
+        final_route_name: Option<String>,
+        completion_state: String,
+        http_status: Option<u16>,
+        error_category: Option<String>,
+        total_tokens: Option<i64>,
+        cost_pico_usd: Option<i64>,
+        fallback_stop_reason: Option<String>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct MigratedV20Attempt {
+        attempt_id: String,
+        request_id: String,
+        attempt_index: u32,
+        route_id: String,
+        route_name: String,
+        started_at_ms: i64,
+        finished_at_ms: Option<i64>,
+        http_status: Option<u16>,
+        error_category: Option<String>,
+        delivery_state: String,
+        total_tokens: Option<i64>,
+        cost_pico_usd: Option<i64>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct MigratedV20Values {
+        version: i64,
+        tables: Vec<String>,
+        route: MigratedV20Route,
+        request: MigratedV20Request,
+        attempt: MigratedV20Attempt,
+        transition: (String, Option<String>, Option<String>, Option<String>),
+        exclusions: i64,
+        skips: i64,
+    }
+
+    fn prepare_v19_fallback_history_fixture(path: &Path) {
+        let mut connection = Connection::open(path).expect("v19 database");
+        migrate_test_database_to_v14(&mut connection);
+        migrate_v15(&mut connection).expect("v15");
+        migrate_v16(&mut connection).expect("v16");
+        migrate_v17(&mut connection).expect("v17");
+        migrate_v18(&mut connection).expect("v18");
+        migrate_v19(&mut connection).expect("v19");
+        connection
+            .execute_batch(
+                "
+                INSERT INTO secrets (secret_id, kind, value, created_at_ms, updated_at_ms)
+                VALUES ('secret-1', 'route_api_key', X'01', 1, 2);
+                INSERT INTO routes (
+                    route_id, display_name, display_name_key, base_url, secret_id,
+                    service_tier_policy, sort_order, created_at_ms, updated_at_ms
+                ) VALUES (
+                    'route-1', 'Route', 'route', 'https://example.invalid/v1',
+                    'secret-1', 'passthrough', 0, 3, 4
+                );
+                INSERT INTO proxy_requests (
+                    request_id, started_at_ms, finished_at_ms, requested_model, actual_model,
+                    final_route_id, final_route_name, streaming, completion_state, http_status,
+                    error_category, input_tokens, output_tokens, total_tokens, total_latency_ms,
+                    first_output_latency_ms, metadata_complete, requested_service_tier,
+                    actual_service_tier, cached_input_tokens, cache_write_input_tokens,
+                    pricing_catalog_version, cost_status, upstream_cost_pico_usd,
+                    reasoning_effort, fallback_stop_reason
+                ) VALUES (
+                    'request-1', 10, 40, 'luna', 'luna-actual', 'route-1', 'Route',
+                    0, 'failed', 503, 'upstream_http_status', 11, 7, 18, 30, 9, 1,
+                    'priority', 'default', 3, 2, 'catalog-v1', 'partial', 1234,
+                    'high', 'all_participants_attempted'
+                );
+                INSERT INTO upstream_attempts (
+                    attempt_id, request_id, attempt_index, route_id, route_name,
+                    started_at_ms, finished_at_ms, http_status, error_category,
+                    delivery_state, input_tokens, output_tokens, total_tokens, actual_model,
+                    forwarded_service_tier, actual_service_tier, cached_input_tokens,
+                    cache_write_input_tokens, pricing_catalog_version, cost_status,
+                    cost_pico_usd
+                ) VALUES (
+                    'attempt-1', 'request-1', 0, 'route-1', 'Route', 10, 40, 503,
+                    'upstream_http_status', 'completed', 11, 7, 18, 'luna-actual',
+                    'priority', 'default', 3, 2, 'catalog-v1', 'partial', 1234
+                );
+                ",
+            )
+            .expect("v19 rows");
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("v19 version"),
+            19
+        );
+    }
+
+    fn read_migrated_v20_request(
+        connection: &Connection,
+    ) -> Result<MigratedV20Request, StorageError> {
+        Ok(connection.query_row(
+            "SELECT started_at_ms, finished_at_ms, requested_model, actual_model,
+                    final_route_id, final_route_name, completion_state, http_status,
+                    error_category, total_tokens, upstream_cost_pico_usd,
+                    fallback_stop_reason
+             FROM proxy_requests WHERE request_id = 'request-1'",
+            [],
+            |row| {
+                Ok(MigratedV20Request {
+                    started_at_ms: row.get(0)?,
+                    finished_at_ms: row.get(1)?,
+                    requested_model: row.get(2)?,
+                    actual_model: row.get(3)?,
+                    final_route_id: row.get(4)?,
+                    final_route_name: row.get(5)?,
+                    completion_state: row.get(6)?,
+                    http_status: row.get(7)?,
+                    error_category: row.get(8)?,
+                    total_tokens: row.get(9)?,
+                    cost_pico_usd: row.get(10)?,
+                    fallback_stop_reason: row.get(11)?,
+                })
+            },
+        )?)
+    }
+
+    fn read_migrated_v20_attempt(
+        connection: &Connection,
+    ) -> Result<MigratedV20Attempt, StorageError> {
+        Ok(connection.query_row(
+            "SELECT attempt_id, request_id, attempt_index, route_id, route_name,
+                    started_at_ms, finished_at_ms, http_status, error_category,
+                    delivery_state, total_tokens, cost_pico_usd
+             FROM upstream_attempts WHERE attempt_id = 'attempt-1'",
+            [],
+            |row| {
+                Ok(MigratedV20Attempt {
+                    attempt_id: row.get(0)?,
+                    request_id: row.get(1)?,
+                    attempt_index: row.get(2)?,
+                    route_id: row.get(3)?,
+                    route_name: row.get(4)?,
+                    started_at_ms: row.get(5)?,
+                    finished_at_ms: row.get(6)?,
+                    http_status: row.get(7)?,
+                    error_category: row.get(8)?,
+                    delivery_state: row.get(9)?,
+                    total_tokens: row.get(10)?,
+                    cost_pico_usd: row.get(11)?,
+                })
+            },
+        )?)
+    }
+
+    fn read_migrated_v20_values(
+        connection: &Connection,
+    ) -> Result<MigratedV20Values, StorageError> {
+        let mut table_query = connection.prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name IN (
+                 'route_fallback_excluded_models',
+                 'upstream_attempt_routing_skips'
+             ) ORDER BY name",
+        )?;
+        let tables = table_query
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(MigratedV20Values {
+            version: connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+            tables,
+            route: connection.query_row(
+                "SELECT display_name, base_url, sort_order, created_at_ms, updated_at_ms
+                 FROM routes WHERE route_id = 'route-1'",
+                [],
+                |row| {
+                    Ok(MigratedV20Route {
+                        name: row.get(0)?,
+                        base_url: row.get(1)?,
+                        sort_order: row.get(2)?,
+                        created_at_ms: row.get(3)?,
+                        updated_at_ms: row.get(4)?,
+                    })
+                },
+            )?,
+            request: read_migrated_v20_request(connection)?,
+            attempt: read_migrated_v20_attempt(connection)?,
+            transition: connection.query_row(
+                "SELECT attempt_role, routing_transition_kind,
+                        routing_transition_target_route_id,
+                        routing_transition_target_route_name
+                 FROM upstream_attempts WHERE attempt_id = 'attempt-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?,
+            exclusions: connection.query_row(
+                "SELECT COUNT(*) FROM route_fallback_excluded_models
+                 WHERE route_id = 'route-1'",
+                [],
+                |row| row.get(0),
+            )?,
+            skips: connection.query_row(
+                "SELECT COUNT(*) FROM upstream_attempt_routing_skips",
+                [],
+                |row| row.get(0),
+            )?,
+        })
+    }
+
+    #[tokio::test]
+    async fn migration_v20_preserves_history_and_defaults_new_route_and_attempt_metadata() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("router.sqlite3");
+        prepare_v19_fallback_history_fixture(&path);
+        let database = DatabaseExecutor::open(&path).expect("migrate v19 database");
+        let values = database
+            .test_execute(|connection| read_migrated_v20_values(connection))
+            .await
+            .expect("migrated rows");
+
+        assert_eq!(
+            values,
+            MigratedV20Values {
+                version: SCHEMA_VERSION,
+                tables: vec![
+                    "route_fallback_excluded_models".to_owned(),
+                    "upstream_attempt_routing_skips".to_owned(),
+                ],
+                route: MigratedV20Route {
+                    name: "Route".to_owned(),
+                    base_url: "https://example.invalid/v1".to_owned(),
+                    sort_order: 0,
+                    created_at_ms: 3,
+                    updated_at_ms: 4,
+                },
+                request: MigratedV20Request {
+                    started_at_ms: 10,
+                    finished_at_ms: Some(40),
+                    requested_model: Some("luna".to_owned()),
+                    actual_model: Some("luna-actual".to_owned()),
+                    final_route_id: Some("route-1".to_owned()),
+                    final_route_name: Some("Route".to_owned()),
+                    completion_state: "failed".to_owned(),
+                    http_status: Some(503),
+                    error_category: Some("upstream_http_status".to_owned()),
+                    total_tokens: Some(18),
+                    cost_pico_usd: Some(1234),
+                    fallback_stop_reason: Some("all_participants_attempted".to_owned()),
+                },
+                attempt: MigratedV20Attempt {
+                    attempt_id: "attempt-1".to_owned(),
+                    request_id: "request-1".to_owned(),
+                    attempt_index: 0,
+                    route_id: "route-1".to_owned(),
+                    route_name: "Route".to_owned(),
+                    started_at_ms: 10,
+                    finished_at_ms: Some(40),
+                    http_status: Some(503),
+                    error_category: Some("upstream_http_status".to_owned()),
+                    delivery_state: "completed".to_owned(),
+                    total_tokens: Some(18),
+                    cost_pico_usd: Some(1234),
+                },
+                transition: ("ordinary".to_owned(), None, None, None),
+                exclusions: 0,
+                skips: 0,
+            }
+        );
     }
 
     #[tokio::test]
@@ -6754,6 +7662,7 @@ mod tests {
         fn attempt(index: u32, route_id: RouteId, route_name: &str) -> UsageAttemptDetail {
             UsageAttemptDetail {
                 attempt_index: index,
+                attempt_role: super::AttemptRole::Ordinary,
                 route_id,
                 route_name: route_name.to_owned(),
                 started_at_ms: i64::from(index),
@@ -6772,6 +7681,7 @@ mod tests {
                 pricing_catalog_version: None,
                 cost_status: None,
                 cost_pico_usd: None,
+                routing_transition: None,
                 routing_decision: None,
             }
         }
@@ -6802,6 +7712,7 @@ mod tests {
             Some(RoutingDecision::ActivateNext {
                 target_route_id: second.clone(),
                 target_route_name: "Second".to_owned(),
+                skipped_routes: Vec::new(),
             })
         );
         assert_eq!(
@@ -6834,10 +7745,12 @@ mod tests {
                 Some(RoutingDecision::ActivateNext {
                     target_route_id: second,
                     target_route_name: "Second".to_owned(),
+                    skipped_routes: Vec::new(),
                 }),
                 Some(RoutingDecision::ActivateNext {
                     target_route_id: third,
                     target_route_name: "Third".to_owned(),
+                    skipped_routes: Vec::new(),
                 }),
                 Some(RoutingDecision::Stop {
                     reason: FallbackStopReason::AllParticipantsAttempted,
@@ -7392,6 +8305,7 @@ mod tests {
                 attempts: vec![super::AttemptHistoryRecord {
                     attempt_id: crate::domain::UpstreamAttemptId::new(),
                     attempt_index: 0,
+                    attempt_role: super::AttemptRole::Ordinary,
                     route_id: route_id.clone(),
                     route_name: "Route snapshot".to_owned(),
                     started_at_ms: 100,
@@ -7893,6 +8807,7 @@ mod tests {
                     attempts: vec![super::AttemptHistoryRecord {
                         attempt_id: crate::domain::UpstreamAttemptId::new(),
                         attempt_index: if request_id == "request-b" { 65_536 } else { 0 },
+                        attempt_role: super::AttemptRole::Ordinary,
                         route_id: route_id.clone(),
                         route_name: "Retained route".to_owned(),
                         started_at_ms: 100,
@@ -7995,6 +8910,7 @@ mod tests {
                 attempts: vec![super::AttemptHistoryRecord {
                     attempt_id: crate::domain::UpstreamAttemptId::new(),
                     attempt_index: 0,
+                    attempt_role: super::AttemptRole::Ordinary,
                     route_id,
                     route_name: "Priority route".to_owned(),
                     started_at_ms: 100,
@@ -8090,6 +9006,7 @@ mod tests {
                 attempts: vec![super::AttemptHistoryRecord {
                     attempt_id: crate::domain::UpstreamAttemptId::new(),
                     attempt_index: 0,
+                    attempt_role: super::AttemptRole::Ordinary,
                     route_id,
                     route_name: "Omit route".to_owned(),
                     started_at_ms: 100,

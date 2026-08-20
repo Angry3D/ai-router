@@ -5,17 +5,18 @@ use router_core::{
     app_api::{
         ApplicationUpdateFailureDto, ApplicationUpdateNotesDto, ApplicationUpdateOperationDto,
         ApplicationUpdateProgressDto, ApplicationUpdateReleaseDto, ApplicationUpdateSnapshotDto,
-        BalanceQueryEditDto, BalanceQuerySettingsDto, BalanceTestInputDto, CodexBaselineSummaryDto,
-        CodexImagesMcpRepairPreviewDto, CodexModelDto, CodexModelsActivation,
-        CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto, CodexRecoveryUpdatePreviewDto,
-        CodexRestartNoticeDto, FallbackStopReasonDto, HistorySummaryDto,
-        ImagesGenerationSettingsDto, MenuSnapshotDto, MetadataFailureDto, RecoveryCandidateDto,
-        RecoveryHealthDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
-        ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
-        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto,
-        SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto, UsageAttemptDto, UsageCostDto,
-        UsageCostStateDto, UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto,
-        UsageHistoryQueryDto, UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
+        AttemptRoleDto, BalanceQueryEditDto, BalanceQuerySettingsDto, BalanceTestInputDto,
+        CodexBaselineSummaryDto, CodexImagesMcpRepairPreviewDto, CodexModelDto,
+        CodexModelsActivation, CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto,
+        CodexRecoveryUpdatePreviewDto, CodexRestartNoticeDto, FallbackStopReasonDto,
+        HistorySummaryDto, ImagesGenerationSettingsDto, MenuSnapshotDto, MetadataFailureDto,
+        RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
+        ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
+        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
+        RouteSaveResultDto, RoutingDecisionDto, RoutingSkippedRouteDto, SettingsSnapshotDto,
+        UpdateImagesGenerationSettingsInputDto, UsageAttemptDto, UsageCostDto, UsageCostStateDto,
+        UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto,
+        UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
         UsageStatisticsAttributionDimensionDto, UsageStatisticsAttributionDto,
         UsageStatisticsAttributionMetricDto, UsageStatisticsBucketDto, UsageStatisticsDto,
         UsageStatisticsGranularityDto, UsageStatisticsQueryDto, UsageStatisticsTokensDto,
@@ -36,12 +37,13 @@ use router_core::{
     lifecycle::{AppLifecycleIssue, AppLifecyclePhase, AppLifecycleSnapshot},
     recovery::{DatabaseStartupIssue, RecoveryHealthKind},
     state::{
-        BootstrapSnapshotDto, FallbackStateDto, IpcErrorDto, MutationResultDto, RouteSummaryDto,
-        StateArea, StateChangedEventDto,
+        BootstrapSnapshotDto, FallbackStateDto, IpcErrorDto, MutationResultDto, RouteHealthDto,
+        RouteHealthOriginDto, RouteSummaryDto, StateArea, StateChangedEventDto,
     },
 };
 use ts_rs::TS;
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn Error>> {
     let output = env::args_os()
         .nth(1)
@@ -59,6 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     AppLifecycleIssue::export_all_to(&output)?;
     AppLifecyclePhase::export_all_to(&output)?;
     AppLifecycleSnapshot::export_all_to(&output)?;
+    AttemptRoleDto::export_all_to(&output)?;
     BalanceQuerySettingsDto::export_all_to(&output)?;
     BalanceQueryMode::export_all_to(&output)?;
     BalanceQueryEditDto::export_all_to(&output)?;
@@ -88,6 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     RouteSaveInputDto::export_all_to(&output)?;
     RouteSaveResultDto::export_all_to(&output)?;
     RoutingDecisionDto::export_all_to(&output)?;
+    RoutingSkippedRouteDto::export_all_to(&output)?;
     SettingsSnapshotDto::export_all_to(&output)?;
     UpdateImagesGenerationSettingsInputDto::export_all_to(&output)?;
     UsageAttemptDto::export_all_to(&output)?;
@@ -140,6 +144,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     FallbackStateDto::export_all_to(&output)?;
     IpcErrorDto::export_all_to(&output)?;
     MutationResultDto::export_all_to(&output)?;
+    RouteHealthDto::export_all_to(&output)?;
+    RouteHealthOriginDto::export_all_to(&output)?;
     RouteSummaryDto::export_all_to(&output)?;
     StateArea::export_all_to(&output)?;
     StateChangedEventDto::export_all_to(&output)?;

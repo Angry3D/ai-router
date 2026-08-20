@@ -261,6 +261,7 @@ async fn assert_persistence_and_privacy(
             failure_reason: None,
             observed_at_ms: None,
         },
+        health: None,
     })
     .expect("normal route DTO");
     for forbidden in [
@@ -365,6 +366,7 @@ async fn responses_flow_preserves_transport_and_enforces_privacy_allowlist() {
         base_url: BaseUrl::parse(&route.base_url).expect("base URL"),
         api_key: Arc::new(ApiKey::parse(API_KEY_SENTINEL).expect("API Key")),
         service_tier_policy: ServiceTierPolicy::Passthrough,
+        fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
     })));
     let proxy = ProxyServerHandle::start(0, build_proxy_router(proxy_state))
         .await
@@ -460,12 +462,14 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         base_url: BaseUrl::parse(&route.base_url).expect("base URL"),
         api_key: Arc::new(ApiKey::parse(IMAGE_ROUTE_KEY_SENTINEL).expect("image route key")),
         service_tier_policy: ServiceTierPolicy::Passthrough,
+        fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
     });
     let routing = RoutingSnapshotStore::new(RoutingSnapshot {
         active: None,
         participants: Vec::new(),
         enabled: false,
         selection_generation: 0,
+        health_generation: 0,
         config_revision: 0,
         images_generation_enabled: true,
         images_route: Some(image_route),
@@ -562,6 +566,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
             failure_reason: None,
             observed_at_ms: None,
         },
+        health: None,
     })
     .expect("normal route DTO");
     let recovery_manager = RecoveryManager::new(&database_path);
@@ -765,6 +770,7 @@ async fn seed_excluded_recovery_history(database: &DatabaseExecutor, route: &Rou
             attempts: vec![AttemptHistoryRecord {
                 attempt_id: UpstreamAttemptId::new(),
                 attempt_index: 0,
+                attempt_role: router_core::storage::AttemptRole::Ordinary,
                 route_id: route.route_id.clone(),
                 route_name: RECOVERY_EXCLUDED_SENTINEL.to_owned(),
                 started_at_ms: 10,

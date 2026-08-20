@@ -126,6 +126,7 @@ const routes = [
       failureReason: null,
       observedAtMs: Date.now(),
     },
+    health: null,
   },
   {
     routeId: personalRouteId,
@@ -137,6 +138,7 @@ const routes = [
       failureReason: null,
       observedAtMs: Date.now(),
     },
+    health: null,
   },
   {
     routeId: ciiiRouteId,
@@ -148,6 +150,7 @@ const routes = [
       failureReason: null,
       observedAtMs: Date.now(),
     },
+    health: null,
   },
   {
     routeId: testRouteId,
@@ -159,6 +162,7 @@ const routes = [
       failureReason: null,
       observedAtMs: null,
     },
+    health: null,
   },
 ];
 
@@ -306,6 +310,26 @@ export const previewSettingsSnapshot: SettingsSnapshotDto = {
   },
 };
 
+export const previewFallbackUiSettingsSnapshot: SettingsSnapshotDto = {
+  ...previewSettingsSnapshot,
+  routes: previewSettingsSnapshot.routes.map((route, index) => ({
+    ...route,
+    health:
+      index === 0
+        ? { kind: "striking", failureCount: 3 }
+        : index === 1
+          ? {
+              kind: "open",
+              origin: "provider_failure",
+              recoverySuccesses: 0,
+              retryAfterSeconds: 118,
+            }
+          : index === 2
+            ? { kind: "probing", recoverySuccesses: 1 }
+            : null,
+  })),
+};
+
 export const previewMissingImageRouteSettingsSnapshot: SettingsSnapshotDto = {
   ...previewSettingsSnapshot,
   imagesGeneration: { enabled: true, routeId: null, timeoutSecs: 600 },
@@ -323,6 +347,7 @@ const previewLongRoutes = [
       failureReason: null,
       observedAtMs: null,
     },
+    health: null,
   })),
 ];
 
@@ -447,6 +472,7 @@ export const previewRouteEdits: RouteEditDto[] = routes.map((route, index) => ({
     enabled: true,
     customSource: "",
   },
+  fallbackExcludedModels: [],
   models:
     index === 0
       ? [
@@ -471,6 +497,15 @@ export const previewRouteEdits: RouteEditDto[] = routes.map((route, index) => ({
           ]
         : [],
 }));
+
+export const previewFallbackUiRouteEdits: RouteEditDto[] =
+  previewRouteEdits.map((route, index) => ({
+    ...route,
+    fallbackExcludedModels:
+      index === 0
+        ? ["gpt-5.6-luna", "gpt-5.2-codex", "relay-preview-model"]
+        : route.fallbackExcludedModels,
+  }));
 
 export const previewUsageRouteOptions: UsageRouteOptionDto[] = [
   { routeId: workRouteId, name: "演示主路由", retained: false },
@@ -910,6 +945,7 @@ export const previewUsageRequestDetails: UsageRequestDetailDto[] =
         ? [
             {
               attemptIndex: 0,
+              attemptRole: "ordinary",
               routeId: workRouteId,
               routeName: "演示主路由",
               startedAtMs: request.startedAtMs,
@@ -944,6 +980,7 @@ export const previewUsageRequestDetails: UsageRequestDetailDto[] =
             },
             {
               attemptIndex: 1,
+              attemptRole: "ordinary",
               routeId: workRouteId,
               routeName: "演示主路由",
               startedAtMs: request.startedAtMs + 900,
@@ -974,10 +1011,12 @@ export const previewUsageRequestDetails: UsageRequestDetailDto[] =
                 kind: "activate_next",
                 targetRouteId: personalRouteId,
                 targetRouteName: "演示备用路由",
+                skippedRoutes: [],
               },
             },
             {
               attemptIndex: 2,
+              attemptRole: "ordinary",
               routeId: personalRouteId,
               routeName: "演示备用路由",
               startedAtMs: request.startedAtMs + 1_800,
