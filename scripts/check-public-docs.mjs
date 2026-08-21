@@ -23,6 +23,7 @@ const REQUIRED_FILES = [
   "docs/engineering/releasing.md",
   "docs/engineering/verification.md",
   "docs/engineering/github-security-settings.md",
+  "docs/images/readme/README.md",
   "release-notes/README.md",
   ".github/ISSUE_TEMPLATE/bug_report.yml",
   ".github/ISSUE_TEMPLATE/feature_request.yml",
