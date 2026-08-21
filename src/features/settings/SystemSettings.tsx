@@ -9,6 +9,7 @@ import {
   normalizeIpcError,
   openRuntimeLogDirectory,
   updateBalanceQuerySettings,
+  updateMenuBarSettings,
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
 import { useAppearance } from "../appearance/useAppearance";
@@ -16,6 +17,7 @@ import type { AppearancePreference } from "../../generated";
 import type {
   ApplicationUpdateSnapshotDto,
   BalanceQuerySettingsDto,
+  MenuBarSettingsDto,
   RecoveryHealthKind,
   SettingsSnapshotDto,
 } from "../../generated";
@@ -30,6 +32,7 @@ import {
   SettingsReadonlyRow,
   SettingsSection,
   SettingsStatus,
+  SettingsSwitch,
   SettingsTextInput,
   type SettingsConfirmation,
   type SettingsTone,
@@ -54,10 +57,69 @@ export function SystemSettings({
   return (
     <SettingsPage title="系统" titleId="system-title">
       <AppearanceSettings />
+      <MenuBarSettings snapshot={snapshot} />
       <ApplicationUpdateSettings snapshot={applicationUpdate} />
       <ParameterSettings snapshot={snapshot} />
       <DataLogSettings snapshot={snapshot} />
     </SettingsPage>
+  );
+}
+
+function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
+  const queryClient = useQueryClient();
+  const [confirmed, setConfirmed] = useState<MenuBarSettingsDto>(snapshot.menuBar);
+  const [draft, setDraft] = useState<MenuBarSettingsDto>(snapshot.menuBar);
+  const snapshotKey = `${snapshot.menuBar.statusTextEnabled}:${snapshot.menuBar.activityAnimationEnabled}`;
+  const [syncedSnapshotKey, setSyncedSnapshotKey] = useState(snapshotKey);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!pending && syncedSnapshotKey !== snapshotKey) {
+    setSyncedSnapshotKey(snapshotKey);
+    setConfirmed(snapshot.menuBar);
+    setDraft(snapshot.menuBar);
+  }
+
+  async function submit(next: MenuBarSettingsDto) {
+    setDraft(next);
+    setPending(true);
+    setError(null);
+    try {
+      await updateMenuBarSettings(next);
+      setConfirmed(next);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
+    } catch (reason) {
+      setDraft(confirmed);
+      setError(normalizeIpcError(reason).message);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <SettingsSection title="菜单栏">
+      <div className="menu-bar-settings-list" aria-busy={pending}>
+        <SettingsSwitch
+          label="菜单栏状态文字"
+          checked={draft.statusTextEnabled}
+          disabled={pending}
+          onChange={(event) =>
+            void submit({ ...draft, statusTextEnabled: event.currentTarget.checked })
+          }
+        />
+        <SettingsSwitch
+          label="菜单栏活动动画"
+          checked={draft.activityAnimationEnabled}
+          disabled={pending}
+          onChange={(event) =>
+            void submit({ ...draft, activityAnimationEnabled: event.currentTarget.checked })
+          }
+        />
+      </div>
+      <p className="menu-bar-settings-error" role={error ? "alert" : undefined} aria-live="polite">
+        {error ?? "\u00a0"}
+      </p>
+    </SettingsSection>
   );
 }
 

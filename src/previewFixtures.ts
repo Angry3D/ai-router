@@ -276,6 +276,7 @@ export const previewSettingsSnapshot: SettingsSnapshotDto = {
     hasNext: true,
   },
   proxyPort: 32189,
+  menuBar: { statusTextEnabled: true, activityAnimationEnabled: true },
   imagesGeneration: { enabled: true, routeId: workRouteId, timeoutSecs: 600 },
   codexStatus: "changed",
   baseline: {

@@ -18,6 +18,7 @@ import type {
   ConfigOperationResult,
   IpcErrorDto,
   MenuSnapshotDto,
+  MenuBarSettingsDto,
   MutationResultDto,
   ReachabilityResult,
   RecoveryHealthDto,
@@ -71,6 +72,7 @@ export const IPC_COMMANDS = {
   updateBalanceQuerySettings: "update_balance_query_settings",
   updateImagesGenerationSettings: "update_images_generation_settings",
   updateAppearancePreference: "update_appearance_preference",
+  updateMenuBarSettings: "update_menu_bar_settings",
   refreshBalance: "refresh_balance",
   refreshAllBalances: "refresh_all_balances",
   testBalanceQuery: "test_balance_query",
@@ -138,6 +140,12 @@ export async function getMenuSnapshot(): Promise<MenuSnapshotDto> {
 
 export async function getSettingsSnapshot(): Promise<SettingsSnapshotDto> {
   return invoke<SettingsSnapshotDto>(IPC_COMMANDS.getSettingsSnapshot);
+}
+
+export async function updateMenuBarSettings(
+  input: MenuBarSettingsDto,
+): Promise<MutationResultDto> {
+  return invoke<MutationResultDto>(IPC_COMMANDS.updateMenuBarSettings, { input });
 }
 
 export async function getApplicationUpdateSnapshot(): Promise<ApplicationUpdateSnapshotDto> {

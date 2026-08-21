@@ -31,7 +31,7 @@ use crate::domain::{
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 const GENERAL_BALANCE_SOURCE_HASHES: [&str; 3] = [
     "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507",
@@ -55,6 +55,8 @@ type AppSettingsRow = (
     i64,
     String,
     Option<i64>,
+    i64,
+    i64,
 );
 
 #[derive(Clone)]
@@ -165,6 +167,13 @@ pub struct AppSettingsRecord {
     pub images_generation_timeout: ImagesGenerationTimeout,
     pub appearance_preference: AppearancePreference,
     pub last_automatic_update_check_at_ms: Option<i64>,
+    pub menu_bar: MenuBarSettingsRecord,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MenuBarSettingsRecord {
+    pub status_text_enabled: bool,
+    pub activity_animation_enabled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1977,8 +1986,10 @@ impl DatabaseExecutor {
                 images_generation_timeout_secs,
                 appearance_preference,
                 last_automatic_update_check_at_ms,
+                menu_bar_status_text_enabled,
+                menu_bar_activity_animation_enabled,
             ): AppSettingsRow = connection.query_row(
-                "SELECT proxy_port, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms FROM app_settings WHERE singleton = 1",
+                "SELECT proxy_port, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
@@ -1992,6 +2003,8 @@ impl DatabaseExecutor {
                         row.get(7)?,
                         row.get(8)?,
                         row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
                     ))
                 },
             )?;
@@ -2033,7 +2046,46 @@ impl DatabaseExecutor {
                 images_generation_timeout,
                 appearance_preference: AppearancePreference::parse_persisted(&appearance_preference)?,
                 last_automatic_update_check_at_ms,
+                menu_bar: MenuBarSettingsRecord {
+                    status_text_enabled: parse_persisted_bool(menu_bar_status_text_enabled)?,
+                    activity_animation_enabled: parse_persisted_bool(
+                        menu_bar_activity_animation_enabled,
+                    )?,
+                },
             })
+        })
+        .await
+    }
+
+    /// Atomically persists the two non-critical menu bar presentation preferences.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, transaction, or persisted-value validation error.
+    pub async fn set_menu_bar_settings(
+        &self,
+        status_text_enabled: bool,
+        activity_animation_enabled: bool,
+    ) -> Result<bool, StorageError> {
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let current: (i64, i64) = transaction.query_row(
+                "SELECT menu_bar_status_text_enabled, menu_bar_activity_animation_enabled FROM app_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let current = (parse_persisted_bool(current.0)?, parse_persisted_bool(current.1)?);
+            let next = (status_text_enabled, activity_animation_enabled);
+            if current == next {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            transaction.execute(
+                "UPDATE app_settings SET menu_bar_status_text_enabled = ?1, menu_bar_activity_animation_enabled = ?2 WHERE singleton = 1",
+                params![status_text_enabled, activity_animation_enabled],
+            )?;
+            transaction.commit()?;
+            Ok(true)
         })
         .await
     }
@@ -3732,6 +3784,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     if version < 20 {
         migrate_v20(connection)?;
     }
+    if version < 21 {
+        migrate_v21(connection)?;
+    }
     Ok(())
 }
 
@@ -4282,6 +4337,21 @@ fn migrate_v20(connection: &mut Connection) -> Result<(), StorageError> {
         ALTER TABLE proxy_requests DROP COLUMN fallback_stop_reason_v20;
 
         PRAGMA user_version = 20;
+        ",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v21(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "
+        ALTER TABLE app_settings ADD COLUMN menu_bar_status_text_enabled INTEGER NOT NULL DEFAULT 1
+            CHECK (menu_bar_status_text_enabled IN (0, 1));
+        ALTER TABLE app_settings ADD COLUMN menu_bar_activity_animation_enabled INTEGER NOT NULL DEFAULT 1
+            CHECK (menu_bar_activity_animation_enabled IN (0, 1));
+        PRAGMA user_version = 21;
         ",
     )?;
     transaction.commit()?;
@@ -4918,8 +4988,8 @@ mod tests {
         is_general_balance_source_hash, materialize_routing_decisions, migrate_v1, migrate_v2,
         migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7, migrate_v8, migrate_v9,
         migrate_v10, migrate_v11, migrate_v12, migrate_v13, migrate_v14, migrate_v15, migrate_v16,
-        migrate_v17, migrate_v18, migrate_v19, statistics_attribution, statistics_bucket_windows,
-        validate_balance_query,
+        migrate_v17, migrate_v18, migrate_v19, migrate_v20, migrate_v21, statistics_attribution,
+        statistics_bucket_windows, validate_balance_query,
     };
     use crate::{
         balance::{BalanceQueryMode, BalanceRouteSource, LEGACY_GENERAL_V1_SOURCE},
@@ -4938,6 +5008,115 @@ mod tests {
         let database = DatabaseExecutor::open(directory.path().join("data/router.sqlite3"))
             .expect("database opens");
         (directory, database)
+    }
+
+    #[tokio::test]
+    async fn menu_bar_settings_default_update_and_noop_are_non_critical() {
+        let (_directory, database) = database();
+        let settings = database.app_settings().await.expect("settings");
+        assert!(settings.menu_bar.status_text_enabled);
+        assert!(settings.menu_bar.activity_animation_enabled);
+        let revision = database.critical_revision().await.expect("revision");
+
+        assert!(
+            database
+                .set_menu_bar_settings(false, true)
+                .await
+                .expect("change")
+        );
+        assert!(
+            !database
+                .set_menu_bar_settings(false, true)
+                .await
+                .expect("no-op")
+        );
+        assert_eq!(
+            database.critical_revision().await.expect("revision"),
+            revision
+        );
+        let settings = database.app_settings().await.expect("updated settings");
+        assert!(!settings.menu_bar.status_text_enabled);
+        assert!(settings.menu_bar.activity_animation_enabled);
+        database
+            .test_execute(|connection| {
+                connection.pragma_update(None, "ignore_check_constraints", true)?;
+                connection.execute(
+                    "UPDATE app_settings SET menu_bar_activity_animation_enabled = 2",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("corrupt fixture");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Initialization)
+        ));
+    }
+
+    fn migrate_test_database_to_v20(connection: &mut Connection) {
+        migrate_v1(connection).expect("v1");
+        migrate_v2(connection).expect("v2");
+        migrate_v3(connection).expect("v3");
+        migrate_v4(connection).expect("v4");
+        migrate_v5(connection).expect("v5");
+        migrate_v6(connection).expect("v6");
+        migrate_v7(connection).expect("v7");
+        migrate_v8(connection).expect("v8");
+        migrate_v9(connection).expect("v9");
+        migrate_v10(connection).expect("v10");
+        migrate_v11(connection).expect("v11");
+        migrate_v12(connection).expect("v12");
+        migrate_v13(connection).expect("v13");
+        migrate_v14(connection).expect("v14");
+        migrate_v15(connection).expect("v15");
+        migrate_v16(connection).expect("v16");
+        migrate_v17(connection).expect("v17");
+        migrate_v18(connection).expect("v18");
+        migrate_v19(connection).expect("v19");
+        migrate_v20(connection).expect("v20");
+    }
+
+    #[test]
+    fn migration_v21_defaults_both_menu_bar_preferences_and_rolls_back_atomically() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v20(&mut connection);
+        migrate_v21(&mut connection).expect("v21");
+        let values: (i64, i64) = connection
+            .query_row(
+                "SELECT menu_bar_status_text_enabled, menu_bar_activity_animation_enabled FROM app_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("menu bar settings");
+        assert_eq!(values, (1, 1));
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            21
+        );
+
+        let mut rollback = Connection::open_in_memory().expect("rollback database");
+        migrate_test_database_to_v20(&mut rollback);
+        rollback
+            .execute(
+                "ALTER TABLE app_settings ADD COLUMN menu_bar_activity_animation_enabled INTEGER",
+                [],
+            )
+            .expect("collision column");
+        assert!(migrate_v21(&mut rollback).is_err());
+        assert_eq!(
+            rollback
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            20
+        );
+        assert!(
+            rollback
+                .prepare("SELECT menu_bar_status_text_enabled FROM app_settings")
+                .is_err()
+        );
     }
 
     #[tokio::test]

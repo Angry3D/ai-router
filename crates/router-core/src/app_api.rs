@@ -993,6 +993,15 @@ pub struct SettingsSnapshotDto {
     pub history: HistorySummaryDto,
     pub metadata_failure: MetadataFailureDto,
     pub recovery: RecoveryHealthDto,
+    pub menu_bar: MenuBarSettingsDto,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct MenuBarSettingsDto {
+    pub status_text_enabled: bool,
+    pub activity_animation_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

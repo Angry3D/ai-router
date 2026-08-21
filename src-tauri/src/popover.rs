@@ -509,7 +509,11 @@ pub(crate) fn tray_presentation(
 
 #[must_use]
 pub fn initial_tray_title(isolated: bool) -> String {
-    with_qa_prefix("无中转(--)", isolated)
+    if isolated {
+        "QA".to_owned()
+    } else {
+        String::new()
+    }
 }
 
 fn with_qa_prefix(title: &str, isolated: bool) -> String {

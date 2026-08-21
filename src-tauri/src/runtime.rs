@@ -15,13 +15,13 @@ use router_core::{
         BalanceQueryEditDto, BalanceQuerySettingsDto, BalanceTestInputDto, CodexBaselineSummaryDto,
         CodexImagesMcpRepairPreviewDto, CodexModelDto, CodexModelsActivation,
         CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto, CodexRecoveryUpdatePreviewDto,
-        CodexRestartNoticeDto, HistorySummaryDto, ImagesGenerationSettingsDto, MenuSnapshotDto,
-        MetadataFailureDto, RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
-        ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
-        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
-        RouteSaveResultDto, SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
-        UsageHistoryPageDto, UsageHistoryQueryDto, UsageRequestDetailDto, UsageRouteOptionDto,
-        UsageStatisticsDto, UsageStatisticsQueryDto,
+        CodexRestartNoticeDto, HistorySummaryDto, ImagesGenerationSettingsDto, MenuBarSettingsDto,
+        MenuSnapshotDto, MetadataFailureDto, RecoveryCandidateDto, RecoveryHealthDto,
+        RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult,
+        RouteActivationPreviewDto, RouteActivationResultDto, RouteCatalogMode, RouteEditDto,
+        RouteSaveInputDto, RouteSaveResultDto, SettingsSnapshotDto,
+        UpdateImagesGenerationSettingsInputDto, UsageHistoryPageDto, UsageHistoryQueryDto,
+        UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsDto, UsageStatisticsQueryDto,
     },
     balance::{
         BalanceCoordinator, BalanceDisplaySnapshot, BalanceExecutor, BalanceQueryConfig,
@@ -67,9 +67,9 @@ use router_core::{
         RuntimeProjectionUpdate, StateArea,
     },
     storage::{
-        BalanceQueryInput, CodexModelRecord, CodexRestartNoticeRecord, CreateRouteInput,
-        DeleteRouteResult, StorageError, UpdateRouteInput, normalize_codex_model_records,
-        normalize_fallback_excluded_models,
+        AppSettingsRecord, BalanceQueryInput, CodexModelRecord, CodexRestartNoticeRecord,
+        CreateRouteInput, DeleteRouteResult, StorageError, UpdateRouteInput,
+        normalize_codex_model_records, normalize_fallback_excluded_models,
     },
     storage::{DatabaseExecutor, SecretStore, SqliteBalanceRouteSource, SqliteSecretStore},
 };
@@ -87,6 +87,14 @@ pub enum DesktopRuntimeProfile {
     Production,
     Isolated,
 }
+
+const STARTUP_STATE_AREAS: [StateArea; 5] = [
+    StateArea::Routes,
+    StateArea::Route,
+    StateArea::Fallback,
+    StateArea::ImagesGeneration,
+    StateArea::MenuBar,
+];
 
 impl DesktopRuntimeProfile {
     #[must_use]
@@ -246,6 +254,7 @@ pub struct DesktopLifecycleServices {
     routing_write_gate: Arc<tokio::sync::Mutex<()>>,
     codex_projection_gate: Arc<tokio::sync::Mutex<()>>,
     balance_settings_write_gate: tokio::sync::Mutex<()>,
+    menu_bar_settings_write_gate: tokio::sync::Mutex<()>,
     codex_model_retry: tokio::sync::Mutex<Option<CodexModelRetryPermit>>,
     codex_model_retry_generation: AtomicU64,
     route_activation_permit: tokio::sync::Mutex<Option<RouteActivationPermit>>,
@@ -348,6 +357,7 @@ impl DesktopLifecycleServices {
             routing_write_gate: Arc::new(tokio::sync::Mutex::new(())),
             codex_projection_gate: Arc::new(tokio::sync::Mutex::new(())),
             balance_settings_write_gate: tokio::sync::Mutex::new(()),
+            menu_bar_settings_write_gate: tokio::sync::Mutex::new(()),
             codex_model_retry: tokio::sync::Mutex::new(None),
             codex_model_retry_generation: AtomicU64::new(0),
             route_activation_permit: tokio::sync::Mutex::new(None),
@@ -475,6 +485,7 @@ impl DesktopLifecycleServices {
                 fallback: Some(fallback),
                 proxy_status: None,
                 appearance_preference: None,
+                menu_bar_settings: None,
             },
         )?;
         Ok(mutation)
@@ -794,6 +805,7 @@ impl DesktopLifecycleServices {
         let database = self.database_for_ipc().await?;
         let recovery = self.recovery_for_ipc().await?;
         let settings = database.app_settings().await.map_err(map_storage_error)?;
+        let menu_bar = menu_bar_settings_dto(&settings);
         let history = database
             .history_summary()
             .await
@@ -877,6 +889,7 @@ impl DesktopLifecycleServices {
             },
             metadata_failure,
             recovery: RecoveryHealthDto::from(&recovery.health()),
+            menu_bar,
         })
     }
 
@@ -1486,6 +1499,32 @@ impl DesktopLifecycleServices {
             vec![StateArea::Appearance],
             RuntimeProjectionUpdate {
                 appearance_preference: Some(appearance_preference),
+                ..RuntimeProjectionUpdate::default()
+            },
+        )?;
+        Ok(mutation)
+    }
+
+    pub async fn update_menu_bar_settings(
+        &self,
+        input: MenuBarSettingsDto,
+    ) -> Result<MutationResultDto, IpcErrorDto> {
+        let _write = self.menu_bar_settings_write_gate.lock().await;
+        let database = self.database_for_ipc().await?;
+        let changed = database
+            .set_menu_bar_settings(input.status_text_enabled, input.activity_animation_enabled)
+            .await
+            .map_err(map_storage_error)?;
+        if !changed {
+            return Ok(MutationResultDto {
+                revision: self.runtime_state.bootstrap_snapshot().revision,
+            });
+        }
+        let ((), mutation) = self.runtime_state.apply_committed::<_, IpcErrorDto>(
+            Ok(()),
+            vec![StateArea::MenuBar],
+            RuntimeProjectionUpdate {
+                menu_bar_settings: Some(input),
                 ..RuntimeProjectionUpdate::default()
             },
         )?;
@@ -2951,18 +2990,14 @@ impl AppLifecycleServices for DesktopLifecycleServices {
             .await?;
         let _ = self.runtime_state.apply_committed::<_, ()>(
             Ok(()),
-            vec![
-                StateArea::Routes,
-                StateArea::Route,
-                StateArea::Fallback,
-                StateArea::ImagesGeneration,
-            ],
+            STARTUP_STATE_AREAS.to_vec(),
             RuntimeProjectionUpdate {
                 routes: Some(summaries),
                 active_route_id: Some(active_route_id),
                 fallback: Some(fallback),
                 proxy_status: None,
                 appearance_preference: Some(settings.appearance_preference),
+                menu_bar_settings: Some(menu_bar_settings_dto(&settings)),
             },
         );
         *self.proxy.lock().await = Some(server);
@@ -3341,6 +3376,14 @@ pub async fn update_appearance_preference(
 }
 
 #[tauri::command]
+pub async fn update_menu_bar_settings(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+    input: MenuBarSettingsDto,
+) -> Result<MutationResultDto, IpcErrorDto> {
+    services.update_menu_bar_settings(input).await
+}
+
+#[tauri::command]
 pub async fn update_images_generation_settings(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     input: UpdateImagesGenerationSettingsInputDto,
@@ -3564,6 +3607,13 @@ fn empty_metadata_failure() -> MetadataFailureDto {
         dropped_records: 0,
         write_failures: 0,
         last_error: None,
+    }
+}
+
+fn menu_bar_settings_dto(settings: &AppSettingsRecord) -> MenuBarSettingsDto {
+    MenuBarSettingsDto {
+        status_text_enabled: settings.menu_bar.status_text_enabled,
+        activity_animation_enabled: settings.menu_bar.activity_animation_enabled,
     }
 }
 
@@ -5512,6 +5562,99 @@ mod tests {
         assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
 
         services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn menu_bar_settings_mutation_persists_projects_and_noops() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        events.0.lock().expect("event sink lock").clear();
+        let input = MenuBarSettingsDto {
+            status_text_enabled: false,
+            activity_animation_enabled: true,
+        };
+
+        let mutation = services
+            .update_menu_bar_settings(input)
+            .await
+            .expect("update menu bar");
+        assert_eq!(runtime.menu_bar_settings(), Some(input));
+        assert_eq!(
+            services
+                .settings_snapshot()
+                .await
+                .expect("settings")
+                .menu_bar,
+            input
+        );
+        let menu_bar_events = events
+            .0
+            .lock()
+            .expect("event sink lock")
+            .iter()
+            .filter(|event| event.areas == [StateArea::MenuBar])
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            menu_bar_events,
+            vec![StateChangedEventDto {
+                revision: mutation.revision,
+                areas: vec![StateArea::MenuBar],
+            }]
+        );
+        let repeated = services
+            .update_menu_bar_settings(input)
+            .await
+            .expect("unchanged menu bar");
+        assert_eq!(repeated.revision, runtime.bootstrap_snapshot().revision);
+        assert_eq!(
+            events
+                .0
+                .lock()
+                .expect("event sink lock")
+                .iter()
+                .filter(|event| event.areas == [StateArea::MenuBar])
+                .count(),
+            1
+        );
+
+        services.close_database().await;
+        let failed = services
+            .update_menu_bar_settings(MenuBarSettingsDto {
+                status_text_enabled: true,
+                activity_animation_enabled: false,
+            })
+            .await;
+        assert!(failed.is_err());
+        assert_eq!(runtime.menu_bar_settings(), Some(input));
+        assert_eq!(
+            events
+                .0
+                .lock()
+                .expect("event sink lock")
+                .iter()
+                .filter(|event| event.areas == [StateArea::MenuBar])
+                .count(),
+            1
+        );
+        let persisted = DatabaseExecutor::open(directory.path().join("router.sqlite3"))
+            .expect("reopen database")
+            .app_settings()
+            .await
+            .expect("persisted settings after failed write");
+        assert_eq!(menu_bar_settings_dto(&persisted), input);
     }
 
     #[tokio::test]

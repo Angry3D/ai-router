@@ -43,6 +43,7 @@ function renderWithData(view: "menu" | "settings") {
       hasNext: false,
     },
     proxyPort: 32189,
+    menuBar: { statusTextEnabled: true, activityAnimationEnabled: true },
     imagesGeneration: { enabled: false, routeId: null, timeoutSecs: 600 },
     codexStatus: "not_connected",
     baseline: { exists: false, originalExists: null, capturedAtMs: null },

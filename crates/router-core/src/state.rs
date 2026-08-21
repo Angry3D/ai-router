@@ -97,6 +97,7 @@ pub enum StateArea {
     RuntimeLogs,
     Recovery,
     Appearance,
+    MenuBar,
     ApplicationUpdate,
 }
 
@@ -190,6 +191,7 @@ struct RuntimeProjection {
     proxy_status: ProxyRuntimeStatus,
     lifecycle: AppLifecycleSnapshot,
     appearance_preference: AppearancePreference,
+    menu_bar_settings: Option<crate::app_api::MenuBarSettingsDto>,
 }
 
 impl Default for RuntimeProjection {
@@ -201,6 +203,7 @@ impl Default for RuntimeProjection {
             proxy_status: ProxyRuntimeStatus::Stopped,
             lifecycle: AppLifecycleSnapshot::default(),
             appearance_preference: AppearancePreference::System,
+            menu_bar_settings: None,
         }
     }
 }
@@ -217,6 +220,7 @@ pub struct RuntimeProjectionUpdate {
     pub fallback: Option<FallbackStateDto>,
     pub proxy_status: Option<ProxyRuntimeStatus>,
     pub appearance_preference: Option<AppearancePreference>,
+    pub menu_bar_settings: Option<crate::app_api::MenuBarSettingsDto>,
 }
 
 impl StateCoordinator {
@@ -284,6 +288,14 @@ impl AppRuntimeState {
         }
     }
 
+    #[must_use]
+    pub fn menu_bar_settings(&self) -> Option<crate::app_api::MenuBarSettingsDto> {
+        self.projection
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .menu_bar_settings
+    }
+
     pub fn publish_background_change(&self, areas: Vec<StateArea>) -> MutationResultDto {
         self.coordinator.publish_committed(areas)
     }
@@ -320,6 +332,9 @@ impl AppRuntimeState {
             }
             if let Some(appearance_preference) = update.appearance_preference {
                 projection.appearance_preference = appearance_preference;
+            }
+            if let Some(menu_bar_settings) = update.menu_bar_settings {
+                projection.menu_bar_settings = Some(menu_bar_settings);
             }
         }
         let mutation = self.coordinator.publish_committed(areas);
@@ -535,6 +550,7 @@ mod tests {
                     fallback: None,
                     proxy_status: Some(ProxyRuntimeStatus::Running),
                     appearance_preference: None,
+                    menu_bar_settings: None,
                 },
             )
             .expect("commit");

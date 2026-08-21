@@ -9,8 +9,8 @@ use router_core::{
         CodexBaselineSummaryDto, CodexImagesMcpRepairPreviewDto, CodexModelDto,
         CodexModelsActivation, CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto,
         CodexRecoveryUpdatePreviewDto, CodexRestartNoticeDto, FallbackStopReasonDto,
-        HistorySummaryDto, ImagesGenerationSettingsDto, MenuSnapshotDto, MetadataFailureDto,
-        RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
+        HistorySummaryDto, ImagesGenerationSettingsDto, MenuBarSettingsDto, MenuSnapshotDto,
+        MetadataFailureDto, RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
         ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
         RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
         RouteSaveResultDto, RoutingDecisionDto, RoutingSkippedRouteDto, SettingsSnapshotDto,
@@ -93,6 +93,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     RoutingDecisionDto::export_all_to(&output)?;
     RoutingSkippedRouteDto::export_all_to(&output)?;
     SettingsSnapshotDto::export_all_to(&output)?;
+    MenuBarSettingsDto::export_all_to(&output)?;
     UpdateImagesGenerationSettingsInputDto::export_all_to(&output)?;
     UsageAttemptDto::export_all_to(&output)?;
     UsageCostDto::export_all_to(&output)?;

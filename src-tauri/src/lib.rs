@@ -38,7 +38,7 @@ use runtime::{
     restore_recovery_point, retry_database_startup, runtime_log_bootstrap_plugin,
     runtime_log_plugin, save_route, set_fallback_enabled, show_settings_window,
     start_over_database, test_balance_query, update_appearance_preference,
-    update_balance_query_settings, update_images_generation_settings,
+    update_balance_query_settings, update_images_generation_settings, update_menu_bar_settings,
 };
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, ipc::Channel};
 
@@ -61,6 +61,7 @@ struct TrayRefreshCoordinator {
     activity: Mutex<TrayActivityProjection>,
     animation: Mutex<TrayAnimationProjection>,
     reduce_motion: AtomicU8,
+    activity_animation_enabled: AtomicBool,
     assets: TrayIconAssets,
 }
 
@@ -74,6 +75,7 @@ impl TrayRefreshCoordinator {
             activity: Mutex::new(TrayActivityProjection::default()),
             animation: Mutex::new(TrayAnimationProjection::default()),
             reduce_motion: AtomicU8::new(ReduceMotionState::from_observation(reduce_motion) as u8),
+            activity_animation_enabled: AtomicBool::new(false),
             assets,
         }
     }
@@ -152,6 +154,7 @@ impl TrayRefreshCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         activity.active
             && activity.revision == revision
+            && self.activity_animation_enabled.load(Ordering::Acquire)
             && !self
                 .animation
                 .lock()
@@ -160,7 +163,9 @@ impl TrayRefreshCoordinator {
     }
 
     fn transition_projection(&self, visual_state: TrayVisualState) -> TrayProjectionDecision {
-        let animated = visual_state == TrayVisualState::Active && !self.reduce_motion();
+        let animated = visual_state == TrayVisualState::Active
+            && self.activity_animation_enabled.load(Ordering::Acquire)
+            && !self.reduce_motion();
         let desired = if animated {
             TrayProjectionMode::Animated
         } else {
@@ -209,6 +214,28 @@ impl TrayRefreshCoordinator {
             animation.generation = animation.generation.saturating_add(1);
             animation.mode = None;
         }
+    }
+
+    fn set_activity_animation_enabled(&self, enabled: bool) -> bool {
+        let _apply_guard = self
+            .apply_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = self
+            .activity_animation_enabled
+            .swap(enabled, Ordering::AcqRel);
+        if previous == enabled {
+            return false;
+        }
+        let mut animation = self
+            .animation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !animation.shutdown {
+            animation.generation = animation.generation.saturating_add(1);
+            animation.mode = None;
+        }
+        true
     }
 
     fn shutdown(&self) {
@@ -316,13 +343,33 @@ fn decode_tray_icon(bytes: &'static [u8]) -> tauri::Result<tauri::image::Image<'
 
 impl StateEventSink for TauriStateEventSink {
     fn publish(&self, event: &StateChangedEventDto) -> Result<(), StateEventError> {
-        self.app_handle
-            .emit(STATE_CHANGED_EVENT, event)
-            .map_err(|_| StateEventError)?;
+        if event.areas.contains(&StateArea::MenuBar)
+            && let Some(runtime) = self.app_handle.try_state::<Arc<AppRuntimeState>>()
+            && let Some(settings) = runtime.menu_bar_settings()
+        {
+            let changed = self
+                .tray_refresh
+                .set_activity_animation_enabled(settings.activity_animation_enabled);
+            if changed && settings.activity_animation_enabled && self.tray_refresh.active() {
+                let revision = self
+                    .tray_refresh
+                    .activity
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .revision;
+                start_reduce_motion_monitor(
+                    self.app_handle.clone(),
+                    Arc::clone(&self.tray_refresh),
+                    revision,
+                );
+            }
+        }
         if state_event_affects_tray(event) {
             let _ = schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh));
         }
-        Ok(())
+        self.app_handle
+            .emit(STATE_CHANGED_EVENT, event)
+            .map_err(|_| StateEventError)
     }
 }
 
@@ -339,11 +386,17 @@ impl LogicalRequestActivitySink for TauriLogicalRequestActivitySink {
                 if !schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh)) {
                     return;
                 }
-                start_reduce_motion_monitor(
-                    self.app_handle.clone(),
-                    Arc::clone(&self.tray_refresh),
-                    transition.revision,
-                );
+                if self
+                    .tray_refresh
+                    .activity_animation_enabled
+                    .load(Ordering::Acquire)
+                {
+                    start_reduce_motion_monitor(
+                        self.app_handle.clone(),
+                        Arc::clone(&self.tray_refresh),
+                        transition.revision,
+                    );
+                }
                 return;
             }
             let _ = schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh));
@@ -377,12 +430,13 @@ fn schedule_tray_refresh(app_handle: AppHandle, refresh: Arc<TrayRefreshCoordina
             services.is_isolated(),
             refresh.active(),
         );
+        let menu_bar = runtime.menu_bar_settings();
         let _apply_guard = refresh
             .apply_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if refresh.can_apply(revision) {
-            apply_tray_projection(&app_handle, &refresh, presentation);
+            apply_tray_projection(&app_handle, &refresh, presentation, menu_bar);
         }
     });
     true
@@ -392,6 +446,7 @@ fn apply_tray_projection(
     app_handle: &AppHandle,
     refresh: &Arc<TrayRefreshCoordinator>,
     presentation: TrayPresentation,
+    menu_bar: Option<router_core::app_api::MenuBarSettingsDto>,
 ) {
     let decision = refresh.transition_projection(presentation.visual_state);
     let Some(tray) = app_handle.tray_by_id("main") else {
@@ -405,11 +460,28 @@ fn apply_tray_projection(
         };
         let _ = tray.set_icon_with_as_template(Some(image), true);
     }
-    let _ = tray.set_title(Some(presentation.title));
+    let title = project_tray_title(
+        presentation.title,
+        menu_bar,
+        app_handle.config().identifier != router_core::qa_acceptance::PRODUCTION_APP_IDENTIFIER,
+    );
+    let _ = tray.set_title(title);
     let _ = tray.set_tooltip(Some(presentation.tooltip));
 
     if decision.changed && decision.animated {
         start_tray_animation(app_handle.clone(), Arc::clone(refresh), decision.generation);
+    }
+}
+
+fn project_tray_title(
+    enabled_title: String,
+    menu_bar: Option<router_core::app_api::MenuBarSettingsDto>,
+    isolated: bool,
+) -> Option<String> {
+    match menu_bar {
+        Some(settings) if settings.status_text_enabled => Some(enabled_title),
+        _ if isolated => Some("QA".to_owned()),
+        _ => None,
     }
 }
 
@@ -511,7 +583,11 @@ fn state_event_affects_tray(event: &StateChangedEventDto) -> bool {
     event.areas.iter().any(|area| {
         matches!(
             area,
-            StateArea::Routes | StateArea::Route | StateArea::Balance | StateArea::Proxy
+            StateArea::Routes
+                | StateArea::Route
+                | StateArea::Balance
+                | StateArea::Proxy
+                | StateArea::MenuBar
         )
     })
 }
@@ -657,6 +733,7 @@ pub fn run() {
             set_fallback_enabled,
             update_balance_query_settings,
             update_appearance_preference,
+            update_menu_bar_settings,
             update_images_generation_settings,
             reorder_routes_and_fallback,
             refresh_balance,
@@ -749,8 +826,12 @@ fn setup_application(
         .icon(tray_icon)
         .icon_as_template(true)
         .tooltip(format!("{app_name} 正在启动"))
-        .title(initial_tray_title(profile.is_isolated()))
         .show_menu_on_left_click(false);
+    let tray_builder = if profile.is_isolated() {
+        tray_builder.title(initial_tray_title(true))
+    } else {
+        tray_builder
+    };
     tray_builder.build(app)?;
     let tray_refresh = Arc::new(TrayRefreshCoordinator::new(
         tray_assets,
@@ -843,6 +924,7 @@ mod tests {
             TrayIconAssets::decode().expect("tray assets"),
             Some(false),
         );
+        refresh.set_activity_animation_enabled(true);
         assert!(
             refresh.apply_activity_transition(LogicalRequestActivityTransition {
                 active: true,
@@ -887,6 +969,7 @@ mod tests {
             TrayIconAssets::decode().expect("tray assets"),
             Some(false),
         );
+        refresh.set_activity_animation_enabled(true);
         let active = refresh.transition_projection(TrayVisualState::Active);
         assert!(active.changed);
         assert!(active.animated);
@@ -915,6 +998,64 @@ mod tests {
         assert!(refresh.animation_is_current(before_shutdown.generation));
         refresh.shutdown();
         assert!(!refresh.animation_is_current(before_shutdown.generation));
+    }
+
+    #[test]
+    fn tray_activity_animation_setting_is_fail_closed_and_invalidates_active_generation() {
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
+        let unloaded = refresh.transition_projection(TrayVisualState::Active);
+        assert!(!unloaded.animated);
+
+        assert!(refresh.set_activity_animation_enabled(true));
+        let enabled = refresh.transition_projection(TrayVisualState::Active);
+        assert!(enabled.animated);
+        assert!(refresh.animation_is_current(enabled.generation));
+
+        assert!(refresh.set_activity_animation_enabled(false));
+        assert!(!refresh.animation_is_current(enabled.generation));
+        let disabled = refresh.transition_projection(TrayVisualState::Active);
+        assert!(!disabled.animated);
+    }
+
+    #[test]
+    fn tray_title_setting_preserves_only_qa_identity_when_unloaded_or_disabled() {
+        use router_core::app_api::MenuBarSettingsDto;
+
+        let enabled = Some(MenuBarSettingsDto {
+            status_text_enabled: true,
+            activity_animation_enabled: true,
+        });
+        let disabled = Some(MenuBarSettingsDto {
+            status_text_enabled: false,
+            activity_animation_enabled: true,
+        });
+        assert_eq!(
+            project_tray_title("Route($1)".to_owned(), None, false),
+            None
+        );
+        assert_eq!(
+            project_tray_title("Route($1)".to_owned(), None, true),
+            Some("QA".to_owned())
+        );
+        assert_eq!(
+            project_tray_title("Route($1)".to_owned(), enabled, false),
+            Some("Route($1)".to_owned())
+        );
+        assert_eq!(
+            project_tray_title("QA · Route($1)".to_owned(), enabled, true),
+            Some("QA · Route($1)".to_owned())
+        );
+        assert_eq!(
+            project_tray_title("Route($1)".to_owned(), disabled, false),
+            None
+        );
+        assert_eq!(
+            project_tray_title("QA · Route($1)".to_owned(), disabled, true),
+            Some("QA".to_owned())
+        );
     }
 
     #[test]
