@@ -182,6 +182,33 @@ export function validateVersionIndependentProjectClaims(files) {
   assertContains(files.get("README.md"), "GitHub Releases", "README.md");
 }
 
+export function validateReleaseInventoryContract(packageJson, files) {
+  if (
+    packageJson.scripts?.["release:inventory"] !==
+    "node scripts/release-inventory.mjs"
+  ) {
+    throw new PublicDocsError(
+      "package.json release:inventory does not invoke the release inventory checker.",
+    );
+  }
+  for (const path of [
+    "docs/engineering/releasing.md",
+    "release-notes/README.md",
+  ]) {
+    assertContains(files.get(path), "pnpm release:inventory", path);
+  }
+  assertContains(
+    files.get("docs/engineering/releasing.md"),
+    "不能自动证明语义完整性",
+    "docs/engineering/releasing.md",
+  );
+  assertContains(
+    files.get("release-notes/README.md"),
+    "record a concise exclusion reason",
+    "release-notes/README.md",
+  );
+}
+
 async function validateYaml(path, content) {
   if (content.includes("\t")) {
     throw new PublicDocsError(
@@ -268,6 +295,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
   }
 
   validateVersionIndependentProjectClaims(files);
+  validateReleaseInventoryContract(packageJson, files);
   assertContains(
     files.get("release-notes/README.md"),
     "`v<version>.md`",
