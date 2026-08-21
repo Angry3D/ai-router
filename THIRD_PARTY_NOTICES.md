@@ -23,18 +23,35 @@ Apache License 2.0 全文见
 ## Lucide icons
 
 - 本地文件：`src-tauri/icons/app-icon*.{svg,png,icns}`、`icon.png` 以及
-  `src-tauri/icons/tray-*.{svg,png}`
+  `src-tauri/icons/tray-*.{svg,png}`；`docs/images/readme/*.png` 中还包含应用界面渲染的
+  Lucide 图标
 - 上游项目：`lucide-icons/lucide`
 - 使用版本：`lucide-react 0.468.0`
 - 上游地址：<https://github.com/lucide-icons/lucide>
 - 许可证：ISC
 - 本地处理：Route、TriangleAlert 和 CircleX 几何经过缩放、描边和组合；应用图标的背景、
   颜色、QA 标记及整体构图为 AI Router 项目自有设计。PNG 与 ICNS 由仓库脚本从 SVG 生成。
+  README 截图是第一方界面的 QA 运行结果，截图中的 Lucide 图标随界面渲染；截图捕获与
+  SHA-256 记录见 `docs/images/readme/README.md`。
 
 Lucide 的版权与 ISC 许可全文见
 [`third-party/licenses/ISC-Lucide.txt`](./third-party/licenses/ISC-Lucide.txt)。
 图标源文件、生成链路和输出边界见
 [`src-tauri/icons/README.md`](./src-tauri/icons/README.md)。
+
+<!-- provenance:readme-product-screenshots -->
+
+## README 产品截图
+
+- 本地文件：`docs/images/readme/*.png`
+- 来源：AI Router 项目在 `AI Router QA.app` 中渲染的第一方界面
+- 许可证：第一方界面构图采用根 MIT License；其中渲染的 Lucide 图标继续采用 ISC
+- 本地处理：截图使用隔离 QA 数据和合成请求生成，发布前重新编码为 PNG，并完成画面、OCR、
+  元数据和 SHA-256 检查。
+
+捕获过程、合成数据边界和最终哈希见
+[`docs/images/readme/README.md`](./docs/images/readme/README.md)。Lucide 的 ISC 许可全文见
+[`third-party/licenses/ISC-Lucide.txt`](./third-party/licenses/ISC-Lucide.txt)。
 
 <!-- provenance:openai-pricing-snapshots -->
 
