@@ -146,7 +146,7 @@
     {
       "id": "readme-product-screenshots",
       "name": "AI Router README product screenshots",
-      "version": "2026-08-20 / 9dd77e99",
+      "version": "2026-08-21 / 9dd77e99",
       "license": "MIT; rendered Lucide icons remain ISC",
       "upstream": "https://github.com/Angry3D/ai-router",
       "noticeMarker": "<!-- provenance:readme-product-screenshots -->",
@@ -154,26 +154,26 @@
         "docs/images/readme/README.md",
         "docs/images/readme/menu-overview-dark.png",
         "docs/images/readme/menu-overview-light.png",
-        "docs/images/readme/usage-overview-dark.png",
-        "docs/images/readme/usage-overview-light.png",
+        "docs/images/readme/route-overview-dark.png",
+        "docs/images/readme/route-overview-light.png",
         "third-party/licenses/ISC-Lucide.txt"
       ],
       "sourceRecord": {
         "path": "docs/images/readme/README.md",
         "requiredStrings": [
           "<!-- provenance:readme-product-screenshots -->",
-          "2026-08-20",
+          "2026-08-21",
           "com.relax.airouter.qa",
           "Synthetic A",
-          "macOS Vision",
+          "查看完整画面",
           "ISC-Lucide.txt"
         ]
       },
       "hashes": {
         "docs/images/readme/menu-overview-dark.png": "6d742befee5a4f5cbae058006a2eb621d89f7bd22c5ed76359f2e45aa8c62a6b",
         "docs/images/readme/menu-overview-light.png": "13fd3aed0e73babaf668c1df8615398a62f0b9853ce0817f57b1b9b7325806a9",
-        "docs/images/readme/usage-overview-dark.png": "9f1584e5a02b27c90108e52f3c54ffda80474eb56b6f29f9d3394f610a57d626",
-        "docs/images/readme/usage-overview-light.png": "717f0490f6bc4aa7b40dc67f84cfc10271761dfd2ee772f1dd7bfd90908f3982",
+        "docs/images/readme/route-overview-dark.png": "65fca16ffdeb0c10c9bcc5fdf50f3695cac9e9b3eff9769e1252125e4819209b",
+        "docs/images/readme/route-overview-light.png": "4671029bbad6291584a8792ad86d2802833ccc05b34930d83aa051f52d83d9aa",
         "third-party/licenses/ISC-Lucide.txt": "1e7290b35280a048667bbf0ebabac1c7fd52a75300e8b2946ac165715997f2bc"
       }
     },
@@ -255,8 +255,8 @@
     "src-tauri/icons/tray-route.svg",
     "docs/images/readme/menu-overview-dark.png",
     "docs/images/readme/menu-overview-light.png",
-    "docs/images/readme/usage-overview-dark.png",
-    "docs/images/readme/usage-overview-light.png"
+    "docs/images/readme/route-overview-dark.png",
+    "docs/images/readme/route-overview-light.png"
   ],
   "declaredVisualAssetHashes": {
     "src-tauri/icons/app-icon-qa.icns": "0a74c4bcde5a87735a8e9bc07d77d5c21e2841d5f5019c431052ac5487a8ad4b",
@@ -286,8 +286,8 @@
     "src-tauri/icons/tray-route.svg": "6fb4e41d93fc838314107f2f392e1d40d26a808d7267aa4c609b511c139c02c1",
     "docs/images/readme/menu-overview-dark.png": "6d742befee5a4f5cbae058006a2eb621d89f7bd22c5ed76359f2e45aa8c62a6b",
     "docs/images/readme/menu-overview-light.png": "13fd3aed0e73babaf668c1df8615398a62f0b9853ce0817f57b1b9b7325806a9",
-    "docs/images/readme/usage-overview-dark.png": "9f1584e5a02b27c90108e52f3c54ffda80474eb56b6f29f9d3394f610a57d626",
-    "docs/images/readme/usage-overview-light.png": "717f0490f6bc4aa7b40dc67f84cfc10271761dfd2ee772f1dd7bfd90908f3982"
+    "docs/images/readme/route-overview-dark.png": "65fca16ffdeb0c10c9bcc5fdf50f3695cac9e9b3eff9769e1252125e4819209b",
+    "docs/images/readme/route-overview-light.png": "4671029bbad6291584a8792ad86d2802833ccc05b34930d83aa051f52d83d9aa"
   },
   "publicTree": {
     "forbiddenPathPrefixes": [".agents/", ".claude/", ".codex/", ".trellis/"],

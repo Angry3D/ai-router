@@ -29,11 +29,11 @@ Codex App 与多个兼容 OpenAI Responses API 的上游之间切换路由。它
 | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | <img src="./docs/images/readme/menu-overview-light.png" alt="AI Router 浅色主题菜单，显示四条合成路由、当前路由和 Fallback 状态" width="384"> | <img src="./docs/images/readme/menu-overview-dark.png" alt="AI Router 深色主题菜单，显示四条合成路由、当前路由和 Fallback 状态" width="384"> |
 
-### 用量与请求记录
+### 路由配置
 
 | 浅色主题                                                                                                                                           | 深色主题                                                                                                                                          |
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <img src="./docs/images/readme/usage-overview-light.png" alt="AI Router 浅色主题用量页面，显示由合成请求生成的 token、费用和延迟记录" width="460"> | <img src="./docs/images/readme/usage-overview-dark.png" alt="AI Router 深色主题用量页面，显示由合成请求生成的 token、费用和延迟记录" width="460"> |
+| <img src="./docs/images/readme/route-overview-light.png" alt="AI Router 浅色主题路由页面，显示四条合成路由、Fallback 顺序和路由编辑器" width="460"> | <img src="./docs/images/readme/route-overview-dark.png" alt="AI Router 深色主题路由页面，显示四条合成路由、Fallback 顺序和路由编辑器" width="460"> |
 
 ## 支持范围
 
