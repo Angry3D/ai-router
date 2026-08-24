@@ -24,11 +24,28 @@ Responses SSE 在转发前观察有界事件数据，用于确定首个有效输
 代理不缓存完整无限流，也不把 provider 文本变成回退依据。超时、连接失败、上游 HTTP 状态和协议
 错误保持不同的稳定分类。
 
+## 图片错误
+
+Images HTTP/MCP 始终只调用一次已选择的图片路由，不自动重试，也不进入文本 Fallback。MCP 错误会明确
+区分请求构造、连接、发送、上游超时、响应体读取、上游 HTTP 状态、响应解码、结果校验和资产存储；
+同时返回稳定本地 code、本地 requestId、数值或 null 的 upstreamStatus、封闭 category 和 retryable。
+retryable 只供调用方判断以后是否值得手动重试，不会让 Router 重放本次请求。
+
+上游 HTTP 错误只解析 64 KiB 内的 lowercase `error.{code,message}` 或顶层 `{code,message}`。
+category 只来自精确、区分大小写的 code 白名单；未知 code 始终是 `unknown_upstream`，不会根据自由文本或
+HTTP 状态猜测。仅在没有有效 code 时，400/422、401、403、429 和 5xx 才按状态使用封闭兜底分类。
+内容策略、参数、鉴权、权限和配额失败不可重试；429 可重试，500/502/503/504 可重试，其他情况遵循
+固定矩阵，但所有分支仍保持单次上游调用。
+
 ## 诊断与历史
 
 向 Codex 返回的错误是有界 Responses 风格 DTO。当前响应可以显示经过长度和控制字符处理的 provider
 错误消息，但它不会进入运行日志、请求历史、恢复点或长期推理状态。历史保存请求 ID、路由、尝试、
 状态、时间、token、费用估算和回退结果，不保存提示词或完整响应正文。
+
+Images 的已知类别只使用固定安全 message。只有 `unknown_upstream` 可以在当前 MCP message 中追加一条
+经过控制字符清理、空白折叠和 240 个 Unicode 字符限制的 provider message；provider code、request ID、
+header、原始 body 和底层网络/IO 错误不会进入 MCP 安全字段、日志或持久化。
 
 修改路由/回退时至少证明：
 
