@@ -60,8 +60,9 @@ pub(crate) mod upstream;
 mod activity;
 
 pub use activity::{
-    LogicalRequestActivityReporter, LogicalRequestActivitySink, LogicalRequestActivityTracker,
-    LogicalRequestActivityTransition, NoopLogicalRequestActivitySink, RequestActivityDisposition,
+    LogicalRequestActivityPhase, LogicalRequestActivityReporter, LogicalRequestActivitySink,
+    LogicalRequestActivityTracker, LogicalRequestActivityTransition,
+    NoopLogicalRequestActivitySink, RequestActivityDisposition,
 };
 pub use health::{
     ACTIVATION_WRITE_RETRY_DELAY, ActivatedSkipHealth, ActivatedSkipKind, CandidateHealth,
@@ -1062,6 +1063,26 @@ pub async fn transition_proxy_port(
     router: Router,
     store: &dyn ProxyPortStore,
 ) -> Result<(), ProxyPortError> {
+    transition_proxy_port_with_listener_replaced(current, new_port, router, store, || {}).await
+}
+
+/// Pre-binds and persists a new port, invokes `on_listener_replaced` after the
+/// replacement becomes authoritative, then gracefully drains the old listener.
+///
+/// # Errors
+///
+/// Returns validation, bind, or persistence errors while leaving the current
+/// handle untouched and without invoking `on_listener_replaced`.
+pub async fn transition_proxy_port_with_listener_replaced<F>(
+    current: &mut ProxyServerHandle,
+    new_port: u16,
+    router: Router,
+    store: &dyn ProxyPortStore,
+    on_listener_replaced: F,
+) -> Result<(), ProxyPortError>
+where
+    F: FnOnce(),
+{
     if new_port == 0 || new_port == current.address().port() {
         return Err(ProxyPortError::InvalidPort);
     }
@@ -1071,6 +1092,7 @@ pub async fn transition_proxy_port(
     store.persist_port(new_port).await?;
     let replacement = ProxyServerHandle::from_listener(listener, router);
     let old = std::mem::replace(current, replacement);
+    on_listener_replaced();
     old.shutdown().await;
     Ok(())
 }
@@ -1576,11 +1598,13 @@ mod tests {
             activity.0.lock().expect("activity mutex").as_slice(),
             [
                 LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Live,
                     active: true,
                     count: 1,
                     revision: 1,
                 },
                 LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Idle,
                     active: false,
                     count: 0,
                     revision: 2,
@@ -1680,14 +1704,44 @@ mod tests {
             .await
             .expect("tool response body");
         assert_eq!(tracker.snapshot().0, 1);
-        assert_eq!(activity.0.lock().expect("activity mutex").len(), 1);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Waiting);
+        assert_eq!(activity.0.lock().expect("activity mutex").len(), 2);
 
         let final_response = router.oneshot(request()).await.expect("final response");
         let _ = to_bytes(final_response.into_body(), 1024)
             .await
             .expect("final response body");
         assert_eq!(tracker.snapshot().0, 0);
-        assert_eq!(activity.0.lock().expect("activity mutex").len(), 2);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Idle);
+        assert_eq!(
+            activity.0.lock().expect("activity mutex").as_slice(),
+            [
+                LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Live,
+                    active: true,
+                    count: 1,
+                    revision: 1,
+                },
+                LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Waiting,
+                    active: true,
+                    count: 1,
+                    revision: 2,
+                },
+                LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Live,
+                    active: true,
+                    count: 1,
+                    revision: 3,
+                },
+                LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Idle,
+                    active: false,
+                    count: 0,
+                    revision: 4,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2343,12 +2397,22 @@ mod tests {
             fail: false,
             persisted: Mutex::new(Vec::new()),
         };
+        let replacement_callbacks = AtomicUsize::new(0);
 
-        let conflict =
-            transition_proxy_port(&mut current, occupied_port, Router::new(), &store).await;
+        let conflict = transition_proxy_port_with_listener_replaced(
+            &mut current,
+            occupied_port,
+            Router::new(),
+            &store,
+            || {
+                replacement_callbacks.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
         assert!(matches!(conflict, Err(ProxyPortError::PortUnavailable)));
         assert_eq!(current.address(), current_address);
         assert_eq!(store.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(replacement_callbacks.load(Ordering::SeqCst), 0);
 
         let candidate_port = unused_listener_port().await;
         let failing_store = TestPortStore {
@@ -2356,15 +2420,23 @@ mod tests {
             fail: true,
             persisted: Mutex::new(Vec::new()),
         };
-        let persistence_failure =
-            transition_proxy_port(&mut current, candidate_port, Router::new(), &failing_store)
-                .await;
+        let persistence_failure = transition_proxy_port_with_listener_replaced(
+            &mut current,
+            candidate_port,
+            Router::new(),
+            &failing_store,
+            || {
+                replacement_callbacks.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
         assert!(matches!(
             persistence_failure,
             Err(ProxyPortError::PersistenceFailed)
         ));
         assert_eq!(current.address(), current_address);
         assert_eq!(failing_store.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replacement_callbacks.load(Ordering::SeqCst), 0);
         let rebound = TcpListener::bind((Ipv4Addr::LOCALHOST, candidate_port))
             .await
             .expect("failed candidate listener was closed");
@@ -2376,16 +2448,20 @@ mod tests {
             fail: false,
             persisted: Mutex::new(Vec::new()),
         };
-        transition_proxy_port(
+        transition_proxy_port_with_listener_replaced(
             &mut current,
             replacement_port,
             Router::new(),
             &successful_store,
+            || {
+                replacement_callbacks.fetch_add(1, Ordering::SeqCst);
+            },
         )
         .await
         .expect("successful port transition");
         assert_eq!(current.address().port(), replacement_port);
         assert_eq!(successful_store.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replacement_callbacks.load(Ordering::SeqCst), 1);
         assert_eq!(
             successful_store
                 .persisted
@@ -2400,6 +2476,82 @@ mod tests {
         drop(old_port_rebound);
 
         current.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn proxy_port_replacement_callback_runs_before_old_listener_drains() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let router = Router::new().route(
+            "/hold",
+            get({
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                move || {
+                    let entered = Arc::clone(&entered);
+                    let release = Arc::clone(&release);
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        "done"
+                    }
+                }
+            }),
+        );
+        let current = ProxyServerHandle::start(0, router)
+            .await
+            .expect("current listener");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("local client");
+        let request = tokio::spawn({
+            let url = format!("http://{}/hold", current.address());
+            async move { client.get(url).send().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("old listener request entered");
+
+        let replacement_port = unused_listener_port().await;
+        let store = TestPortStore {
+            calls: AtomicUsize::new(0),
+            fail: false,
+            persisted: Mutex::new(Vec::new()),
+        };
+        let (replaced, replaced_rx) = oneshot::channel();
+        let transition = tokio::spawn(async move {
+            let mut current = current;
+            let result = transition_proxy_port_with_listener_replaced(
+                &mut current,
+                replacement_port,
+                Router::new(),
+                &store,
+                || {
+                    let _ = replaced.send(());
+                },
+            )
+            .await;
+            (current, result)
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), replaced_rx)
+            .await
+            .expect("replacement callback ran")
+            .expect("replacement callback sender");
+        assert!(
+            !transition.is_finished(),
+            "old listener must still be draining when the callback runs"
+        );
+
+        release.notify_waiters();
+        request
+            .await
+            .expect("request task")
+            .expect("old listener response");
+        let (replacement, result) = transition.await.expect("transition task");
+        result.expect("port transition");
+        replacement.shutdown().await;
     }
 
     type CapturedProbeRequest = (Method, Uri, HeaderMap, usize);

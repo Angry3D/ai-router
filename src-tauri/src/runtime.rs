@@ -50,7 +50,7 @@ use router_core::{
         ProxyIngressState, ProxyPortError, ProxyPortStore, ProxyServerHandle, ReachabilityProbe,
         RequestTransitionSink, ResponsesForwarder, RouteHealthRegistry, RouteSnapshot,
         RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
-        build_proxy_router, transition_proxy_port,
+        build_proxy_router, transition_proxy_port_with_listener_replaced,
     },
     qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     recovery::{
@@ -1675,11 +1675,12 @@ impl DesktopLifecycleServices {
         let ingress = self.ingress.lock().await.clone();
         let mut proxy = self.proxy.lock().await;
         if let (Some(proxy), Some(ingress)) = (proxy.as_mut(), ingress) {
-            transition_proxy_port(
+            transition_proxy_port_with_listener_replaced(
                 proxy,
                 port,
                 build_proxy_router(ingress),
                 &DatabaseProxyPortStore(database),
+                || self.activity.begin_new_epoch(),
             )
             .await
             .map_err(|error| map_proxy_port_error(&error))?;
@@ -3038,6 +3039,7 @@ impl AppLifecycleServices for DesktopLifecycleServices {
 
     async fn stop_proxy(&self) {
         if let Some(proxy) = self.proxy.lock().await.take() {
+            self.activity.begin_new_epoch();
             proxy.shutdown().await;
         }
     }
@@ -5433,6 +5435,95 @@ mod tests {
         services.stop_proxy().await;
         services.close_database().await;
         assert!(services.database.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn proxy_listener_epoch_clears_waiting_only_after_success_and_on_stop() {
+        use router_core::proxy::{LogicalRequestActivityPhase, RequestActivityDisposition};
+
+        let directory = TempDir::new().expect("app data fixture");
+        let runtime = Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink)));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Production,
+            runtime,
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve test port");
+        let port = listener.local_addr().expect("test address").port();
+        drop(listener);
+        services
+            .database()
+            .await
+            .expect("database")
+            .set_proxy_port(port)
+            .await
+            .expect("set test port");
+        services.start_proxy().await.expect("start proxy");
+
+        let waiting = services
+            .activity
+            .acquire_turn(Some("retired-waiting-turn"))
+            .expect("waiting activity");
+        waiting
+            .reporter()
+            .mark_terminal(RequestActivityDisposition::ClientToolHandoff);
+        drop(waiting);
+        let draining = services
+            .activity
+            .acquire_turn(Some("retired-live-turn"))
+            .expect("draining activity");
+        assert_eq!(services.activity.phase(), LogicalRequestActivityPhase::Live);
+        assert_eq!(services.activity.snapshot().0, 2);
+
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("occupied port");
+        let occupied_port = occupied.local_addr().expect("occupied address").port();
+        services
+            .apply_proxy_port(occupied_port)
+            .await
+            .expect_err("occupied port must preserve current listener");
+        assert_eq!(services.activity.phase(), LogicalRequestActivityPhase::Live);
+        assert_eq!(services.activity.snapshot().0, 2);
+        drop(occupied);
+
+        let replacement =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve replacement test port");
+        let replacement_port = replacement
+            .local_addr()
+            .expect("replacement address")
+            .port();
+        drop(replacement);
+        assert!(
+            !services
+                .apply_proxy_port(replacement_port)
+                .await
+                .expect("replace proxy listener")
+        );
+        assert_eq!(services.activity.snapshot().0, 1);
+        assert_eq!(services.activity.phase(), LogicalRequestActivityPhase::Live);
+        drop(draining);
+        assert_eq!(services.activity.phase(), LogicalRequestActivityPhase::Idle);
+
+        let waiting = services
+            .activity
+            .acquire_turn(Some("stop-waiting-turn"))
+            .expect("stop waiting activity");
+        waiting
+            .reporter()
+            .mark_terminal(RequestActivityDisposition::ClientToolHandoff);
+        drop(waiting);
+        assert_eq!(
+            services.activity.phase(),
+            LogicalRequestActivityPhase::Waiting
+        );
+        services.stop_proxy().await;
+        assert_eq!(services.activity.phase(), LogicalRequestActivityPhase::Idle);
+        services.close_database().await;
     }
 
     #[tokio::test]

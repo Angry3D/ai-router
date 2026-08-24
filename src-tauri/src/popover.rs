@@ -21,6 +21,7 @@ use crate::runtime::DesktopLifecycleServices;
 use router_core::{
     balance::{BalanceDisplaySnapshot, BalanceDisplayStatus, BalanceResult},
     domain::ProxyRuntimeStatus,
+    proxy::LogicalRequestActivityPhase,
     state::BootstrapSnapshotDto,
 };
 
@@ -57,6 +58,7 @@ tauri_panel! {
 pub(crate) enum TrayVisualState {
     Ready,
     Active,
+    Waiting,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -471,7 +473,7 @@ pub(crate) fn tray_presentation(
     snapshot: &BootstrapSnapshotDto,
     balance: Option<&BalanceDisplaySnapshot>,
     isolated: bool,
-    active: bool,
+    activity_phase: LogicalRequestActivityPhase,
 ) -> TrayPresentation {
     let active_route = snapshot.active_route_id.as_ref().and_then(|active_id| {
         snapshot
@@ -487,8 +489,8 @@ pub(crate) fn tray_presentation(
         .map_or_else(|| "--".to_owned(), compact_balance_value);
     let compact_name = compact_route_name(route_name);
     let title = with_qa_prefix(&format!("{compact_name}({amount})"), isolated);
-    let visual_state = tray_visual_state(active);
-    let state_label = tray_status_label(snapshot, active);
+    let visual_state = tray_visual_state(activity_phase);
+    let state_label = tray_status_label(snapshot, activity_phase);
     let tooltip = active_route.map_or_else(
         || format!("{app_name} {state_label} · 无中转"),
         |route| {
@@ -588,20 +590,28 @@ fn balance_tooltip_detail(balance: Option<&BalanceDisplaySnapshot>) -> String {
     }
 }
 
-fn tray_visual_state(active: bool) -> TrayVisualState {
-    if active {
-        TrayVisualState::Active
-    } else {
-        TrayVisualState::Ready
+fn tray_visual_state(activity_phase: LogicalRequestActivityPhase) -> TrayVisualState {
+    match activity_phase {
+        LogicalRequestActivityPhase::Idle => TrayVisualState::Ready,
+        LogicalRequestActivityPhase::Live => TrayVisualState::Active,
+        LogicalRequestActivityPhase::Waiting => TrayVisualState::Waiting,
     }
 }
 
-fn tray_status_label(snapshot: &BootstrapSnapshotDto, active: bool) -> &'static str {
+fn tray_status_label(
+    snapshot: &BootstrapSnapshotDto,
+    activity_phase: LogicalRequestActivityPhase,
+) -> &'static str {
     match snapshot.proxy_status {
         ProxyRuntimeStatus::PortConflict
         | ProxyRuntimeStatus::Error
         | ProxyRuntimeStatus::DatabaseError => "代理故障",
-        ProxyRuntimeStatus::Running if active => "处理中",
+        ProxyRuntimeStatus::Running if activity_phase == LogicalRequestActivityPhase::Live => {
+            "处理中"
+        }
+        ProxyRuntimeStatus::Running if activity_phase == LogicalRequestActivityPhase::Waiting => {
+            "等待工具继续"
+        }
         ProxyRuntimeStatus::Running if snapshot.active_route_id.is_some() => "正常",
         ProxyRuntimeStatus::Running
         | ProxyRuntimeStatus::Starting
@@ -2021,19 +2031,42 @@ mod tests {
             snapshot(ProxyRuntimeStatus::Running, None),
             snapshot(ProxyRuntimeStatus::PortConflict, None),
         ] {
-            assert_eq!(tray_visual_state(false), TrayVisualState::Ready);
-            assert_eq!(tray_visual_state(true), TrayVisualState::Active);
-            assert_ne!(tray_status_label(&state, false), "处理中");
+            assert_eq!(
+                tray_visual_state(LogicalRequestActivityPhase::Idle),
+                TrayVisualState::Ready
+            );
+            assert_eq!(
+                tray_visual_state(LogicalRequestActivityPhase::Live),
+                TrayVisualState::Active
+            );
+            assert_eq!(
+                tray_visual_state(LogicalRequestActivityPhase::Waiting),
+                TrayVisualState::Waiting
+            );
+            assert_ne!(
+                tray_status_label(&state, LogicalRequestActivityPhase::Idle),
+                "处理中"
+            );
         }
         assert_eq!(
             tray_status_label(
                 &snapshot(ProxyRuntimeStatus::Running, Some(RouteId::new())),
-                true,
+                LogicalRequestActivityPhase::Live,
             ),
             "处理中"
         );
         assert_eq!(
-            tray_status_label(&snapshot(ProxyRuntimeStatus::PortConflict, None), true),
+            tray_status_label(
+                &snapshot(ProxyRuntimeStatus::Running, Some(RouteId::new())),
+                LogicalRequestActivityPhase::Waiting,
+            ),
+            "等待工具继续"
+        );
+        assert_eq!(
+            tray_status_label(
+                &snapshot(ProxyRuntimeStatus::PortConflict, None),
+                LogicalRequestActivityPhase::Waiting,
+            ),
             "代理故障"
         );
     }
@@ -2052,17 +2085,48 @@ mod tests {
             Some("USD"),
         );
 
-        let production = tray_presentation("AI Router", &snapshot, Some(&balance), false, false);
-        let isolated = tray_presentation("AI Router QA", &snapshot, Some(&balance), true, false);
+        let production = tray_presentation(
+            "AI Router",
+            &snapshot,
+            Some(&balance),
+            false,
+            LogicalRequestActivityPhase::Idle,
+        );
+        let isolated = tray_presentation(
+            "AI Router QA",
+            &snapshot,
+            Some(&balance),
+            true,
+            LogicalRequestActivityPhase::Idle,
+        );
 
         assert_eq!(production.title, "INPUT($24.80)");
         assert_eq!(isolated.title, "QA · INPUT($24.80)");
         assert!(production.tooltip.contains("正常 · INPUT · 余额 $24.80"));
 
-        let active = tray_presentation("AI Router", &snapshot, Some(&balance), false, true);
+        let active = tray_presentation(
+            "AI Router",
+            &snapshot,
+            Some(&balance),
+            false,
+            LogicalRequestActivityPhase::Live,
+        );
         assert_eq!(active.title, production.title);
         assert!(active.tooltip.contains("处理中 · INPUT · 余额 $24.80"));
         assert_eq!(active.visual_state, TrayVisualState::Active);
+        let waiting = tray_presentation(
+            "AI Router",
+            &snapshot,
+            Some(&balance),
+            false,
+            LogicalRequestActivityPhase::Waiting,
+        );
+        assert!(
+            waiting
+                .tooltip
+                .contains("等待工具继续 · INPUT · 余额 $24.80")
+        );
+        assert_eq!(waiting.visual_state, TrayVisualState::Waiting);
     }
 
     #[test]
@@ -2079,8 +2143,20 @@ mod tests {
             Some("$"),
         );
 
-        let refreshing = tray_presentation("AI Router", &snapshot, Some(&balance), false, false);
-        let unavailable = tray_presentation("AI Router", &snapshot, None, false, false);
+        let refreshing = tray_presentation(
+            "AI Router",
+            &snapshot,
+            Some(&balance),
+            false,
+            LogicalRequestActivityPhase::Idle,
+        );
+        let unavailable = tray_presentation(
+            "AI Router",
+            &snapshot,
+            None,
+            false,
+            LogicalRequestActivityPhase::Idle,
+        );
 
         assert_eq!(refreshing.title, "INPUT($9.50)");
         assert!(refreshing.tooltip.contains("正在刷新"));
@@ -2100,8 +2176,13 @@ mod tests {
             (BalanceDisplayStatus::LastGood, "上次余额"),
         ] {
             let balance = tray_balance(route_id.clone(), status, Some(12.5), Some("$"));
-            let presentation =
-                tray_presentation("AI Router", &snapshot, Some(&balance), false, false);
+            let presentation = tray_presentation(
+                "AI Router",
+                &snapshot,
+                Some(&balance),
+                false,
+                LogicalRequestActivityPhase::Idle,
+            );
 
             assert_eq!(presentation.title, "INPUT($12.50)");
             assert!(presentation.tooltip.contains(expected_tooltip));
@@ -2114,7 +2195,13 @@ mod tests {
             Some("$"),
         );
         failed.value = None;
-        let presentation = tray_presentation("AI Router", &snapshot, Some(&failed), false, false);
+        let presentation = tray_presentation(
+            "AI Router",
+            &snapshot,
+            Some(&failed),
+            false,
+            LogicalRequestActivityPhase::Idle,
+        );
 
         assert_eq!(presentation.title, "INPUT(--)");
         assert!(presentation.tooltip.contains("余额查询失败"));
@@ -2124,13 +2211,26 @@ mod tests {
     fn tray_title_uses_no_route_fallback_and_keeps_proxy_failure_in_tooltip() {
         let empty = tray_snapshot(None, ProxyRuntimeStatus::Stopped);
         assert_eq!(
-            tray_presentation("AI Router", &empty, None, false, false).title,
+            tray_presentation(
+                "AI Router",
+                &empty,
+                None,
+                false,
+                LogicalRequestActivityPhase::Idle,
+            )
+            .title,
             "无中转(--)"
         );
 
         let route_id = RouteId::new();
         let failed = tray_snapshot(Some((route_id, "INPUT")), ProxyRuntimeStatus::PortConflict);
-        let presentation = tray_presentation("AI Router", &failed, None, false, true);
+        let presentation = tray_presentation(
+            "AI Router",
+            &failed,
+            None,
+            false,
+            LogicalRequestActivityPhase::Live,
+        );
         assert_eq!(presentation.title, "INPUT(--)");
         assert!(presentation.tooltip.contains("代理故障"));
     }
@@ -2149,8 +2249,13 @@ mod tests {
             Some("USD"),
         );
 
-        let presentation =
-            tray_presentation("AI Router", &snapshot, Some(&other_balance), false, false);
+        let presentation = tray_presentation(
+            "AI Router",
+            &snapshot,
+            Some(&other_balance),
+            false,
+            LogicalRequestActivityPhase::Idle,
+        );
 
         assert_eq!(presentation.title, "INPUT(--)");
         assert!(presentation.tooltip.contains("尚无余额"));
@@ -2205,7 +2310,13 @@ mod tests {
             next_due_at_ms: None,
             error: None,
         };
-        let presentation = tray_presentation("AI Router", &snapshot, Some(&balance), false, false);
+        let presentation = tray_presentation(
+            "AI Router",
+            &snapshot,
+            Some(&balance),
+            false,
+            LogicalRequestActivityPhase::Idle,
+        );
 
         assert!(presentation.title.contains('…'));
         assert!(
