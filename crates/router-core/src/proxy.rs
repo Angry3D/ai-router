@@ -1922,7 +1922,158 @@ mod tests {
             call_json["error"]["data"]["code"],
             "images_generation_disabled"
         );
+        assert_eq!(call_json["error"]["data"]["stage"], "request_construction");
+        assert_eq!(
+            call_json["error"]["data"]["upstreamStatus"],
+            serde_json::Value::Null
+        );
+        assert_eq!(call_json["error"]["data"]["category"], "unknown_upstream");
+        assert_eq!(call_json["error"]["data"]["retryable"], false);
+        Uuid::parse_str(
+            call_json["error"]["data"]["requestId"]
+                .as_str()
+                .expect("local request ID"),
+        )
+        .expect("UUID request ID");
         assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn images_mcp_wire_exposes_content_policy_stage_and_safe_fields_once() {
+        const PROVIDER_CODE: &str = "content_policy_violation";
+        const PROVIDER_MESSAGE: &str = "PROVIDER_MESSAGE_SENTINEL_32aa";
+        const PROVIDER_REQUEST_ID: &str = "PROVIDER_REQUEST_ID_SENTINEL_f10d";
+        const PROVIDER_HEADER: &str = "PROVIDER_HEADER_SENTINEL_908c";
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let image_upstream = ProxyServerHandle::start(
+            0,
+            Router::new().route(
+                "/openai/v1/images/generations",
+                post(move || {
+                    let calls = Arc::clone(&handler_calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .header("x-provider-request-id", PROVIDER_HEADER)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(
+                                serde_json::json!({
+                                    "error": {
+                                        "code": PROVIDER_CODE,
+                                        "message": PROVIDER_MESSAGE,
+                                        "request_id": PROVIDER_REQUEST_ID
+                                    }
+                                })
+                                .to_string(),
+                            ))
+                            .expect("content policy response")
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("loopback image upstream");
+        let image_route = Arc::new(RouteSnapshot {
+            route_id: RouteId::new(),
+            name: "Image route".to_owned(),
+            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
+                .expect("image base URL"),
+            api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
+            service_tier_policy: ServiceTierPolicy::Passthrough,
+            fallback_excluded_models: Arc::new(HashSet::new()),
+        });
+        let routing = RoutingSnapshotStore::new(RoutingSnapshot {
+            active: None,
+            participants: Vec::new(),
+            enabled: false,
+            selection_generation: 0,
+            health_generation: 0,
+            config_revision: 0,
+            images_generation_enabled: true,
+            images_route: Some(image_route),
+            images_generation_timeout: Duration::from_mins(10),
+        });
+        let temporary = TempDir::new().expect("temporary app data");
+        let router = build_proxy_router(
+            ProxyIngressState::new(TOKEN, Arc::new(RecordingUpstream::default()))
+                .with_routing_store(routing)
+                .with_mcp_image_asset_root(temporary.path().join("mcp-images")),
+        );
+
+        let initialize = router
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+                    ))
+                    .expect("initialize request"),
+            )
+            .await
+            .expect("initialize response");
+        let session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("MCP session ID")
+            .to_owned();
+        let _ = mcp_sse_json(initialize).await;
+        let call = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header("mcp-session-id", session_id)
+                    .header("mcp-protocol-version", "2025-06-18")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"private prompt"}}}"#,
+                    ))
+                    .expect("call request"),
+            )
+            .await
+            .expect("call response");
+        assert_eq!(call.status(), StatusCode::OK);
+        let call_json = mcp_sse_json(call).await;
+        assert_eq!(call_json["error"]["code"], -32603);
+        assert_eq!(
+            call_json["error"]["message"],
+            "The image provider rejected the request under its content policy."
+        );
+        let data = &call_json["error"]["data"];
+        assert_eq!(data.as_object().map(serde_json::Map::len), Some(6));
+        assert_eq!(data["code"], "images_upstream_http_status");
+        assert_eq!(data["stage"], "upstream_http_status");
+        assert_eq!(data["upstreamStatus"], 400);
+        assert_eq!(data["category"], "content_policy");
+        assert_eq!(data["retryable"], false);
+        Uuid::parse_str(data["requestId"].as_str().expect("local request ID"))
+            .expect("UUID request ID");
+        let serialized = serde_json::to_string(&call_json).expect("serialized MCP frame");
+        for forbidden in [
+            PROVIDER_CODE,
+            PROVIDER_MESSAGE,
+            PROVIDER_REQUEST_ID,
+            PROVIDER_HEADER,
+            "image-route-key",
+            "private prompt",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        image_upstream.shutdown().await;
     }
 
     #[tokio::test]

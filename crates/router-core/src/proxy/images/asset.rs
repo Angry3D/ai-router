@@ -14,7 +14,7 @@ use base64::{
     engine::{DecodePaddingMode, GeneralPurposeConfig, general_purpose::GeneralPurpose},
 };
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -39,6 +39,7 @@ const FILE_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ImageAssetErrorKind {
     StorageUnavailable,
+    InvalidResponse,
     InvalidBase64,
     InvalidPng,
     TooLarge,
@@ -49,6 +50,7 @@ impl ImageAssetErrorKind {
     pub(super) const fn code(self) -> &'static str {
         match self {
             Self::StorageUnavailable => "image_asset_storage_unavailable",
+            Self::InvalidResponse => "images_response_invalid",
             Self::InvalidBase64 => "image_result_invalid_base64",
             Self::InvalidPng => "image_result_invalid_png",
             Self::TooLarge => "image_result_too_large",
@@ -59,6 +61,7 @@ impl ImageAssetErrorKind {
     pub(super) const fn message(self) -> &'static str {
         match self {
             Self::StorageUnavailable => "Image asset storage is unavailable.",
+            Self::InvalidResponse => "The image generation response is invalid.",
             Self::InvalidBase64 => "The generated image Base64 is invalid.",
             Self::InvalidPng => "The generated image is not a valid PNG.",
             Self::TooLarge => "The generated image exceeds local limits.",
@@ -221,24 +224,20 @@ fn lifecycle_budget_is_valid() -> bool {
     .all(|phase| phase <= MCP_SINGLE_CALL_PEAK_BYTES)
 }
 
-#[derive(Deserialize)]
-struct ImagesResponse {
-    data: Vec<ImagesResponseItem>,
-}
-
-#[derive(Deserialize)]
-struct ImagesResponseItem {
-    b64_json: Option<String>,
-}
-
 fn take_base64(body: Bytes) -> Result<String, ImageAssetErrorKind> {
-    let parsed = serde_json::from_slice::<ImagesResponse>(&body)
-        .map_err(|_| ImageAssetErrorKind::InvalidBase64);
+    let parsed = serde_json::from_slice::<serde_json::Value>(&body)
+        .map_err(|_| ImageAssetErrorKind::InvalidResponse);
     drop(body);
     let encoded = parsed?
-        .data
-        .into_iter()
-        .find_map(|item| item.b64_json)
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item.get("b64_json")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+        })
         .ok_or(ImageAssetErrorKind::InvalidBase64)?;
     if encoded.is_empty() {
         return Err(ImageAssetErrorKind::InvalidBase64);

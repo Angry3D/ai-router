@@ -40,6 +40,12 @@ API Key 和 gateway token 以原始字节保存在 SQLite 中。数据库、WAL�
 字节数和 SHA-256。PNG、上游 Base64 和原始响应不进入 SQLite、恢复点或运行日志。该目录保存的是
 用户本机上的生成结果，不是数据库状态，也不等同于备份。
 
+图片 MCP 失败只返回稳定本地 code、本地 requestId、封闭 stage/category、数值或 null 的上游状态和
+retryable。已知上游类别使用固定安全描述；只有未知类别可以在当次 MCP message 中追加一条经过控制
+字符清理、空白折叠和长度限制的 provider message。这个例外只存在于当前响应：provider code/message、
+provider request ID、任意上游 header、原始请求/响应和底层网络、解码、IO 错误都不会进入 error.data、
+运行日志、诊断、请求/尝试历史、SQLite、恢复点或普通 IPC。
+
 运行日志每条最多 8 KiB，单文件最多 2 MiB，最多十个文件/20 MiB，并保留最多七天。日志只应包含
 固定 code、安全组件名和有界计数；即使如此，分享前仍要人工检查，并且不能直接上传完整日志。
 
