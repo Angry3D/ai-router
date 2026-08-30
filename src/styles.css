@@ -1755,6 +1755,17 @@ body[data-view="settings"] .app-variant-badge {
   white-space: nowrap;
 }
 
+.settings-required-marker {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--red);
+  font-weight: 600;
+}
+
+.settings-required-marker::before {
+  content: "*";
+}
+
 .settings-field-control {
   min-width: 0;
 }

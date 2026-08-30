@@ -248,11 +248,13 @@ export function SettingsHelpTooltip({
 export function SettingsFieldRow({
   label,
   htmlFor,
+  required = false,
   children,
   className,
 }: {
   label: string;
   htmlFor?: string;
+  required?: boolean;
   children: ReactNode;
   className?: string;
 }) {
@@ -260,6 +262,9 @@ export function SettingsFieldRow({
     <div className={classes("settings-field-row", className)}>
       <label className="settings-field-label" htmlFor={htmlFor}>
         {label}
+        {required ? (
+          <span className="settings-required-marker" aria-hidden="true" />
+        ) : null}
       </label>
       <div className="settings-field-control">{children}</div>
     </div>
