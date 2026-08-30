@@ -46,6 +46,7 @@ export type { InferenceOutcome } from "./InferenceOutcome";
 export type { InferenceStatus } from "./InferenceStatus";
 export type { InferenceStatusKind } from "./InferenceStatusKind";
 export type { IpcErrorDto } from "./IpcErrorDto";
+export type { McpImageCapacityDto } from "./McpImageCapacityDto";
 export type { MenuBarSettingsDto } from "./MenuBarSettingsDto";
 export type { MenuSnapshotDto } from "./MenuSnapshotDto";
 export type { MetadataFailureDto } from "./MetadataFailureDto";

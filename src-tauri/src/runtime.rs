@@ -15,11 +15,11 @@ use router_core::{
         BalanceQueryEditDto, BalanceQuerySettingsDto, BalanceTestInputDto, CodexBaselineSummaryDto,
         CodexImagesMcpRepairPreviewDto, CodexModelDto, CodexModelsActivation,
         CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto, CodexRecoveryUpdatePreviewDto,
-        CodexRestartNoticeDto, HistorySummaryDto, ImagesGenerationSettingsDto, MenuBarSettingsDto,
-        MenuSnapshotDto, MetadataFailureDto, RecoveryCandidateDto, RecoveryHealthDto,
-        RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult,
-        RouteActivationPreviewDto, RouteActivationResultDto, RouteCatalogMode, RouteEditDto,
-        RouteSaveInputDto, RouteSaveResultDto, SettingsSnapshotDto,
+        CodexRestartNoticeDto, HistorySummaryDto, ImagesGenerationSettingsDto, McpImageCapacityDto,
+        MenuBarSettingsDto, MenuSnapshotDto, MetadataFailureDto, RecoveryCandidateDto,
+        RecoveryHealthDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
+        ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
+        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, SettingsSnapshotDto,
         UpdateImagesGenerationSettingsInputDto, UsageHistoryPageDto, UsageHistoryQueryDto,
         UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsDto, UsageStatisticsQueryDto,
     },
@@ -36,8 +36,8 @@ use router_core::{
     },
     domain::{
         ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, CodexModelValidationError,
-        FallbackExcludedModelValidationError, ImagesGenerationTimeout, ReachabilityResult, RouteId,
-        ValidationError,
+        FallbackExcludedModelValidationError, ImagesGenerationTimeout,
+        McpImageCapacityWarningThreshold, ReachabilityResult, RouteId, ValidationError,
     },
     lifecycle::{
         AppCoordinator, AppLifecycleIssue, AppLifecyclePhase, AppLifecycleServices,
@@ -45,12 +45,13 @@ use router_core::{
     },
     proxy::{
         ActivatedSkipHealth, AsyncHistoryRecorder, FallbackActivationError, FallbackActivationMode,
-        FallbackActivationRequest, FallbackActivator, HealthActivationProof,
+        FallbackActivationRequest, FallbackActivator, HealthActivationProof, ImageAssetChangeSink,
         InferenceStatusService, LogicalRequestActivitySink, LogicalRequestActivityTracker,
-        ProxyIngressState, ProxyPortError, ProxyPortStore, ProxyServerHandle, ReachabilityProbe,
-        RequestTransitionSink, ResponsesForwarder, RouteHealthRegistry, RouteSnapshot,
-        RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
-        build_proxy_router, transition_proxy_port_with_listener_replaced,
+        McpImageAssetMaintenanceError, McpImageAssetManager, ProxyIngressState, ProxyPortError,
+        ProxyPortStore, ProxyServerHandle, ReachabilityProbe, RequestTransitionSink,
+        ResponsesForwarder, RouteHealthRegistry, RouteSnapshot, RoutingSnapshot,
+        RoutingSnapshotStore, RuntimeDiagnosticEvent, RuntimeDiagnosticSink, build_proxy_router,
+        transition_proxy_port_with_listener_replaced,
     },
     qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     recovery::{
@@ -88,11 +89,12 @@ pub enum DesktopRuntimeProfile {
     Isolated,
 }
 
-const STARTUP_STATE_AREAS: [StateArea; 5] = [
+const STARTUP_STATE_AREAS: [StateArea; 6] = [
     StateArea::Routes,
     StateArea::Route,
     StateArea::Fallback,
     StateArea::ImagesGeneration,
+    StateArea::McpImageAssets,
     StateArea::MenuBar,
 ];
 
@@ -220,6 +222,17 @@ struct DesktopRecoveryEventSink {
     runtime_state: Arc<AppRuntimeState>,
 }
 
+struct DesktopImageAssetChangeSink {
+    runtime_state: Arc<AppRuntimeState>,
+}
+
+impl ImageAssetChangeSink for DesktopImageAssetChangeSink {
+    fn image_assets_changed(&self) {
+        self.runtime_state
+            .publish_background_change(vec![StateArea::McpImageAssets]);
+    }
+}
+
 impl RecoveryEventSink for DesktopRecoveryEventSink {
     fn health_changed(&self, _health: &RecoveryHealth) {
         self.runtime_state
@@ -241,6 +254,7 @@ pub struct DesktopLifecycleServices {
     profile: DesktopRuntimeProfile,
     runtime_state: Arc<AppRuntimeState>,
     diagnostics: Arc<dyn RuntimeDiagnosticSink>,
+    mcp_image_assets: McpImageAssetManager,
     activity: LogicalRequestActivityTracker,
     database: tokio::sync::Mutex<Option<DatabaseExecutor>>,
     recovery: tokio::sync::Mutex<Option<Arc<RecoveryCoordinator>>>,
@@ -338,12 +352,17 @@ impl DesktopLifecycleServices {
             Arc::new(router_core::proxy::SystemMonotonicClock::default()),
             runtime_state.clone(),
         ));
+        let mcp_image_assets = McpImageAssetManager::new(
+            app_data_dir.join("mcp-images"),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        );
         Arc::new(Self {
             app_data_dir,
             codex_home,
             profile,
             runtime_state,
             diagnostics,
+            mcp_image_assets,
             activity: LogicalRequestActivityTracker::new(activity_sink),
             database: tokio::sync::Mutex::new(None),
             recovery: tokio::sync::Mutex::new(None),
@@ -381,7 +400,10 @@ impl DesktopLifecycleServices {
             .with_runtime_sinks(history, self.diagnostics.clone())
             .with_activity_tracker(self.activity.clone())
             .with_routing_store(self.routing.clone())
-            .with_mcp_image_asset_root(self.app_data_dir.join("mcp-images"))
+            .with_mcp_image_assets(self.mcp_image_assets.clone())
+            .with_image_asset_change_sink(Arc::new(DesktopImageAssetChangeSink {
+                runtime_state: Arc::clone(&self.runtime_state),
+            }))
     }
 
     async fn database(&self) -> Result<DatabaseExecutor, LifecycleFailure> {
@@ -759,9 +781,43 @@ impl DesktopLifecycleServices {
         Some(balance.route_snapshot(route_id))
     }
 
+    async fn mcp_image_capacity_snapshot(
+        &self,
+        database: &DatabaseExecutor,
+        settings: &AppSettingsRecord,
+    ) -> McpImageCapacityDto {
+        let unavailable = || McpImageCapacityDto {
+            available: false,
+            image_count: 0,
+            bytes: 0,
+            threshold_mib: settings.mcp_image_capacity.threshold.mebibytes(),
+            over_threshold: false,
+            warning_episode_id: None,
+            warning_visible: false,
+        };
+        let Ok(summary) = self.mcp_image_assets.summarize().await else {
+            return unavailable();
+        };
+        let Ok(capacity) = database.reconcile_mcp_image_capacity(summary.bytes).await else {
+            return unavailable();
+        };
+        let over_threshold = capacity.over_threshold();
+        let warning_visible = capacity.warning_visible();
+        McpImageCapacityDto {
+            available: true,
+            image_count: summary.image_count,
+            bytes: summary.bytes,
+            threshold_mib: capacity.threshold.mebibytes(),
+            over_threshold,
+            warning_episode_id: capacity.active_episode_id,
+            warning_visible,
+        }
+    }
+
     pub async fn menu_snapshot(&self) -> Result<MenuSnapshotDto, IpcErrorDto> {
         let bootstrap = self.runtime_state.bootstrap_snapshot();
         let database = self.database_for_ipc().await?;
+        let settings = database.app_settings().await.map_err(map_storage_error)?;
         let balance_enabled_route_ids = SqliteBalanceRouteSource::new(database.clone())
             .eligible_route_ids()
             .await
@@ -791,6 +847,7 @@ impl DesktopLifecycleServices {
         } else {
             None
         };
+        let mcp_image_capacity = self.mcp_image_capacity_snapshot(&database, &settings).await;
         Ok(MenuSnapshotDto {
             bootstrap,
             balances,
@@ -798,6 +855,7 @@ impl DesktopLifecycleServices {
             balance_batch,
             codex_status: self.codex_status().await?,
             codex_restart_notice,
+            mcp_image_capacity,
         })
     }
 
@@ -805,6 +863,7 @@ impl DesktopLifecycleServices {
         let database = self.database_for_ipc().await?;
         let recovery = self.recovery_for_ipc().await?;
         let settings = database.app_settings().await.map_err(map_storage_error)?;
+        let mcp_image_capacity = self.mcp_image_capacity_snapshot(&database, &settings).await;
         let menu_bar = menu_bar_settings_dto(&settings);
         let history = database
             .history_summary()
@@ -880,6 +939,7 @@ impl DesktopLifecycleServices {
                 route_id: settings.images_generation_route_id,
                 timeout_secs: settings.images_generation_timeout.seconds(),
             },
+            mcp_image_capacity,
             history: HistorySummaryDto {
                 request_count: history.request_count,
                 earliest_started_at_ms: history.earliest_started_at_ms,
@@ -1402,6 +1462,71 @@ impl DesktopLifecycleServices {
             .map_err(map_storage_error)?;
         self.runtime_state
             .publish_background_change(vec![StateArea::CodexRestartNotice]);
+        Ok(MutationResultDto {
+            revision: self.runtime_state.bootstrap_snapshot().revision,
+        })
+    }
+
+    pub async fn dismiss_mcp_image_capacity_warning(
+        &self,
+        episode_id: String,
+    ) -> Result<MutationResultDto, IpcErrorDto> {
+        let database = self.database_for_ipc().await?;
+        database
+            .dismiss_mcp_image_capacity_warning(&episode_id)
+            .await
+            .map_err(map_storage_error)?;
+        Ok(self
+            .runtime_state
+            .publish_background_change(vec![StateArea::McpImageAssets]))
+    }
+
+    pub async fn update_mcp_image_capacity_threshold(
+        &self,
+        threshold_mib: u32,
+    ) -> Result<MutationResultDto, IpcErrorDto> {
+        let threshold = McpImageCapacityWarningThreshold::parse(threshold_mib)
+            .map_err(|error| map_validation_error(&error))?;
+        let database = self.database_for_ipc().await?;
+        let before = database
+            .app_settings()
+            .await
+            .map_err(map_storage_error)?
+            .mcp_image_capacity;
+        let observed_bytes = self
+            .mcp_image_assets
+            .summarize()
+            .await
+            .ok()
+            .map(|summary| summary.bytes);
+        let after = database
+            .set_mcp_image_capacity_threshold(threshold, observed_bytes)
+            .await
+            .map_err(map_storage_error)?;
+        if after == before {
+            return Ok(MutationResultDto {
+                revision: self.runtime_state.bootstrap_snapshot().revision,
+            });
+        }
+        Ok(self
+            .runtime_state
+            .publish_background_change(vec![StateArea::McpImageAssets]))
+    }
+
+    pub async fn mcp_image_directory(&self) -> Result<PathBuf, IpcErrorDto> {
+        self.mcp_image_assets
+            .ensure_root()
+            .await
+            .map_err(map_mcp_image_asset_error)
+    }
+
+    pub async fn clear_mcp_images(&self) -> Result<MutationResultDto, IpcErrorDto> {
+        let result = self.mcp_image_assets.try_clear_published().await;
+        if result.is_ok() || matches!(result, Err(McpImageAssetMaintenanceError::PartialFailure)) {
+            self.runtime_state
+                .publish_background_change(vec![StateArea::McpImageAssets]);
+        }
+        result.map_err(map_mcp_image_asset_error)?;
         Ok(MutationResultDto {
             revision: self.runtime_state.bootstrap_snapshot().revision,
         })
@@ -2909,8 +3034,16 @@ impl AppLifecycleServices for DesktopLifecycleServices {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn start_proxy(&self) -> Result<(), LifecycleFailure> {
         let database = self.database().await?;
+        let _ = self
+            .mcp_image_assets
+            .cleanup_stale_publication_files(SystemTime::now())
+            .await;
+        if let Ok(summary) = self.mcp_image_assets.summarize().await {
+            let _ = database.reconcile_mcp_image_capacity(summary.bytes).await;
+        }
         let settings = database
             .app_settings()
             .await
@@ -3200,6 +3333,61 @@ pub async fn get_settings_snapshot(
     services: State<'_, Arc<DesktopLifecycleServices>>,
 ) -> Result<SettingsSnapshotDto, IpcErrorDto> {
     services.settings_snapshot().await
+}
+
+#[tauri::command]
+pub async fn update_mcp_image_capacity_threshold(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+    threshold_mib: u32,
+) -> Result<MutationResultDto, IpcErrorDto> {
+    services
+        .update_mcp_image_capacity_threshold(threshold_mib)
+        .await
+}
+
+#[tauri::command]
+pub async fn dismiss_mcp_image_capacity_warning(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+    episode_id: String,
+) -> Result<MutationResultDto, IpcErrorDto> {
+    services
+        .dismiss_mcp_image_capacity_warning(episode_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn clear_mcp_images(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+) -> Result<MutationResultDto, IpcErrorDto> {
+    services.clear_mcp_images().await
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value, reason = "Tauri state injection")]
+pub async fn open_mcp_image_directory(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+) -> Result<(), IpcErrorDto> {
+    #[cfg(target_os = "macos")]
+    {
+        let directory = services.mcp_image_directory().await?;
+        Command::new("open").arg(directory).spawn().map_err(|_| {
+            ipc_error(
+                "mcp_image_directory_open_failed",
+                "图片目录无法打开。",
+                true,
+            )
+        })?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = services;
+        Err(ipc_error(
+            "mcp_image_directory_open_unsupported",
+            "当前平台不支持打开图片目录。",
+            false,
+        ))
+    }
 }
 
 #[tauri::command]
@@ -3564,6 +3752,34 @@ pub fn open_codex_config(
 struct SettingsNavigationEvent {
     section: String,
     create_new_route: bool,
+    target: Option<SettingsNavigationTarget>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsNavigationTarget {
+    ImageGeneration,
+}
+
+fn validate_settings_navigation(
+    section: &str,
+    target: Option<SettingsNavigationTarget>,
+) -> Result<(), IpcErrorDto> {
+    if !matches!(section, "routes" | "usage" | "codex" | "system") {
+        return Err(ipc_error(
+            "settings_section_invalid",
+            "设置分区无效。",
+            false,
+        ));
+    }
+    if target.is_some() && section != "codex" {
+        return Err(ipc_error(
+            "settings_target_invalid",
+            "设置定位目标无效。",
+            false,
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -3572,14 +3788,9 @@ pub fn show_settings_window(
     app: AppHandle,
     section: String,
     create_new_route: bool,
+    target: Option<SettingsNavigationTarget>,
 ) -> Result<(), IpcErrorDto> {
-    if !matches!(section.as_str(), "routes" | "usage" | "codex" | "system") {
-        return Err(ipc_error(
-            "settings_section_invalid",
-            "设置分区无效。",
-            false,
-        ));
-    }
+    validate_settings_navigation(&section, target)?;
     crate::popover::hide_menu_window(&app);
     let window = app
         .get_webview_window("settings")
@@ -3590,6 +3801,7 @@ pub fn show_settings_window(
         SettingsNavigationEvent {
             section,
             create_new_route,
+            target,
         },
     );
     window
@@ -3633,6 +3845,24 @@ fn map_validation_error(error: &ValidationError) -> IpcErrorDto {
         .to_owned(),
         retryable: false,
         field: Some(error.field.to_owned()),
+    }
+}
+
+fn map_mcp_image_asset_error(error: McpImageAssetMaintenanceError) -> IpcErrorDto {
+    match error {
+        McpImageAssetMaintenanceError::Unavailable => ipc_error(
+            "mcp_image_assets_unavailable",
+            "图片目录暂时无法读取。",
+            true,
+        ),
+        McpImageAssetMaintenanceError::Busy => {
+            ipc_error("mcp_image_assets_busy", "图片正在生成，请稍后重试。", true)
+        }
+        McpImageAssetMaintenanceError::PartialFailure => ipc_error(
+            "mcp_image_assets_clear_failed",
+            "部分图片无法清除，请刷新后重试。",
+            true,
+        ),
     }
 }
 
@@ -4032,8 +4262,9 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
+        fs::{self, OpenOptions},
         net::{Ipv4Addr, TcpListener},
+        os::unix::fs::PermissionsExt,
         sync::Mutex,
         time::Duration,
     };
@@ -4094,6 +4325,109 @@ mod tests {
         assert_eq!(invalid.message, "路由顺序无效。");
         assert!(!invalid.retryable);
         assert_eq!(invalid.field, None);
+    }
+
+    #[test]
+    fn image_generation_navigation_target_is_closed_and_codex_only() {
+        assert!(
+            validate_settings_navigation("codex", Some(SettingsNavigationTarget::ImageGeneration),)
+                .is_ok()
+        );
+        assert_eq!(
+            validate_settings_navigation(
+                "system",
+                Some(SettingsNavigationTarget::ImageGeneration),
+            )
+            .expect_err("target must belong to Codex")
+            .code,
+            "settings_target_invalid"
+        );
+        assert_eq!(
+            validate_settings_navigation("unknown", None)
+                .expect_err("section must be closed")
+                .code,
+            "settings_section_invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_image_capacity_runtime_projects_dismisses_and_clears_owned_assets() {
+        let directory = TempDir::new().expect("app data fixture");
+        let runtime = Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink)));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            runtime,
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+
+        let image_root = services
+            .mcp_image_directory()
+            .await
+            .expect("admitted image root");
+        let image_path = image_root.join("00000000-0000-4000-8000-000000000001.png");
+        let image = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&image_path)
+            .expect("synthetic owned image");
+        image
+            .set_len(128 * 1024 * 1024)
+            .expect("synthetic image size");
+        fs::set_permissions(&image_path, fs::Permissions::from_mode(0o600))
+            .expect("private image mode");
+
+        let changed = services
+            .update_mcp_image_capacity_threshold(128)
+            .await
+            .expect("capacity threshold");
+        let unchanged = services
+            .update_mcp_image_capacity_threshold(128)
+            .await
+            .expect("unchanged capacity threshold");
+        assert_eq!(unchanged.revision, changed.revision);
+        let over = services
+            .settings_snapshot()
+            .await
+            .expect("over-threshold snapshot")
+            .mcp_image_capacity;
+        assert!(over.available);
+        assert_eq!(over.image_count, 1);
+        assert_eq!(over.bytes, 128 * 1024 * 1024);
+        assert_eq!(over.threshold_mib, 128);
+        assert!(over.over_threshold);
+        assert!(over.warning_visible);
+        let episode = over.warning_episode_id.expect("warning episode");
+
+        services
+            .dismiss_mcp_image_capacity_warning(episode)
+            .await
+            .expect("dismiss exact episode");
+        let dismissed = services
+            .settings_snapshot()
+            .await
+            .expect("dismissed snapshot")
+            .mcp_image_capacity;
+        assert!(dismissed.over_threshold);
+        assert!(!dismissed.warning_visible);
+
+        services.clear_mcp_images().await.expect("clear images");
+        let cleared = services
+            .settings_snapshot()
+            .await
+            .expect("cleared snapshot")
+            .mcp_image_capacity;
+        assert_eq!(cleared.image_count, 0);
+        assert_eq!(cleared.bytes, 0);
+        assert!(!cleared.over_threshold);
+        assert!(!image_path.exists());
+
+        services.close_database().await;
     }
 
     fn codex_model(model_id: &str) -> CodexModelDto {

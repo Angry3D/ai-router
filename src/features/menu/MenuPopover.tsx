@@ -17,6 +17,7 @@ import {
   confirmRouteActivation,
   connectCodex,
   dismissCodexRestartNotice,
+  dismissMcpImageCapacityWarning,
   hideMenu,
   normalizeIpcError,
   quitApplication,
@@ -359,6 +360,11 @@ export function MenuPopover() {
   const [dismissingNoticeId, setDismissingNoticeId] = useState<string | null>(
     null,
   );
+  const [dismissedCapacityEpisodeId, setDismissedCapacityEpisodeId] = useState<
+    string | null
+  >(null);
+  const [dismissingCapacityEpisodeId, setDismissingCapacityEpisodeId] =
+    useState<string | null>(null);
   const [refreshingRoute, setRefreshingRoute] = useState<RouteId | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [codexOperation, setCodexOperation] = useState<
@@ -459,6 +465,25 @@ export function MenuPopover() {
     } finally {
       setDismissingNoticeId((current) =>
         current === noticeId ? null : current,
+      );
+    }
+  };
+
+  const dismissCapacityWarning = async (episodeId: string) => {
+    setDismissedCapacityEpisodeId(episodeId);
+    setDismissingCapacityEpisodeId(episodeId);
+    setError(null);
+    try {
+      await dismissMcpImageCapacityWarning(episodeId);
+      await refreshMenu();
+    } catch (reason) {
+      setDismissedCapacityEpisodeId((current) =>
+        current === episodeId ? null : current,
+      );
+      setError(normalizeIpcError(reason).message);
+    } finally {
+      setDismissingCapacityEpisodeId((current) =>
+        current === episodeId ? null : current,
       );
     }
   };
@@ -579,6 +604,13 @@ export function MenuPopover() {
     query.data?.codexRestartNotice?.noticeId === dismissedNoticeId
       ? null
       : query.data?.codexRestartNotice;
+  const capacity = query.data?.mcpImageCapacity;
+  const capacityEpisodeId = capacity?.warningEpisodeId ?? null;
+  const capacityWarningVisible =
+    capacity?.available === true &&
+    capacity.warningVisible &&
+    capacityEpisodeId !== null &&
+    capacityEpisodeId !== dismissedCapacityEpisodeId;
   const confirming = disconnectConfirmation || activationPreview !== null;
 
   return (
@@ -708,6 +740,46 @@ export function MenuPopover() {
               onClick={() => void dismissRestartNotice(restartNotice.noticeId)}
             >
               <X aria-hidden="true" size={15} />
+            </button>
+          </section>
+        ) : null}
+
+        {!databaseBlocked && capacityWarningVisible && capacity ? (
+          <section
+            className="menu-restart-notice menu-capacity-notice"
+            aria-label="生成图片容量提醒"
+          >
+            <TriangleAlert aria-hidden="true" size={17} />
+            <p>
+              <strong>
+                生成图片占用 {formatCapacityBytes(capacity.bytes)}
+              </strong>
+              <span>
+                已达到 {formatCapacityBytes(capacity.thresholdMib * 1024 ** 2)} 提醒阈值
+              </span>
+            </p>
+            <button
+              className="menu-capacity-manage"
+              type="button"
+              onClick={() =>
+                void showSettingsWindow("codex", false, "image_generation")
+              }
+            >
+              管理
+            </button>
+            <button
+              className="menu-capacity-dismiss"
+              type="button"
+              aria-label="本次超限期间不再提醒"
+              title="本次超限期间不再提醒"
+              disabled={dismissingCapacityEpisodeId === capacityEpisodeId}
+              onClick={() => void dismissCapacityWarning(capacityEpisodeId)}
+            >
+              {dismissingCapacityEpisodeId === capacityEpisodeId ? (
+                <LoaderCircle aria-hidden="true" className="spin" size={14} />
+              ) : (
+                <X aria-hidden="true" size={15} />
+              )}
             </button>
           </section>
         ) : null}
@@ -971,4 +1043,15 @@ export function MenuPopover() {
       ) : null}
     </div>
   );
+}
+
+function formatCapacityBytes(bytes: number): string {
+  const gib = 1024 ** 3;
+  const mib = 1024 ** 2;
+  if (bytes >= gib) return `${trimCapacityDecimal(bytes / gib, 2)} GB`;
+  return `${trimCapacityDecimal(bytes / mib, 1)} MB`;
+}
+
+function trimCapacityDecimal(value: number, digits: number): string {
+  return value.toFixed(digits).replace(/\.0+$|(?<=\.[0-9]*)0+$/, "");
 }

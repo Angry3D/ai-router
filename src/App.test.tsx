@@ -31,6 +31,15 @@ function renderWithData(view: "menu" | "settings") {
     balanceBatch: null,
     codexStatus: "not_connected",
     codexRestartNotice: null,
+    mcpImageCapacity: {
+      available: true,
+      imageCount: 0,
+      bytes: 0,
+      thresholdMib: 1024,
+      overThreshold: false,
+      warningEpisodeId: null,
+      warningVisible: false,
+    },
   });
   client.setQueryData<SettingsSnapshotDto>(queryKeys.settings, {
     routes: [],
@@ -45,6 +54,15 @@ function renderWithData(view: "menu" | "settings") {
     proxyPort: 32189,
     menuBar: { statusTextEnabled: true, activityAnimationEnabled: true },
     imagesGeneration: { enabled: false, routeId: null, timeoutSecs: 600 },
+    mcpImageCapacity: {
+      available: true,
+      imageCount: 0,
+      bytes: 0,
+      thresholdMib: 1024,
+      overThreshold: false,
+      warningEpisodeId: null,
+      warningVisible: false,
+    },
     codexStatus: "not_connected",
     baseline: { exists: false, originalExists: null, capturedAtMs: null },
     originalBackup: { exists: false, originalExists: null, capturedAtMs: null },

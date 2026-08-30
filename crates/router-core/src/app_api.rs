@@ -937,6 +937,21 @@ pub struct ImagesGenerationSettingsDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
+pub struct McpImageCapacityDto {
+    pub available: bool,
+    #[ts(type = "number")]
+    pub image_count: u64,
+    #[ts(type = "number")]
+    pub bytes: u64,
+    pub threshold_mib: u32,
+    pub over_threshold: bool,
+    pub warning_episode_id: Option<String>,
+    pub warning_visible: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
 pub struct UpdateImagesGenerationSettingsInputDto {
     pub enabled: bool,
     pub route_id: Option<RouteId>,
@@ -973,6 +988,7 @@ pub struct MenuSnapshotDto {
     pub balance_batch: Option<BalanceRefreshBatchState>,
     pub codex_status: CodexConfigStatus,
     pub codex_restart_notice: Option<CodexRestartNoticeDto>,
+    pub mcp_image_capacity: McpImageCapacityDto,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -990,6 +1006,7 @@ pub struct SettingsSnapshotDto {
     pub balance_script_risk_confirmed: bool,
     pub balance_query: BalanceQuerySettingsDto,
     pub images_generation: ImagesGenerationSettingsDto,
+    pub mcp_image_capacity: McpImageCapacityDto,
     pub history: HistorySummaryDto,
     pub metadata_failure: MetadataFailureDto,
     pub recovery: RecoveryHealthDto,

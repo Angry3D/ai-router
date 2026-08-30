@@ -6,6 +6,8 @@ use std::{
         unix::fs::{DirBuilderExt, PermissionsExt},
     },
     path::{Component, Path, PathBuf},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::body::Bytes;
@@ -13,7 +15,7 @@ use base64::{
     Engine as _, alphabet,
     engine::{DecodePaddingMode, GeneralPurposeConfig, general_purpose::GeneralPurpose},
 };
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -35,6 +37,140 @@ const STRICT_STANDARD: GeneralPurpose = GeneralPurpose::new(
 );
 const ROOT_MODE: Mode = Mode::RWXU;
 const FILE_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
+const STALE_PUBLICATION_AGE: Duration = Duration::from_hours(24);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct McpImageAssetSummary {
+    pub image_count: u64,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct McpImageAssetCleanupResult {
+    pub deleted_files: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum McpImageAssetMaintenanceError {
+    #[error("image asset storage is unavailable")]
+    Unavailable,
+    #[error("image asset maintenance is busy")]
+    Busy,
+    #[error("image asset maintenance was only partially completed")]
+    PartialFailure,
+}
+
+#[derive(Clone)]
+pub struct McpImageAssetManager {
+    configured_path: PathBuf,
+    operation_permit: Arc<tokio::sync::Semaphore>,
+}
+
+impl McpImageAssetManager {
+    #[must_use]
+    pub fn new(configured_path: PathBuf, operation_permit: Arc<tokio::sync::Semaphore>) -> Self {
+        Self {
+            configured_path,
+            operation_permit,
+        }
+    }
+
+    /// Admits the private asset root and returns its canonical path for a
+    /// bounded native open operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` when the configured root cannot be safely admitted.
+    pub async fn ensure_root(&self) -> Result<PathBuf, McpImageAssetMaintenanceError> {
+        let configured_path = self.configured_path.clone();
+        tokio::task::spawn_blocking(move || {
+            AdmittedAssetRoot::admit(configured_path)
+                .map(|root| root.canonical_path)
+                .map_err(|_| McpImageAssetMaintenanceError::Unavailable)
+        })
+        .await
+        .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?
+    }
+
+    /// Scans only safely managed, successfully published PNG assets.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` when the root cannot be admitted or completely scanned.
+    pub async fn summarize(&self) -> Result<McpImageAssetSummary, McpImageAssetMaintenanceError> {
+        let configured_path = self.configured_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let root = AdmittedAssetRoot::admit(configured_path)
+                .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+            summarize_admitted_root(&root)
+        })
+        .await
+        .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?
+    }
+
+    /// Removes exact stale publication temporaries and identifiable hard-link
+    /// publication orphans without touching standalone successful PNG assets.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Busy` while publication owns the shared permit, `Unavailable`
+    /// for an unsafe root, or `PartialFailure` when an admitted deletion target
+    /// cannot be removed or synced.
+    pub async fn cleanup_stale_publication_files(
+        &self,
+        now: SystemTime,
+    ) -> Result<McpImageAssetCleanupResult, McpImageAssetMaintenanceError> {
+        let permit = Arc::clone(&self.operation_permit)
+            .try_acquire_owned()
+            .map_err(|_| McpImageAssetMaintenanceError::Busy)?;
+        let configured_path = self.configured_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let root = AdmittedAssetRoot::admit(configured_path)
+                .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+            cleanup_admitted_root(&root, Some(now))
+        })
+        .await
+        .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?
+    }
+
+    /// Clears safely managed published assets and publication remnants without
+    /// waiting for or racing an active publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Busy` while publication owns the shared permit, `Unavailable`
+    /// for an unsafe root, or `PartialFailure` for a bounded partial clear.
+    pub async fn try_clear_published(
+        &self,
+    ) -> Result<McpImageAssetCleanupResult, McpImageAssetMaintenanceError> {
+        let permit = Arc::clone(&self.operation_permit)
+            .try_acquire_owned()
+            .map_err(|_| McpImageAssetMaintenanceError::Busy)?;
+        let configured_path = self.configured_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let root = AdmittedAssetRoot::admit(configured_path)
+                .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+            cleanup_admitted_root(&root, None)
+        })
+        .await
+        .map_err(|_| McpImageAssetMaintenanceError::PartialFailure)?
+    }
+
+    pub(super) async fn acquire_publication_permit(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ImageAssetErrorKind> {
+        Arc::clone(&self.operation_permit)
+            .acquire_owned()
+            .await
+            .map_err(|_| ImageAssetErrorKind::StorageUnavailable)
+    }
+
+    pub(super) fn configured_path(&self) -> PathBuf {
+        self.configured_path.clone()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ImageAssetErrorKind {
@@ -196,6 +332,247 @@ impl AdmittedAssetRoot {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ManagedAssetName {
+    Published { asset_id: Uuid },
+    Temporary { asset_id: Uuid },
+}
+
+fn parse_managed_asset_name(name: &str) -> Option<ManagedAssetName> {
+    if let Some(stem) = name.strip_suffix(".png") {
+        let asset_id = parse_canonical_uuid(stem)?;
+        return Some(ManagedAssetName::Published { asset_id });
+    }
+    let temporary = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (asset, temporary_id) = temporary.split_once('.')?;
+    if temporary_id.contains('.') {
+        return None;
+    }
+    let asset_id = parse_canonical_uuid(asset)?;
+    parse_canonical_uuid(temporary_id)?;
+    Some(ManagedAssetName::Temporary { asset_id })
+}
+
+fn parse_canonical_uuid(value: &str) -> Option<Uuid> {
+    let parsed = Uuid::parse_str(value).ok()?;
+    (parsed.hyphenated().to_string() == value).then_some(parsed)
+}
+
+fn read_managed_names(
+    root: &AdmittedAssetRoot,
+) -> Result<Vec<(String, ManagedAssetName)>, McpImageAssetMaintenanceError> {
+    root.revalidate()
+        .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+    let mut directory =
+        Dir::read_from(&root.directory).map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+    let mut names = Vec::new();
+    for entry in &mut directory {
+        let entry = entry.map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if let Some(kind) = parse_managed_asset_name(name) {
+            names.push((name.to_owned(), kind));
+        }
+    }
+    root.revalidate()
+        .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+    Ok(names)
+}
+
+fn summarize_admitted_root(
+    root: &AdmittedAssetRoot,
+) -> Result<McpImageAssetSummary, McpImageAssetMaintenanceError> {
+    root.revalidate()
+        .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+    let mut directory =
+        Dir::read_from(&root.directory).map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+    let mut summary = McpImageAssetSummary::default();
+    for entry in &mut directory {
+        let entry = entry.map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if !matches!(
+            parse_managed_asset_name(name),
+            Some(ManagedAssetName::Published { .. })
+        ) {
+            continue;
+        }
+        let Ok(named_stat) = rustix::fs::statat(&root.directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        else {
+            continue;
+        };
+        if !stat_is_managed_single_link_file(&named_stat) {
+            continue;
+        }
+        let Ok(file) = rustix::fs::openat(
+            &root.directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            continue;
+        };
+        let Ok(open_stat) = rustix::fs::fstat(&file) else {
+            continue;
+        };
+        if !same_stat_identity(&named_stat, &open_stat)
+            || !stat_is_managed_single_link_file(&open_stat)
+        {
+            continue;
+        }
+        summary.image_count = summary
+            .image_count
+            .checked_add(1)
+            .ok_or(McpImageAssetMaintenanceError::Unavailable)?;
+        let file_bytes = u64::try_from(open_stat.st_size)
+            .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+        summary.bytes = summary
+            .bytes
+            .checked_add(file_bytes)
+            .ok_or(McpImageAssetMaintenanceError::Unavailable)?;
+    }
+    root.revalidate()
+        .map_err(|_| McpImageAssetMaintenanceError::Unavailable)?;
+    Ok(summary)
+}
+
+fn cleanup_admitted_root(
+    root: &AdmittedAssetRoot,
+    stale_before: Option<SystemTime>,
+) -> Result<McpImageAssetCleanupResult, McpImageAssetMaintenanceError> {
+    let names = read_managed_names(root)?;
+    let mut result = McpImageAssetCleanupResult::default();
+    let mut partial_failure = false;
+
+    if stale_before.is_none() {
+        for (name, kind) in &names {
+            if !matches!(kind, ManagedAssetName::Published { .. }) {
+                continue;
+            }
+            match private_named_stat(root, name) {
+                Ok(Some(stat)) if stat.st_nlink == 1 => {
+                    if unlink_matching(root, name, &stat) {
+                        result.deleted_files = result.deleted_files.saturating_add(1);
+                    } else {
+                        partial_failure = true;
+                    }
+                }
+                Ok(_) => {}
+                Err(()) => partial_failure = true,
+            }
+        }
+    }
+
+    for (name, kind) in &names {
+        let ManagedAssetName::Temporary { asset_id } = kind else {
+            continue;
+        };
+        let temporary_stat = match private_named_stat(root, name) {
+            Ok(Some(stat)) => stat,
+            Ok(None) => continue,
+            Err(()) => {
+                partial_failure = true;
+                continue;
+            }
+        };
+        if stale_before.is_some_and(|now| !stat_is_stale(&temporary_stat, now)) {
+            continue;
+        }
+        if temporary_stat.st_nlink == 1 {
+            if unlink_matching(root, name, &temporary_stat) {
+                result.deleted_files = result.deleted_files.saturating_add(1);
+            } else {
+                partial_failure = true;
+            }
+            continue;
+        }
+        if temporary_stat.st_nlink != 2 {
+            continue;
+        }
+        let final_name = format!("{asset_id}.png");
+        let final_stat = match private_named_stat(root, &final_name) {
+            Ok(Some(stat)) if stat.st_nlink == 2 && same_stat_identity(&temporary_stat, &stat) => {
+                stat
+            }
+            Ok(_) => continue,
+            Err(()) => {
+                partial_failure = true;
+                continue;
+            }
+        };
+        if !unlink_matching(root, &final_name, &final_stat) {
+            partial_failure = true;
+            continue;
+        }
+        result.deleted_files = result.deleted_files.saturating_add(1);
+        match private_named_stat(root, name) {
+            Ok(Some(remaining))
+                if remaining.st_nlink == 1 && same_stat_identity(&temporary_stat, &remaining) =>
+            {
+                if unlink_matching(root, name, &remaining) {
+                    result.deleted_files = result.deleted_files.saturating_add(1);
+                } else {
+                    partial_failure = true;
+                }
+            }
+            Ok(_) | Err(()) => partial_failure = true,
+        }
+    }
+
+    if result.deleted_files > 0 && rustix::fs::fsync(&root.directory).is_err() {
+        partial_failure = true;
+    }
+    if root.revalidate().is_err() {
+        return Err(McpImageAssetMaintenanceError::Unavailable);
+    }
+    if partial_failure {
+        Err(McpImageAssetMaintenanceError::PartialFailure)
+    } else {
+        Ok(result)
+    }
+}
+
+fn private_named_stat(
+    root: &AdmittedAssetRoot,
+    name: &str,
+) -> Result<Option<rustix::fs::Stat>, ()> {
+    match rustix::fs::statat(&root.directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if stat_is_private_regular_file(&stat) => Ok(Some(stat)),
+        Ok(_) | Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+fn unlink_matching(root: &AdmittedAssetRoot, name: &str, expected: &rustix::fs::Stat) -> bool {
+    let Ok(current) = rustix::fs::statat(&root.directory, name, AtFlags::SYMLINK_NOFOLLOW) else {
+        return false;
+    };
+    stat_is_private_regular_file(&current)
+        && current.st_nlink == expected.st_nlink
+        && same_stat_identity(expected, &current)
+        && rustix::fs::unlinkat(&root.directory, name, AtFlags::empty()).is_ok()
+}
+
+fn stat_is_stale(stat: &rustix::fs::Stat, now: SystemTime) -> bool {
+    let Ok(now) = now.duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    let Ok(modified_seconds) = u64::try_from(stat.st_mtime) else {
+        return true;
+    };
+    let modified = Duration::new(
+        modified_seconds,
+        u32::try_from(stat.st_mtime_nsec).unwrap_or_default(),
+    );
+    now.saturating_sub(modified) >= STALE_PUBLICATION_AGE
+}
+
+fn stat_is_managed_single_link_file(stat: &rustix::fs::Stat) -> bool {
+    stat_is_private_regular_file(stat) && stat.st_nlink == 1
 }
 
 pub(super) fn process_image_response(
@@ -627,7 +1004,7 @@ fn same_stat_identity(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::OpenOptions,
+        fs::{FileTimes, OpenOptions},
         os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink},
     };
 
@@ -661,6 +1038,20 @@ mod tests {
             .expect("read asset root")
             .map(|entry| entry.expect("asset entry").path())
             .collect()
+    }
+
+    fn write_private_file(path: &Path, bytes: &[u8], modified: Option<SystemTime>) {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .expect("private file");
+        file.write_all(bytes).expect("private bytes");
+        if let Some(modified) = modified {
+            file.set_times(FileTimes::new().set_modified(modified))
+                .expect("file mtime");
+        }
     }
 
     #[test]
@@ -873,5 +1264,129 @@ mod tests {
                 & 0o7777,
             0o600
         );
+    }
+
+    #[test]
+    fn managed_name_parser_accepts_only_canonical_uuid_publication_grammar() {
+        let asset = Uuid::new_v4();
+        let temporary = Uuid::new_v4();
+        assert_eq!(
+            parse_managed_asset_name(&format!("{asset}.png")),
+            Some(ManagedAssetName::Published { asset_id: asset })
+        );
+        assert_eq!(
+            parse_managed_asset_name(&format!(".{asset}.{temporary}.tmp")),
+            Some(ManagedAssetName::Temporary { asset_id: asset })
+        );
+        for invalid in [
+            format!("{asset}.PNG"),
+            format!("{}.png", asset.to_string().to_uppercase()),
+            format!(".{asset}.tmp"),
+            format!(".{asset}.{temporary}.extra.tmp"),
+            "not-an-asset.png".to_owned(),
+        ] {
+            assert_eq!(parse_managed_asset_name(&invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn summary_counts_only_private_single_link_canonical_pngs() {
+        let (_temporary, path) = temporary_asset_root();
+        let root = AdmittedAssetRoot::admit(path.clone()).expect("admitted root");
+        let managed = path.join(format!("{}.png", Uuid::new_v4()));
+        write_private_file(&managed, b"managed", None);
+        write_private_file(&path.join("unknown.png"), b"unknown", None);
+
+        let permissive = path.join(format!("{}.png", Uuid::new_v4()));
+        write_private_file(&permissive, b"permissive", None);
+        fs::set_permissions(&permissive, fs::Permissions::from_mode(0o644))
+            .expect("permissive mode");
+
+        let linked = path.join(format!("{}.png", Uuid::new_v4()));
+        write_private_file(&linked, b"linked", None);
+        fs::hard_link(&linked, path.join("unknown-hard-link")).expect("hard link");
+
+        let linked_target = path.join("unknown-target");
+        write_private_file(&linked_target, b"target", None);
+        symlink(&linked_target, path.join(format!("{}.png", Uuid::new_v4())))
+            .expect("asset symlink");
+        fs::create_dir(path.join(format!("{}.png", Uuid::new_v4())))
+            .expect("asset-shaped directory");
+
+        assert_eq!(
+            summarize_admitted_root(&root).expect("summary"),
+            McpImageAssetSummary {
+                image_count: 1,
+                bytes: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_removes_only_old_temporaries_and_identifiable_link_orphans() {
+        let (_temporary, path) = temporary_asset_root();
+        let root = AdmittedAssetRoot::admit(path.clone()).expect("admitted root");
+        let now = UNIX_EPOCH + Duration::from_hours(240);
+        let old = now - STALE_PUBLICATION_AGE - Duration::from_secs(1);
+        let fresh = now - STALE_PUBLICATION_AGE + Duration::from_secs(1);
+
+        let published = path.join(format!("{}.png", Uuid::new_v4()));
+        write_private_file(&published, b"published", Some(old));
+        let stale_temporary = path.join(format!(".{}.{}.tmp", Uuid::new_v4(), Uuid::new_v4()));
+        write_private_file(&stale_temporary, b"stale", Some(old));
+        let fresh_temporary = path.join(format!(".{}.{}.tmp", Uuid::new_v4(), Uuid::new_v4()));
+        write_private_file(&fresh_temporary, b"fresh", Some(fresh));
+
+        let orphan_asset = Uuid::new_v4();
+        let orphan_temporary = path.join(format!(".{orphan_asset}.{}.tmp", Uuid::new_v4()));
+        write_private_file(&orphan_temporary, b"orphan", Some(old));
+        let orphan_final = path.join(format!("{orphan_asset}.png"));
+        fs::hard_link(&orphan_temporary, &orphan_final).expect("publication hard link");
+
+        let result = cleanup_admitted_root(&root, Some(now)).expect("stale cleanup");
+        assert_eq!(result.deleted_files, 3);
+        assert!(published.exists());
+        assert!(fresh_temporary.exists());
+        assert!(!stale_temporary.exists());
+        assert!(!orphan_temporary.exists());
+        assert!(!orphan_final.exists());
+    }
+
+    #[tokio::test]
+    async fn manual_clear_is_non_blocking_and_preserves_unknown_or_unsafe_entries() {
+        let (_temporary, path) = temporary_asset_root();
+        let permit = Arc::new(tokio::sync::Semaphore::new(1));
+        let manager = McpImageAssetManager::new(path.clone(), Arc::clone(&permit));
+        manager.ensure_root().await.expect("asset root");
+        let managed_asset = path.join(format!("{}.png", Uuid::new_v4()));
+        write_private_file(&managed_asset, b"managed", None);
+        let temporary = path.join(format!(".{}.{}.tmp", Uuid::new_v4(), Uuid::new_v4()));
+        write_private_file(&temporary, b"temporary", None);
+        let unknown = path.join("keep-me");
+        write_private_file(&unknown, b"unknown", None);
+        let unsafe_asset = path.join(format!("{}.png", Uuid::new_v4()));
+        write_private_file(&unsafe_asset, b"unsafe", None);
+        fs::set_permissions(&unsafe_asset, fs::Permissions::from_mode(0o644)).expect("unsafe mode");
+
+        let held = permit.acquire().await.expect("held permit");
+        assert_eq!(
+            manager
+                .cleanup_stale_publication_files(SystemTime::now())
+                .await,
+            Err(McpImageAssetMaintenanceError::Busy)
+        );
+        assert_eq!(
+            manager.try_clear_published().await,
+            Err(McpImageAssetMaintenanceError::Busy)
+        );
+        assert!(managed_asset.exists());
+        drop(held);
+
+        let result = manager.try_clear_published().await.expect("manual clear");
+        assert_eq!(result.deleted_files, 2);
+        assert!(!managed_asset.exists());
+        assert!(!temporary.exists());
+        assert!(unknown.exists());
+        assert!(unsafe_asset.exists());
     }
 }

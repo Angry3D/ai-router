@@ -89,6 +89,7 @@ pub enum StateArea {
     Balance,
     BalanceSettings,
     ImagesGeneration,
+    McpImageAssets,
     Proxy,
     CodexConnection,
     CodexCatalog,

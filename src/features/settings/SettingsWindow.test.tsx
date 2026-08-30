@@ -29,6 +29,7 @@ import { SettingsWindow } from "./SettingsWindow";
 const ipc = vi.hoisted(() => ({
   clearRequestHistory: vi.fn(),
   clearRuntimeLogs: vi.fn(),
+  clearMcpImages: vi.fn(),
   checkRouteReachability: vi.fn(),
   connectCodex: vi.fn(),
   createRecoveryPoint: vi.fn(),
@@ -50,6 +51,8 @@ const ipc = vi.hoisted(() => ({
   testBalanceQuery: vi.fn(),
   updateBalanceQuerySettings: vi.fn(),
   updateImagesGenerationSettings: vi.fn(),
+  updateMcpImageCapacityThreshold: vi.fn(),
+  openMcpImageDirectory: vi.fn(),
   getRunningAppVersion: vi.fn(),
   openProjectRepository: vi.fn(),
   hideSettingsWindow: vi.fn(),
@@ -67,6 +70,7 @@ vi.mock("../../api/ipc", () => ({
   checkRouteReachability: ipc.checkRouteReachability,
   clearRequestHistory: ipc.clearRequestHistory,
   clearRuntimeLogs: ipc.clearRuntimeLogs,
+  clearMcpImages: ipc.clearMcpImages,
   connectCodex: ipc.connectCodex,
   createRecoveryPoint: ipc.createRecoveryPoint,
   deleteRoute: ipc.deleteRoute,
@@ -101,6 +105,7 @@ vi.mock("../../api/ipc", () => ({
     field: null,
   }),
   openCodexConfig: vi.fn(),
+  openMcpImageDirectory: ipc.openMcpImageDirectory,
   openRuntimeLogDirectory: vi.fn(),
   reconnectCodex: vi.fn(),
   restoreCodex: ipc.restoreCodex,
@@ -112,6 +117,7 @@ vi.mock("../../api/ipc", () => ({
   testBalanceQuery: ipc.testBalanceQuery,
   updateBalanceQuerySettings: ipc.updateBalanceQuerySettings,
   updateImagesGenerationSettings: ipc.updateImagesGenerationSettings,
+  updateMcpImageCapacityThreshold: ipc.updateMcpImageCapacityThreshold,
   quitApplication: ipc.quitApplication,
 }));
 
@@ -150,6 +156,14 @@ async function renderSettings(
   const settings = {
     ...previewSettingsSnapshot,
     ...options.settings,
+    mcpImageCapacity:
+      options.settings?.mcpImageCapacity ??
+      ({
+        ...previewSettingsSnapshot.mcpImageCapacity,
+        overThreshold: false,
+        warningEpisodeId: null,
+        warningVisible: false,
+      } satisfies SettingsSnapshotDto["mcpImageCapacity"]),
     balanceScriptRiskConfirmed:
       options.riskConfirmed ??
       previewSettingsSnapshot.balanceScriptRiskConfirmed,
@@ -193,6 +207,7 @@ function renderDatabaseBootstrap(
 beforeEach(() => {
   ipc.clearRequestHistory.mockReset();
   ipc.clearRuntimeLogs.mockReset();
+  ipc.clearMcpImages.mockReset();
   ipc.checkRouteReachability.mockReset();
   ipc.connectCodex.mockReset();
   ipc.createRecoveryPoint.mockReset();
@@ -214,6 +229,8 @@ beforeEach(() => {
   ipc.testBalanceQuery.mockReset();
   ipc.updateBalanceQuerySettings.mockReset();
   ipc.updateImagesGenerationSettings.mockReset();
+  ipc.updateMcpImageCapacityThreshold.mockReset();
+  ipc.openMcpImageDirectory.mockReset();
   ipc.getRunningAppVersion.mockReset();
   ipc.openProjectRepository.mockReset();
   ipc.hideSettingsWindow.mockReset();
@@ -381,6 +398,100 @@ describe("SettingsWindow interactions", () => {
     }
   });
 
+  it("assigns capacity and update indicators to their independent sidebar owners", async () => {
+    const { client } = await renderSettings({
+      settings: {
+        mcpImageCapacity: previewSettingsSnapshot.mcpImageCapacity,
+      },
+    });
+
+    expect(
+      screen.getByRole("button", {
+        name: "Codex，生成图片已达到容量提醒阈值",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "系统" })).toBeInTheDocument();
+
+    act(() => {
+      client.setQueryData(queryKeys.applicationUpdate, {
+        currentVersion: "0.1.0",
+        operation: "idle",
+        available: {
+          version: "0.2.0",
+          notes: null,
+          legacyNotes: null,
+          releaseUrl: "https://example.invalid/release",
+        },
+        lastSuccessfulCheckAtMs: 1,
+        downloadedBytes: null,
+        totalBytes: null,
+        manualFailure: null,
+      });
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "系统，有可用更新" }),
+      ).toBeInTheDocument(),
+    );
+
+    act(() => {
+      client.setQueryData(queryKeys.settings, {
+        ...previewSettingsSnapshot,
+        mcpImageCapacity: {
+          ...previewSettingsSnapshot.mcpImageCapacity,
+          overThreshold: false,
+          warningEpisodeId: null,
+          warningVisible: false,
+        },
+      });
+    });
+    expect(
+      screen.getByRole("button", { name: /^Codex/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "系统，有可用更新" }),
+    ).toBeInTheDocument();
+  });
+
+  it("focuses the image-generation heading only for the closed deep-link target", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    await renderSettings();
+    await waitFor(() => expect(ipc.listeners.navigation).toBeDefined());
+
+    act(() => {
+      ipc.listeners.navigation?.({
+        section: "codex",
+        createNewRoute: false,
+        target: null,
+      });
+    });
+    const ordinaryHeading = await screen.findByRole("heading", {
+      name: "图片生成",
+      level: 3,
+    });
+    expect(ordinaryHeading).not.toHaveFocus();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "路由" }));
+    act(() => {
+      ipc.listeners.navigation?.({
+        section: "codex",
+        createNewRoute: false,
+        target: "image_generation",
+      });
+    });
+    const targetedHeading = await screen.findByRole("heading", {
+      name: "图片生成",
+      level: 3,
+    });
+    await waitFor(() => expect(targetedHeading).toHaveFocus());
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+  });
+
   it("preserves dirty input when continuing and changes section only after discard", async () => {
     await renderSettings();
     fireEvent.change(screen.getByLabelText("路由名称"), {
@@ -419,7 +530,11 @@ describe("SettingsWindow interactions", () => {
     });
 
     act(() => {
-      ipc.listeners.navigation?.({ section: "routes", createNewRoute: true });
+      ipc.listeners.navigation?.({
+        section: "routes",
+        createNewRoute: true,
+        target: null,
+      });
     });
     let dialog = screen.getByRole("alertdialog", {
       name: "放弃未保存的修改？",
@@ -431,7 +546,11 @@ describe("SettingsWindow interactions", () => {
     ).not.toBeInTheDocument();
 
     act(() => {
-      ipc.listeners.navigation?.({ section: "routes", createNewRoute: true });
+      ipc.listeners.navigation?.({
+        section: "routes",
+        createNewRoute: true,
+        target: null,
+      });
     });
     dialog = screen.getByRole("alertdialog", {
       name: "放弃未保存的修改？",

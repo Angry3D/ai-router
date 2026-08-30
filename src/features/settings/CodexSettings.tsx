@@ -1,5 +1,5 @@
-import { FolderOpen, LoaderCircle } from "lucide-react";
-import { useState } from "react";
+import { FolderOpen, LoaderCircle, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -7,14 +7,17 @@ import {
   confirmCodexImagesMcpRepair,
   confirmResetCodexRecoveryToBaseline,
   confirmUpdateCodexRecovery,
+  clearMcpImages,
   connectCodex,
   normalizeIpcError,
   openCodexConfig,
+  openMcpImageDirectory,
   previewCodexImagesMcpRepair,
   previewResetCodexRecoveryToBaseline,
   previewUpdateCodexRecovery,
   reconnectCodex,
   updateImagesGenerationSettings,
+  updateMcpImageCapacityThreshold,
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
 import type { CodexConfigStatus, SettingsSnapshotDto } from "../../generated";
@@ -22,6 +25,7 @@ import {
   SettingsActionGroup,
   SettingsButton,
   SettingsConfirmDialog,
+  SettingsDivider,
   SettingsFieldRow,
   SettingsHelpTooltip,
   SettingsPage,
@@ -49,9 +53,13 @@ const codexLabels: Record<CodexConfigStatus, string> = {
 export function CodexSettings({
   snapshot,
   proxyStatus,
+  focusImageGeneration = false,
+  onImageGenerationFocused,
 }: {
   snapshot: SettingsSnapshotDto;
   proxyStatus: string;
+  focusImageGeneration?: boolean;
+  onImageGenerationFocused?: () => void;
 }) {
   const queryClient = useQueryClient();
   const [port, setPort] = useState(String(snapshot.proxyPort));
@@ -272,6 +280,8 @@ export function CodexSettings({
       <ImageGenerationSettingsSection
         key={imageSettingsKey(snapshot)}
         snapshot={snapshot}
+        focusRequested={focusImageGeneration}
+        onFocusConsumed={onImageGenerationFocused}
       />
       <SettingsSection
         title="Codex 配置"
@@ -428,10 +438,15 @@ export function CodexSettings({
 
 function ImageGenerationSettingsSection({
   snapshot,
+  focusRequested,
+  onFocusConsumed,
 }: {
   snapshot: SettingsSnapshotDto;
+  focusRequested: boolean;
+  onFocusConsumed?: () => void;
 }) {
   const queryClient = useQueryClient();
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const [enabled, setEnabled] = useState(snapshot.imagesGeneration.enabled);
   const [routeId, setRouteId] = useState(snapshot.imagesGeneration.routeId);
   const [timeoutDraft, setTimeoutDraft] = useState(
@@ -440,6 +455,37 @@ function ImageGenerationSettingsSection({
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [capacityDraft, setCapacityDraft] = useState(
+    String(snapshot.mcpImageCapacity.thresholdMib),
+  );
+  const [capacityOperation, setCapacityOperation] = useState<
+    "saving" | "opening" | "clearing" | null
+  >(null);
+  const [capacitySaved, setCapacitySaved] = useState(false);
+  const [capacityError, setCapacityError] = useState<string | null>(null);
+  const [clearConfirmation, setClearConfirmation] =
+    useState<SettingsConfirmation | null>(null);
+  const capacityThreshold = parseImageCapacityThreshold(capacityDraft);
+  const capacityThresholdError =
+    capacityThreshold === null ? "请输入 128 至 102400 的整数。" : null;
+  const capacityUnchanged =
+    capacityThreshold === snapshot.mcpImageCapacity.thresholdMib;
+  const capacityBusy = capacityOperation !== null;
+
+  useEffect(() => {
+    // Keep the editable draft aligned when the authoritative threshold changes.
+    // This is an external snapshot synchronization, not an interaction update.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCapacityDraft(String(snapshot.mcpImageCapacity.thresholdMib));
+    setCapacitySaved(false);
+  }, [snapshot.mcpImageCapacity.thresholdMib]);
+
+  useEffect(() => {
+    if (!focusRequested || !titleRef.current) return;
+    titleRef.current.scrollIntoView?.({ block: "start" });
+    titleRef.current.focus({ preventScroll: true });
+    onFocusConsumed?.();
+  }, [focusRequested, onFocusConsumed]);
   const selectedRouteExists =
     routeId !== null &&
     snapshot.routes.some((route) => route.routeId === routeId);
@@ -503,9 +549,67 @@ function ImageGenerationSettingsSection({
     }
   };
 
+  const refreshCapacity = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.menu }),
+    ]);
+  };
+
+  const saveCapacityThreshold = async () => {
+    if (capacityBusy || capacityUnchanged || capacityThreshold === null) return;
+    setCapacityOperation("saving");
+    setCapacitySaved(false);
+    setCapacityError(null);
+    try {
+      await updateMcpImageCapacityThreshold(capacityThreshold);
+      setCapacityDraft(String(capacityThreshold));
+      setCapacitySaved(true);
+      await refreshCapacity();
+    } catch (reason) {
+      setCapacityError(normalizeIpcError(reason).message);
+    } finally {
+      setCapacityOperation(null);
+    }
+  };
+
+  const openImageDirectory = async () => {
+    if (capacityBusy) return;
+    setCapacityOperation("opening");
+    setCapacitySaved(false);
+    setCapacityError(null);
+    try {
+      await openMcpImageDirectory();
+    } catch (reason) {
+      setCapacityError(normalizeIpcError(reason).message);
+    } finally {
+      setCapacityOperation(null);
+    }
+  };
+
+  const clearImages = async () => {
+    if (capacityBusy) return;
+    setClearConfirmation(null);
+    setCapacityOperation("clearing");
+    setCapacitySaved(false);
+    setCapacityError(null);
+    try {
+      await clearMcpImages();
+      await refreshCapacity();
+    } catch (reason) {
+      setCapacityError(normalizeIpcError(reason).message);
+      await refreshCapacity();
+    } finally {
+      setCapacityOperation(null);
+    }
+  };
+
   return (
     <SettingsSection
       title="图片生成"
+      titleId="codex-image-generation-title"
+      titleRef={titleRef}
+      titleTabIndex={focusRequested ? -1 : undefined}
       titleAccessory={
         <SettingsHelpTooltip label="图片生成说明">
           <strong>模型：gpt-image-2</strong>
@@ -615,6 +719,131 @@ function ImageGenerationSettingsSection({
           </span>
         ) : null}
       </SettingsActionGroup>
+      <SettingsDivider />
+      <div className="mcp-image-storage-settings">
+        <SettingsReadonlyRow label="本地图片">
+          {snapshot.mcpImageCapacity.available
+            ? formatLocalImageSummary(snapshot.mcpImageCapacity)
+            : "—"}
+        </SettingsReadonlyRow>
+        <SettingsFieldRow
+          label="容量提醒"
+          htmlFor="mcp-image-capacity-threshold"
+          className="mcp-image-capacity-row"
+        >
+          <div className="mcp-image-capacity-control">
+            <SettingsTextInput
+              id="mcp-image-capacity-threshold"
+              type="number"
+              min={128}
+              max={102400}
+              step={1}
+              inputMode="numeric"
+              value={capacityDraft}
+              disabled={capacityBusy}
+              aria-invalid={capacityThresholdError ? "true" : undefined}
+              aria-describedby={
+                capacityThresholdError
+                  ? "mcp-image-capacity-threshold-error"
+                  : undefined
+              }
+              onChange={(event) => {
+                setCapacityDraft(event.currentTarget.value);
+                setCapacitySaved(false);
+                setCapacityError(null);
+              }}
+            />
+            <span className="mcp-image-capacity-unit">MB</span>
+            <SettingsButton
+              type="button"
+              disabled={
+                capacityBusy ||
+                capacityUnchanged ||
+                capacityThreshold === null
+              }
+              onClick={() => void saveCapacityThreshold()}
+            >
+              {capacityOperation === "saving" ? (
+                <LoaderCircle aria-hidden="true" className="spin" size={15} />
+              ) : null}
+              保存
+            </SettingsButton>
+            {capacitySaved ? (
+              <SettingsStatus tone="success">已保存</SettingsStatus>
+            ) : null}
+          </div>
+          {capacityThresholdError ? (
+            <p
+              id="mcp-image-capacity-threshold-error"
+              className="parameter-field-error"
+              role="alert"
+            >
+              {capacityThresholdError}
+            </p>
+          ) : null}
+        </SettingsFieldRow>
+        {snapshot.mcpImageCapacity.overThreshold ? (
+          <p className="mcp-image-capacity-warning" role="status">
+            已达到容量提醒阈值，生成图片仍可继续使用。
+          </p>
+        ) : null}
+        {!snapshot.mcpImageCapacity.available ? (
+          <p className="settings-error mcp-image-capacity-message" role="alert">
+            图片目录暂时无法读取。
+          </p>
+        ) : null}
+        {capacityError ? (
+          <p className="settings-error mcp-image-capacity-message" role="alert">
+            {capacityError}
+          </p>
+        ) : null}
+        <SettingsActionGroup className="mcp-image-storage-actions">
+          <SettingsButton
+            type="button"
+            disabled={capacityBusy}
+            onClick={() => void openImageDirectory()}
+          >
+            {capacityOperation === "opening" ? (
+              <LoaderCircle aria-hidden="true" className="spin" size={15} />
+            ) : (
+              <FolderOpen aria-hidden="true" size={16} />
+            )}
+            打开图片目录
+          </SettingsButton>
+          <SettingsButton
+            type="button"
+            variant="danger"
+            disabled={
+              capacityBusy ||
+              !snapshot.mcpImageCapacity.available ||
+              snapshot.mcpImageCapacity.imageCount === 0
+            }
+            onClick={() =>
+              setClearConfirmation({
+                title: "清除生成图片？",
+                body: "这些图片会被永久删除。历史任务中仅保存在此目录的图片可能无法再预览、处理或复用。",
+                details: `将清除 ${snapshot.mcpImageCapacity.imageCount} 张图片，占用 ${formatImageBytes(snapshot.mcpImageCapacity.bytes, true)}。`,
+                confirmLabel: "清除图片",
+                destructive: true,
+                onConfirm: () => void clearImages(),
+              })
+            }
+          >
+            {capacityOperation === "clearing" ? (
+              <LoaderCircle aria-hidden="true" className="spin" size={15} />
+            ) : (
+              <Trash2 aria-hidden="true" size={16} />
+            )}
+            清除生成图片
+          </SettingsButton>
+        </SettingsActionGroup>
+      </div>
+      {clearConfirmation ? (
+        <SettingsConfirmDialog
+          confirmation={clearConfirmation}
+          onCancel={() => setClearConfirmation(null)}
+        />
+      ) : null}
     </SettingsSection>
   );
 }
@@ -622,6 +851,33 @@ function ImageGenerationSettingsSection({
 function imageSettingsKey(snapshot: SettingsSnapshotDto) {
   const routeIds = snapshot.routes.map((route) => route.routeId).join(",");
   return `${snapshot.imagesGeneration.enabled}:${snapshot.imagesGeneration.routeId ?? ""}:${snapshot.imagesGeneration.timeoutSecs}:${routeIds}`;
+}
+
+function parseImageCapacityThreshold(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 128 && parsed <= 102400
+    ? parsed
+    : null;
+}
+
+function formatLocalImageSummary(
+  capacity: SettingsSnapshotDto["mcpImageCapacity"],
+) {
+  return `${capacity.imageCount}张（${formatImageBytes(capacity.bytes)}）`;
+}
+
+function formatImageBytes(bytes: number, spaced = false): string {
+  const separator = spaced ? " " : "";
+  const gib = 1024 ** 3;
+  const mib = 1024 ** 2;
+  if (bytes >= gib) return `${trimDecimal(bytes / gib, 2)}${separator}G${spaced ? "B" : ""}`;
+  if (bytes >= mib) return `${trimDecimal(bytes / mib, 1)}${separator}M${spaced ? "B" : ""}`;
+  return `${trimDecimal(bytes / 1024, 1)}${separator}K${spaced ? "B" : ""}`;
+}
+
+function trimDecimal(value: number, digits: number): string {
+  return value.toFixed(digits).replace(/\.0+$|(?<=\.[0-9]*)0+$/, "");
 }
 
 function SnapshotSummary({

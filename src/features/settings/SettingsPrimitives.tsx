@@ -43,7 +43,7 @@ export function SettingsSidebar({
     id: SettingsSectionId;
     label: string;
     icon: ReactNode;
-    hasIndicator?: boolean;
+    indicatorLabel?: string;
   }>;
   onSelect: (section: SettingsSectionId) => void;
   onOpenRepository: () => void;
@@ -72,16 +72,18 @@ export function SettingsSidebar({
           type="button"
           key={item.id}
           aria-label={
-            item.hasIndicator ? `${item.label}，有可用更新` : item.label
+            item.indicatorLabel
+              ? `${item.label}，${item.indicatorLabel}`
+              : item.label
           }
           aria-current={activeSection === item.id ? "page" : undefined}
           onClick={() => onSelect(item.id)}
         >
           <span className="settings-nav-icon">
             {item.icon}
-            {item.hasIndicator ? (
+            {item.indicatorLabel ? (
               <span
-                className="application-update-indicator"
+                className="settings-navigation-indicator"
                 aria-hidden="true"
               />
             ) : null}
@@ -169,11 +171,17 @@ export function SettingsPageTitle({
 
 export function SettingsSection({
   title,
+  titleId,
+  titleRef,
+  titleTabIndex,
   status,
   titleAccessory,
   children,
 }: {
   title: string;
+  titleId?: string;
+  titleRef?: React.Ref<HTMLHeadingElement>;
+  titleTabIndex?: number;
   status?: ReactNode;
   titleAccessory?: ReactNode;
   children: ReactNode;
@@ -182,7 +190,14 @@ export function SettingsSection({
     <section className="settings-section">
       <div className="settings-section-heading">
         <div className="settings-section-title-group">
-          <h3 className="settings-section-title">{title}</h3>
+          <h3
+            className="settings-section-title"
+            id={titleId}
+            ref={titleRef}
+            tabIndex={titleTabIndex}
+          >
+            {title}
+          </h3>
           {titleAccessory}
         </div>
         {status}

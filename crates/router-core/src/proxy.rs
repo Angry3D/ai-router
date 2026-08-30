@@ -77,7 +77,11 @@ pub use history::{
     InferenceStatusService, MetadataFailureSnapshot, RuntimeDiagnosticCode,
     RuntimeDiagnosticComponent, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
 };
-pub use images::ImagesGenerationService;
+pub use images::{
+    ImageAssetChangeSink, ImagesGenerationService, McpImageAssetCleanupResult,
+    McpImageAssetMaintenanceError, McpImageAssetManager, McpImageAssetSummary,
+    NoopImageAssetChangeSink,
+};
 pub use upstream::{ResponsesForwarder, UpstreamForwarderConfig};
 
 pub const MAX_REQUEST_WIRE_BYTES: usize = 200 * 1024 * 1024;
@@ -275,8 +279,8 @@ pub struct ProxyIngressState {
     wire_limit: usize,
     decoded_limit: usize,
     images: ImagesGenerationService,
-    mcp_image_asset_root: Option<PathBuf>,
-    mcp_image_permit: Arc<Semaphore>,
+    mcp_image_assets: Option<McpImageAssetManager>,
+    image_asset_change_sink: Arc<dyn ImageAssetChangeSink>,
 }
 
 impl ProxyIngressState {
@@ -293,8 +297,8 @@ impl ProxyIngressState {
             activity: LogicalRequestActivityTracker::default(),
             wire_limit: MAX_REQUEST_WIRE_BYTES,
             decoded_limit: MAX_REQUEST_DECODED_BYTES,
-            mcp_image_asset_root: None,
-            mcp_image_permit: Arc::new(Semaphore::new(1)),
+            mcp_image_assets: None,
+            image_asset_change_sink: Arc::new(NoopImageAssetChangeSink),
         }
     }
 
@@ -322,7 +326,19 @@ impl ProxyIngressState {
 
     #[must_use]
     pub fn with_mcp_image_asset_root(mut self, root: PathBuf) -> Self {
-        self.mcp_image_asset_root = Some(root);
+        self.mcp_image_assets = Some(McpImageAssetManager::new(root, Arc::new(Semaphore::new(1))));
+        self
+    }
+
+    #[must_use]
+    pub fn with_mcp_image_assets(mut self, assets: McpImageAssetManager) -> Self {
+        self.mcp_image_assets = Some(assets);
+        self
+    }
+
+    #[must_use]
+    pub fn with_image_asset_change_sink(mut self, sink: Arc<dyn ImageAssetChangeSink>) -> Self {
+        self.image_asset_change_sink = sink;
         self
     }
 
@@ -374,14 +390,14 @@ pub struct LocalErrorBodyDto {
 
 pub fn build_proxy_router(state: ProxyIngressState) -> Router {
     let images = state.images.clone();
-    let asset_root = state.mcp_image_asset_root.clone();
-    let image_permit = Arc::clone(&state.mcp_image_permit);
+    let image_assets = state.mcp_image_assets.clone();
+    let image_asset_change_sink = Arc::clone(&state.image_asset_change_sink);
     let mcp_service = StreamableHttpService::new(
         move || {
             Ok(images::ImageMcpServer::new(
                 images.clone(),
-                asset_root.clone(),
-                Arc::clone(&image_permit),
+                image_assets.clone(),
+                Arc::clone(&image_asset_change_sink),
             ))
         },
         Arc::new(LocalSessionManager::default()),

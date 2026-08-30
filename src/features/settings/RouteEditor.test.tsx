@@ -392,7 +392,7 @@ describe("RouteEditor interactions", () => {
     expect(omit).toBeChecked();
     expect(save).toBeEnabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
     expect(
       screen.getByRole("alertdialog", { name: "放弃未保存的修改？" }),
     ).toBeInTheDocument();
@@ -496,7 +496,7 @@ describe("RouteEditor interactions", () => {
       "placeholder",
       "128000",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
     expect(
       screen.queryByRole("heading", { name: "自定义模型" }),
     ).not.toBeInTheDocument();
@@ -706,7 +706,7 @@ describe("RouteEditor interactions", () => {
       "preview-key-not-real",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
 
     expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
     expect(

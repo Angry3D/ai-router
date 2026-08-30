@@ -64,6 +64,7 @@ const keysByArea: Record<StateArea, ReadonlyArray<readonly unknown[]>> = {
   balance: [queryKeys.balance, queryKeys.menu],
   balance_settings: [queryKeys.balanceSettings, queryKeys.settings],
   images_generation: [queryKeys.routes, queryKeys.route, queryKeys.settings],
+  mcp_image_assets: [queryKeys.menu, queryKeys.settings],
   proxy: [
     queryKeys.proxy,
     queryKeys.bootstrap,

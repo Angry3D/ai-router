@@ -20,6 +20,9 @@ pub const DEFAULT_AUTOMATIC_BALANCE_REFRESH_MINUTES: u16 = 30;
 pub const MIN_IMAGES_GENERATION_TIMEOUT_SECS: u16 = 600;
 pub const DEFAULT_IMAGES_GENERATION_TIMEOUT_SECS: u16 = 600;
 pub const MAX_IMAGES_GENERATION_TIMEOUT_SECS: u16 = 3_600;
+pub const MIN_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 128;
+pub const DEFAULT_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 1_024;
+pub const MAX_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 102_400;
 pub const DEFAULT_CODEX_MODEL_CONTEXT_WINDOW: u64 = 128_000;
 pub const MAX_CODEX_MODEL_CONTEXT_WINDOW: u64 = 9_007_199_254_740_991;
 
@@ -459,6 +462,44 @@ impl Default for ImagesGenerationTimeout {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct McpImageCapacityWarningThreshold(u32);
+
+impl McpImageCapacityWarningThreshold {
+    /// Validates the advisory MCP image capacity warning threshold.
+    ///
+    /// # Errors
+    ///
+    /// Returns a field-specific error outside 128..=102,400 MiB.
+    pub fn parse(mebibytes: u32) -> Result<Self, ValidationError> {
+        if !(MIN_MCP_IMAGE_CAPACITY_WARNING_MIB..=MAX_MCP_IMAGE_CAPACITY_WARNING_MIB)
+            .contains(&mebibytes)
+        {
+            return Err(ValidationError::new(
+                "mcp_image_capacity_warning_out_of_range",
+                "thresholdMib",
+            ));
+        }
+        Ok(Self(mebibytes))
+    }
+
+    #[must_use]
+    pub const fn mebibytes(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn bytes(self) -> u64 {
+        u64::from(self.0) * 1_024 * 1_024
+    }
+}
+
+impl Default for McpImageCapacityWarningThreshold {
+    fn default() -> Self {
+        Self(DEFAULT_MCP_IMAGE_CAPACITY_WARNING_MIB)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexModel {
     model_id: String,
@@ -702,8 +743,8 @@ mod tests {
 
     use super::{
         ApiKey, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
-        ImagesGenerationTimeout, MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW, RouteName,
-        ServiceTierPolicy,
+        ImagesGenerationTimeout, MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW,
+        McpImageCapacityWarningThreshold, RouteName, ServiceTierPolicy,
     };
 
     #[derive(Deserialize)]
@@ -791,6 +832,21 @@ mod tests {
             let error = ImagesGenerationTimeout::parse(invalid).expect_err("invalid timeout");
             assert_eq!(error.code, "images_generation_timeout_out_of_range");
             assert_eq!(error.field, "timeoutSecs");
+        }
+    }
+
+    #[test]
+    fn mcp_image_capacity_warning_accepts_only_its_inclusive_range() {
+        let default = McpImageCapacityWarningThreshold::default();
+        assert_eq!(default.mebibytes(), 1_024);
+        assert_eq!(default.bytes(), 1_073_741_824);
+        assert!(McpImageCapacityWarningThreshold::parse(128).is_ok());
+        assert!(McpImageCapacityWarningThreshold::parse(102_400).is_ok());
+        for invalid in [0, 127, 102_401, u32::MAX] {
+            let error = McpImageCapacityWarningThreshold::parse(invalid)
+                .expect_err("invalid capacity warning");
+            assert_eq!(error.code, "mcp_image_capacity_warning_out_of_range");
+            assert_eq!(error.field, "thresholdMib");
         }
     }
 

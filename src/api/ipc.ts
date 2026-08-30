@@ -67,10 +67,12 @@ export const IPC_COMMANDS = {
   previewRouteActivation: "preview_route_activation",
   confirmRouteActivation: "confirm_route_activation",
   dismissCodexRestartNotice: "dismiss_codex_restart_notice",
+  dismissMcpImageCapacityWarning: "dismiss_mcp_image_capacity_warning",
   setFallbackEnabled: "set_fallback_enabled",
   reorderRoutesAndFallback: "reorder_routes_and_fallback",
   updateBalanceQuerySettings: "update_balance_query_settings",
   updateImagesGenerationSettings: "update_images_generation_settings",
+  updateMcpImageCapacityThreshold: "update_mcp_image_capacity_threshold",
   updateAppearancePreference: "update_appearance_preference",
   updateMenuBarSettings: "update_menu_bar_settings",
   refreshBalance: "refresh_balance",
@@ -91,6 +93,8 @@ export const IPC_COMMANDS = {
   restoreCodex: "restore_codex",
   clearRequestHistory: "clear_request_history",
   openCodexConfig: "open_codex_config",
+  openMcpImageDirectory: "open_mcp_image_directory",
+  clearMcpImages: "clear_mcp_images",
   openRuntimeLogDirectory: "open_runtime_log_directory",
   clearRuntimeLogs: "clear_runtime_logs",
   showSettingsWindow: "show_settings_window",
@@ -124,6 +128,7 @@ export interface MenuPositionedEvent extends MenuPrepareEvent {
 export interface SettingsNavigationEvent {
   section: "routes" | "usage" | "codex" | "system";
   createNewRoute: boolean;
+  target: "image_generation" | null;
 }
 
 export function isTauriRuntime(): boolean {
@@ -310,6 +315,14 @@ export async function dismissCodexRestartNotice(
   });
 }
 
+export async function dismissMcpImageCapacityWarning(
+  episodeId: string,
+): Promise<MutationResultDto> {
+  return invoke<MutationResultDto>(IPC_COMMANDS.dismissMcpImageCapacityWarning, {
+    episodeId,
+  });
+}
+
 export async function setFallbackEnabled(
   enabled: boolean,
 ): Promise<MutationResultDto> {
@@ -351,6 +364,14 @@ export async function updateImagesGenerationSettings(
       input,
     },
   );
+}
+
+export async function updateMcpImageCapacityThreshold(
+  thresholdMib: number,
+): Promise<MutationResultDto> {
+  return invoke<MutationResultDto>(IPC_COMMANDS.updateMcpImageCapacityThreshold, {
+    thresholdMib,
+  });
 }
 
 export async function refreshBalance(
@@ -471,6 +492,14 @@ export async function openCodexConfig(): Promise<void> {
   return invoke<void>(IPC_COMMANDS.openCodexConfig);
 }
 
+export async function openMcpImageDirectory(): Promise<void> {
+  return invoke<void>(IPC_COMMANDS.openMcpImageDirectory);
+}
+
+export async function clearMcpImages(): Promise<MutationResultDto> {
+  return invoke<MutationResultDto>(IPC_COMMANDS.clearMcpImages);
+}
+
 export async function openRuntimeLogDirectory(): Promise<void> {
   return invoke<void>(IPC_COMMANDS.openRuntimeLogDirectory);
 }
@@ -482,10 +511,12 @@ export async function clearRuntimeLogs(): Promise<MutationResultDto> {
 export async function showSettingsWindow(
   section: SettingsNavigationEvent["section"],
   createNewRoute = false,
+  target: SettingsNavigationEvent["target"] = null,
 ): Promise<void> {
   return invoke<void>(IPC_COMMANDS.showSettingsWindow, {
     section,
     createNewRoute,
+    target,
   });
 }
 
