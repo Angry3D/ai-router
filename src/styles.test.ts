@@ -191,6 +191,13 @@ describe("cross-window style isolation", () => {
     );
   });
 
+  it("keeps route editor labels compact without changing shared settings rows", () => {
+    const routeFieldsRule =
+      styles.match(/\.route-form-fields \{([^}]*)\}/u)?.[1] ?? "";
+    expect(routeFieldsRule).toContain("--settings-label-width: 96px;");
+    expect(styles).toContain("--settings-label-width: 120px;");
+  });
+
   it("shares donut host geometry and limits 200px widths to image controls", () => {
     const donutRule =
       styles.match(/\.usage-donut-chart \{([^}]*)\}/u)?.[1] ?? "";

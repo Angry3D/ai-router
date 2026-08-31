@@ -1661,6 +1661,7 @@ body[data-view="settings"] .app-variant-badge {
 }
 
 .route-form-fields {
+  --settings-label-width: 96px;
   min-width: 0;
   padding: 0;
   margin: 0;
