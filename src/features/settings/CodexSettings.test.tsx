@@ -1,5 +1,6 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -20,6 +21,7 @@ import { SettingsWindow } from "./SettingsWindow";
 const ipc = vi.hoisted(() => ({
   clearRequestHistory: vi.fn(),
   clearRuntimeLogs: vi.fn(),
+  clearMcpImages: vi.fn(),
   checkRouteReachability: vi.fn(),
   confirmCodexImagesMcpRepair: vi.fn(),
   confirmResetCodexRecoveryToBaseline: vi.fn(),
@@ -35,6 +37,7 @@ const ipc = vi.hoisted(() => ({
   getUsageRouteOptions: vi.fn(),
   reorderRoutesAndFallback: vi.fn(),
   openCodexConfig: vi.fn(),
+  openMcpImageDirectory: vi.fn(),
   previewCodexImagesMcpRepair: vi.fn(),
   previewResetCodexRecoveryToBaseline: vi.fn(),
   previewUpdateCodexRecovery: vi.fn(),
@@ -47,6 +50,7 @@ const ipc = vi.hoisted(() => ({
   testBalanceQuery: vi.fn(),
   updateBalanceQuerySettings: vi.fn(),
   updateImagesGenerationSettings: vi.fn(),
+  updateMcpImageCapacityThreshold: vi.fn(),
   getRunningAppVersion: vi.fn(),
   hideSettingsWindow: vi.fn(),
   quitApplication: vi.fn(),
@@ -65,6 +69,7 @@ vi.mock("../../api/ipc", () => ({
   confirmUpdateCodexRecovery: ipc.confirmUpdateCodexRecovery,
   clearRequestHistory: ipc.clearRequestHistory,
   clearRuntimeLogs: ipc.clearRuntimeLogs,
+  clearMcpImages: ipc.clearMcpImages,
   connectCodex: ipc.connectCodex,
   createRecoveryPoint: ipc.createRecoveryPoint,
   deleteRoute: ipc.deleteRoute,
@@ -104,6 +109,7 @@ vi.mock("../../api/ipc", () => ({
     field: null,
   }),
   openCodexConfig: ipc.openCodexConfig,
+  openMcpImageDirectory: ipc.openMcpImageDirectory,
   openRuntimeLogDirectory: vi.fn(),
   previewCodexImagesMcpRepair: ipc.previewCodexImagesMcpRepair,
   previewResetCodexRecoveryToBaseline: ipc.previewResetCodexRecoveryToBaseline,
@@ -118,6 +124,7 @@ vi.mock("../../api/ipc", () => ({
   testBalanceQuery: ipc.testBalanceQuery,
   updateBalanceQuerySettings: ipc.updateBalanceQuerySettings,
   updateImagesGenerationSettings: ipc.updateImagesGenerationSettings,
+  updateMcpImageCapacityThreshold: ipc.updateMcpImageCapacityThreshold,
   quitApplication: ipc.quitApplication,
 }));
 
@@ -156,6 +163,14 @@ async function renderSettings(
   const settings = {
     ...previewSettingsSnapshot,
     ...options.settings,
+    mcpImageCapacity:
+      options.settings?.mcpImageCapacity ??
+      ({
+        ...previewSettingsSnapshot.mcpImageCapacity,
+        overThreshold: false,
+        warningEpisodeId: null,
+        warningVisible: false,
+      } satisfies SettingsSnapshotDto["mcpImageCapacity"]),
     balanceScriptRiskConfirmed:
       options.riskConfirmed ??
       previewSettingsSnapshot.balanceScriptRiskConfirmed,
@@ -183,6 +198,7 @@ async function renderSettings(
 beforeEach(() => {
   ipc.clearRequestHistory.mockReset();
   ipc.clearRuntimeLogs.mockReset();
+  ipc.clearMcpImages.mockReset();
   ipc.checkRouteReachability.mockReset();
   ipc.confirmCodexImagesMcpRepair.mockReset();
   ipc.confirmResetCodexRecoveryToBaseline.mockReset();
@@ -197,6 +213,7 @@ beforeEach(() => {
   ipc.getUsageRouteOptions.mockReset();
   ipc.reorderRoutesAndFallback.mockReset();
   ipc.openCodexConfig.mockReset();
+  ipc.openMcpImageDirectory.mockReset();
   ipc.previewCodexImagesMcpRepair.mockReset();
   ipc.previewResetCodexRecoveryToBaseline.mockReset();
   ipc.previewUpdateCodexRecovery.mockReset();
@@ -210,10 +227,14 @@ beforeEach(() => {
   ipc.testBalanceQuery.mockReset();
   ipc.updateBalanceQuerySettings.mockReset();
   ipc.updateImagesGenerationSettings.mockReset();
+  ipc.updateMcpImageCapacityThreshold.mockReset();
   ipc.getRunningAppVersion.mockReset();
   ipc.quitApplication.mockReset();
   ipc.tauriRuntime = false;
   ipc.getRunningAppVersion.mockResolvedValue("0.1.1");
+  ipc.clearMcpImages.mockResolvedValue({ revision: 20 });
+  ipc.openMcpImageDirectory.mockResolvedValue(undefined);
+  ipc.updateMcpImageCapacityThreshold.mockResolvedValue({ revision: 19 });
   ipc.saveRoute.mockResolvedValue({
     routeId: previewRouteEdits[0].routeId,
     revision: 13,
@@ -966,5 +987,151 @@ describe("CodexSettings interactions", () => {
         timeoutSecs: previewSettingsSnapshot.imagesGeneration.timeoutSecs,
       }),
     );
+  });
+
+  it("renders the merged local image summary and over-threshold status", async () => {
+    await renderSettings({
+      settings: {
+        mcpImageCapacity: previewSettingsSnapshot.mcpImageCapacity,
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
+
+    expect(screen.getByText("166张（1.18G）")).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "容量提醒" })).toHaveValue(
+      1024,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "已达到容量提醒阈值，生成图片仍可继续使用。",
+    );
+  });
+
+  it("saves the capacity threshold independently and locks only management controls", async () => {
+    let finishSave: ((value: { revision: number }) => void) | undefined;
+    ipc.updateMcpImageCapacityThreshold.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishSave = resolve;
+      }),
+    );
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const threshold = screen.getByRole("spinbutton", { name: "容量提醒" });
+    fireEvent.change(threshold, { target: { value: "2048" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(ipc.updateMcpImageCapacityThreshold).toHaveBeenCalledWith(2048);
+    expect(threshold).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "打开图片目录" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "清除生成图片" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "启用" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "应用" })).toBeDisabled();
+
+    finishSave?.({ revision: 19 });
+    expect(await screen.findByText("已保存")).toBeInTheDocument();
+    await waitFor(() => expect(threshold).toBeEnabled());
+  });
+
+  it("rejects an invalid capacity threshold without calling persistence", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const threshold = screen.getByRole("spinbutton", { name: "容量提醒" });
+    fireEvent.change(threshold, { target: { value: "127" } });
+
+    expect(threshold).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "请输入 128 至 102400 的整数。",
+    );
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(ipc.updateMcpImageCapacityThreshold).not.toHaveBeenCalled();
+  });
+
+  it("confirms the historical-task risk before clearing generated images", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "清除生成图片" }));
+    let dialog = screen.getByRole("alertdialog", { name: "清除生成图片？" });
+    expect(dialog).toHaveTextContent(
+      "历史任务中仅保存在此目录的图片可能无法再预览、处理或复用。",
+    );
+    expect(dialog).toHaveTextContent("将清除 166 张图片，占用 1.18 GB。");
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(ipc.clearMcpImages).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "清除生成图片" }));
+    dialog = screen.getByRole("alertdialog", { name: "清除生成图片？" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "清除图片" }));
+    await waitFor(() => expect(ipc.clearMcpImages).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps threshold and Finder access available when the summary is unavailable", async () => {
+    await renderSettings({
+      settings: {
+        mcpImageCapacity: {
+          available: false,
+          imageCount: 0,
+          bytes: 0,
+          thresholdMib: 1024,
+          overThreshold: false,
+          warningEpisodeId: null,
+          warningVisible: false,
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    expect(screen.getByText("本地图片").parentElement).toHaveTextContent(
+      "本地图片—",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "图片目录暂时无法读取。",
+    );
+    expect(screen.getByRole("spinbutton", { name: "容量提醒" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "清除生成图片" }),
+    ).toBeDisabled();
+    const open = screen.getByRole("button", { name: "打开图片目录" });
+    expect(open).toBeEnabled();
+    fireEvent.click(open);
+    await waitFor(() =>
+      expect(ipc.openMcpImageDirectory).toHaveBeenCalledOnce(),
+    );
+  });
+
+  it("preserves the unsaved generation draft when only capacity usage refreshes", async () => {
+    const { client } = await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    const timeout = screen.getByRole("spinbutton", {
+      name: "生成等待上限",
+    });
+    fireEvent.change(timeout, { target: { value: "900" } });
+
+    act(() => {
+      client.setQueryData<SettingsSnapshotDto>(queryKeys.settings, (current) =>
+        current
+          ? {
+              ...current,
+              mcpImageCapacity: {
+                ...current.mcpImageCapacity,
+                imageCount: current.mcpImageCapacity.imageCount + 1,
+                bytes: current.mcpImageCapacity.bytes + 2 * 1024 ** 2,
+              },
+            }
+          : current,
+      );
+    });
+
+    expect(timeout).toHaveValue(900);
+    await waitFor(() =>
+      expect(screen.getByText("167张（1.18G）")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "应用" })).toBeEnabled();
   });
 });

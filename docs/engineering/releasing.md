@@ -33,13 +33,26 @@ pnpm version:check
 同步会保留其他字节和依赖版本。审查完整 diff，确认只有上述版本字段变化，再由
 `version:check` 对所有投影做关系校验。
 
-合并并确认 required checks 后，在该不可变提交创建完全相同的 `v<version>` tag。workflow 会再次比较
-repository、`GITHUB_REF`、tag、应用版本、checkout `HEAD` 和 tag commit；prerelease、build metadata、
-移动 tag 或版本漂移全部失败关闭。
+确定候选范围并确认本地 stable tag 已更新后，在创建 tag 前运行：
+
+```sh
+pnpm release:inventory
+```
+
+该只读命令选择 `HEAD` 可达的最高 annotated stable SemVer tag，列出从该基线到候选 `HEAD` 的每个
+commit 和 changed path，并标明双方的完整 commit ID 与候选版本。发布负责人必须逐项处置清单：把所有
+用户可见新增、行为变化、问题修复、兼容性、迁移操作和重启影响写入版本说明；未写入的测试、依赖或
+内部重构等变化要记录简明排除理由。还要与可用的 merged PR 和已完成任务证据交叉核对，因为本地 Git
+元数据不能自动证明语义完整性。最终准确性、重要性排序和完整性由发布负责人批准。
+
+完成上述盘点、提交版本说明、合并并确认 required checks 后，在该不可变提交创建完全相同的
+`v<version>` tag。workflow 会再次比较 repository、`GITHUB_REF`、tag、应用版本、checkout `HEAD` 和
+tag commit；prerelease、build metadata、移动 tag 或版本漂移全部失败关闭。
 
 ## 版本说明
 
-每个候选稳定版本必须在创建 tag 前提交 `release-notes/v<version>.md`。文件使用严格结构：
+每个候选稳定版本必须在完成 `pnpm release:inventory` 的逐项核对后、创建 tag 前提交
+`release-notes/v<version>.md`。文件使用严格结构：
 `# AI Router v<version>`、包含一到三条项目符号的 `重点更新`，以及可选的 `问题修复` 和
 `注意事项`。工具或 AI 可以生成初稿，但发布负责人必须核对用户可见变化、兼容性与操作提示，
 并在普通 pull request 中审核最终内容。

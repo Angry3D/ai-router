@@ -1,7 +1,7 @@
 {
   "name": "ai-router",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A local macOS routing tool for Codex CLI and Codex App.",
   "author": "Angry3D",
   "license": "MIT",
@@ -54,6 +54,7 @@
     "icons:generate": "node scripts/generate-app-icons.mjs",
     "version:check": "node scripts/manage-version.mjs check",
     "version:sync": "node scripts/manage-version.mjs sync",
+    "release:inventory": "node scripts/release-inventory.mjs",
     "release:validate": "node scripts/manage-release.mjs validate",
     "release:draft": "node scripts/manage-release.mjs draft",
     "release:build": "node scripts/manage-release.mjs build",

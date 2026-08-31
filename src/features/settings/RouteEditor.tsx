@@ -631,18 +631,20 @@ function RouteForm(props: {
             detail={props.newRoute ? null : props.healthDetail?.text}
             detailTone={props.healthDetail?.tone}
           />
-          <SettingsFieldRow label="路由名称" htmlFor="route-name">
+          <SettingsFieldRow label="路由名称" htmlFor="route-name" required>
             <SettingsTextInput
               id="route-name"
               value={form.name}
               maxLength={30}
+              aria-required="true"
               onChange={(event) => patchForm("name", event.target.value)}
             />
           </SettingsFieldRow>
-          <SettingsFieldRow label="Responses Base URL" htmlFor="route-base-url">
+          <SettingsFieldRow label="Base URL" htmlFor="route-base-url" required>
             <SettingsTextInput
               id="route-base-url"
               value={form.baseUrl}
+              aria-required="true"
               onChange={(event) => patchForm("baseUrl", event.target.value)}
               placeholder="https://example.com/v1"
             />
@@ -655,12 +657,13 @@ function RouteForm(props: {
               该地址使用非回环 HTTP，API Key 将以明文传输。
             </p>
           ) : null}
-          <SettingsFieldRow label="API Key" htmlFor="route-api-key">
+          <SettingsFieldRow label="API Key" htmlFor="route-api-key" required>
             <span className="secret-input">
               <SettingsTextInput
                 id="route-api-key"
                 type={showKey ? "text" : "password"}
                 value={form.apiKey}
+                aria-required="true"
                 onChange={(event) => patchForm("apiKey", event.target.value)}
               />
               <SettingsIconButton

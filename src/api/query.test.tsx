@@ -60,6 +60,11 @@ describe("router state synchronization", () => {
     });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.settings });
 
+    act(() => {
+      ipc.listener?.({ revision: 4, areas: ["menu_bar"] });
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.settings });
+
     act(() => window.dispatchEvent(new Event("focus")));
     expect(invalidate).toHaveBeenCalledWith({
       queryKey: queryKeys.bootstrap,

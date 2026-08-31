@@ -30,3 +30,13 @@ stable tag is created. Review that every bullet is accurate, useful to an
 updating user, ordered by importance, and free of internal-only implementation
 details. The protected release job rejects missing, mismatched, placeholder,
 malformed, or oversized content.
+
+Before authoring or approving the file, fix the candidate scope, ensure local
+stable tags are current, and run `pnpm release:inventory`. Review every listed
+commit and changed path. Represent every user-visible addition, behavior
+change, fix, compatibility concern, migration action, or restart implication
+in the notes, or record a concise exclusion reason for internal-only work such
+as tests, dependency maintenance, or refactoring. Cross-check merged PRs and
+completed task evidence when available. The inventory is local Git evidence,
+not a semantic completeness proof; the release owner remains responsible for
+accuracy, priority ordering, completeness, and final approval before tagging.

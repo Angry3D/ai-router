@@ -57,6 +57,9 @@ export function SettingsWindow() {
       ? requested
       : "routes";
   });
+  const [navigationTarget, setNavigationTarget] = useState<
+    "image_generation" | null
+  >(null);
   const [selectedRouteId, setSelectedRouteId] = useState<RouteId | null>(null);
   const [newRoute, setNewRoute] = useState(false);
   const previousSelection = useRef<RouteId | null>(null);
@@ -95,6 +98,7 @@ export function SettingsWindow() {
   const selectSection = (next: SettingsSectionId) => {
     runOrConfirmDiscard(() => {
       setSection(next);
+      setNavigationTarget(null);
       setNewRoute(false);
       setDirty(false);
       setEditorKey((value) => value + 1);
@@ -119,6 +123,7 @@ export function SettingsWindow() {
         if (disposed) return;
         const navigate = () => {
           setSection(event.section);
+          setNavigationTarget(event.target);
           if (event.createNewRoute) {
             previousSelection.current = effectiveSelection;
             setSelectedRouteId(null);
@@ -219,12 +224,18 @@ export function SettingsWindow() {
             id: "codex",
             label: "Codex",
             icon: <Box aria-hidden="true" size={17} />,
+            indicatorLabel: settings.data?.mcpImageCapacity.overThreshold
+              ? "生成图片已达到容量提醒阈值"
+              : undefined,
           },
           {
             id: "system",
             label: "系统",
             icon: <SettingsIcon aria-hidden="true" size={17} />,
-            hasIndicator: applicationUpdate.data?.available != null,
+            indicatorLabel:
+              applicationUpdate.data?.available != null
+                ? "有可用更新"
+                : undefined,
           },
         ]}
       />
@@ -258,6 +269,8 @@ export function SettingsWindow() {
           key={`codex-${editorKey}`}
           snapshot={settings.data}
           proxyStatus={bootstrap.data?.proxyStatus ?? "starting"}
+          focusImageGeneration={navigationTarget === "image_generation"}
+          onImageGenerationFocused={() => setNavigationTarget(null)}
         />
       ) : null}
       {!databaseBlocked && settings.data && section === "usage" ? (

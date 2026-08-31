@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, backup::Backup, param
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
+use uuid::Uuid;
 
 use crate::balance::{
     BalanceError, BalanceErrorCategory, BalanceErrorStage, BalanceQueryConfig, BalanceQueryMode,
@@ -25,13 +26,14 @@ use crate::balance::{
 use crate::domain::{
     ApiKey, AppearancePreference, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
     CodexModelValidationError, CompletionState, DeliveryState,
-    FallbackExcludedModelValidationError, ImagesGenerationTimeout, RouteId, RouteMoveDirection,
-    RouteName, SecretId, ServiceTierPolicy, UpstreamAttemptId, ValidationError,
+    FallbackExcludedModelValidationError, ImagesGenerationTimeout,
+    McpImageCapacityWarningThreshold, RouteId, RouteMoveDirection, RouteName, SecretId,
+    ServiceTierPolicy, UpstreamAttemptId, ValidationError,
 };
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 22;
 
 const GENERAL_BALANCE_SOURCE_HASHES: [&str; 3] = [
     "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507",
@@ -55,6 +57,11 @@ type AppSettingsRow = (
     i64,
     String,
     Option<i64>,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    Option<String>,
 );
 
 #[derive(Clone)]
@@ -165,6 +172,33 @@ pub struct AppSettingsRecord {
     pub images_generation_timeout: ImagesGenerationTimeout,
     pub appearance_preference: AppearancePreference,
     pub last_automatic_update_check_at_ms: Option<i64>,
+    pub menu_bar: MenuBarSettingsRecord,
+    pub mcp_image_capacity: McpImageCapacitySettingsRecord,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MenuBarSettingsRecord {
+    pub status_text_enabled: bool,
+    pub activity_animation_enabled: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpImageCapacitySettingsRecord {
+    pub threshold: McpImageCapacityWarningThreshold,
+    pub active_episode_id: Option<String>,
+    pub dismissed_episode_id: Option<String>,
+}
+
+impl McpImageCapacitySettingsRecord {
+    #[must_use]
+    pub fn over_threshold(&self) -> bool {
+        self.active_episode_id.is_some()
+    }
+
+    #[must_use]
+    pub fn warning_visible(&self) -> bool {
+        self.active_episode_id.is_some() && self.active_episode_id != self.dismissed_episode_id
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1964,6 +1998,10 @@ impl DatabaseExecutor {
     /// # Errors
     ///
     /// Returns an executor, validation, or `SQLite` query error.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the singleton loader validates every persisted settings domain together"
+    )]
     pub async fn app_settings(&self) -> Result<AppSettingsRecord, StorageError> {
         self.call(|connection| {
             let (
@@ -1977,8 +2015,13 @@ impl DatabaseExecutor {
                 images_generation_timeout_secs,
                 appearance_preference,
                 last_automatic_update_check_at_ms,
+                menu_bar_status_text_enabled,
+                menu_bar_activity_animation_enabled,
+                mcp_image_capacity_warning_mib,
+                mcp_image_capacity_active_episode,
+                mcp_image_capacity_dismissed_episode,
             ): AppSettingsRow = connection.query_row(
-                "SELECT proxy_port, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms FROM app_settings WHERE singleton = 1",
+                "SELECT proxy_port, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
@@ -1992,6 +2035,11 @@ impl DatabaseExecutor {
                         row.get(7)?,
                         row.get(8)?,
                         row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                        row.get(14)?,
                     ))
                 },
             )?;
@@ -2013,6 +2061,14 @@ impl DatabaseExecutor {
             if last_automatic_update_check_at_ms.is_some_and(|timestamp| timestamp < 0) {
                 return Err(StorageError::Initialization);
             }
+            let threshold = McpImageCapacityWarningThreshold::parse(
+                u32::try_from(mcp_image_capacity_warning_mib)
+                    .map_err(|_| StorageError::Initialization)?,
+            )?;
+            validate_capacity_episodes(
+                mcp_image_capacity_active_episode.as_deref(),
+                mcp_image_capacity_dismissed_episode.as_deref(),
+            )?;
             if let Some(route_id) = images_generation_route_id.as_deref() {
                 let valid: bool = connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM routes WHERE route_id = ?1)",
@@ -2033,7 +2089,129 @@ impl DatabaseExecutor {
                 images_generation_timeout,
                 appearance_preference: AppearancePreference::parse_persisted(&appearance_preference)?,
                 last_automatic_update_check_at_ms,
+                menu_bar: MenuBarSettingsRecord {
+                    status_text_enabled: parse_persisted_bool(menu_bar_status_text_enabled)?,
+                    activity_animation_enabled: parse_persisted_bool(
+                        menu_bar_activity_animation_enabled,
+                    )?,
+                },
+                mcp_image_capacity: McpImageCapacitySettingsRecord {
+                    threshold,
+                    active_episode_id: mcp_image_capacity_active_episode,
+                    dismissed_episode_id: mcp_image_capacity_dismissed_episode,
+                },
             })
+        })
+        .await
+    }
+
+    /// Atomically persists the two non-critical menu bar presentation preferences.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, transaction, or persisted-value validation error.
+    pub async fn set_menu_bar_settings(
+        &self,
+        status_text_enabled: bool,
+        activity_animation_enabled: bool,
+    ) -> Result<bool, StorageError> {
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let current: (i64, i64) = transaction.query_row(
+                "SELECT menu_bar_status_text_enabled, menu_bar_activity_animation_enabled FROM app_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let current = (parse_persisted_bool(current.0)?, parse_persisted_bool(current.1)?);
+            let next = (status_text_enabled, activity_animation_enabled);
+            if current == next {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            transaction.execute(
+                "UPDATE app_settings SET menu_bar_status_text_enabled = ?1, menu_bar_activity_animation_enabled = ?2 WHERE singleton = 1",
+                params![status_text_enabled, activity_animation_enabled],
+            )?;
+            transaction.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
+    /// Persists a validated threshold and reconciles its reminder episode
+    /// against the current aggregate bytes in one non-critical transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, transaction, or persisted-value validation error.
+    pub async fn set_mcp_image_capacity_threshold(
+        &self,
+        threshold: McpImageCapacityWarningThreshold,
+        observed_bytes: Option<u64>,
+    ) -> Result<McpImageCapacitySettingsRecord, StorageError> {
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let mut next = read_mcp_image_capacity_settings(&transaction)?;
+            next.threshold = threshold;
+            if let Some(observed_bytes) = observed_bytes {
+                next = reconcile_mcp_image_capacity_settings(next, threshold, observed_bytes);
+            }
+            write_mcp_image_capacity_settings_if_changed(&transaction, &next)?;
+            transaction.commit()?;
+            Ok(next)
+        })
+        .await
+    }
+
+    /// Reconciles the durable reminder episode with current aggregate bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, transaction, or persisted-value validation error.
+    pub async fn reconcile_mcp_image_capacity(
+        &self,
+        observed_bytes: u64,
+    ) -> Result<McpImageCapacitySettingsRecord, StorageError> {
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let current = read_mcp_image_capacity_settings(&transaction)?;
+            let threshold = current.threshold;
+            let next = reconcile_mcp_image_capacity_settings(current, threshold, observed_bytes);
+            write_mcp_image_capacity_settings_if_changed(&transaction, &next)?;
+            transaction.commit()?;
+            Ok(next)
+        })
+        .await
+    }
+
+    /// Dismisses only the exact active warning episode.
+    ///
+    /// A stale or malformed ID is a no-op so delayed menu actions cannot hide
+    /// a later episode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, transaction, or persisted-value validation error.
+    pub async fn dismiss_mcp_image_capacity_warning(
+        &self,
+        episode_id: &str,
+    ) -> Result<bool, StorageError> {
+        let episode_id = episode_id.to_owned();
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let current = read_mcp_image_capacity_settings(&transaction)?;
+            if current.active_episode_id.as_deref() != Some(episode_id.as_str())
+                || current.dismissed_episode_id.as_deref() == Some(episode_id.as_str())
+            {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            transaction.execute(
+                "UPDATE app_settings SET mcp_image_capacity_dismissed_episode = ?1 WHERE singleton = 1",
+                [episode_id],
+            )?;
+            transaction.commit()?;
+            Ok(true)
         })
         .await
     }
@@ -3732,6 +3910,12 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     if version < 20 {
         migrate_v20(connection)?;
     }
+    if version < 21 {
+        migrate_v21(connection)?;
+    }
+    if version < 22 {
+        migrate_v22(connection)?;
+    }
     Ok(())
 }
 
@@ -4288,12 +4472,120 @@ fn migrate_v20(connection: &mut Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn migrate_v21(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "
+        ALTER TABLE app_settings ADD COLUMN menu_bar_status_text_enabled INTEGER NOT NULL DEFAULT 1
+            CHECK (menu_bar_status_text_enabled IN (0, 1));
+        ALTER TABLE app_settings ADD COLUMN menu_bar_activity_animation_enabled INTEGER NOT NULL DEFAULT 1
+            CHECK (menu_bar_activity_animation_enabled IN (0, 1));
+        PRAGMA user_version = 21;
+        ",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v22(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "
+        ALTER TABLE app_settings ADD COLUMN mcp_image_capacity_warning_mib INTEGER NOT NULL DEFAULT 1024
+            CHECK (mcp_image_capacity_warning_mib BETWEEN 128 AND 102400);
+        ALTER TABLE app_settings ADD COLUMN mcp_image_capacity_active_episode TEXT;
+        ALTER TABLE app_settings ADD COLUMN mcp_image_capacity_dismissed_episode TEXT;
+        PRAGMA user_version = 22;
+        ",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn parse_persisted_bool(value: i64) -> Result<bool, StorageError> {
     match value {
         0 => Ok(false),
         1 => Ok(true),
         _ => Err(StorageError::Initialization),
     }
+}
+
+fn read_mcp_image_capacity_settings(
+    connection: &Connection,
+) -> Result<McpImageCapacitySettingsRecord, StorageError> {
+    let (threshold_mib, active_episode_id, dismissed_episode_id): (
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = connection.query_row(
+        "SELECT mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode FROM app_settings WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let threshold = McpImageCapacityWarningThreshold::parse(
+        u32::try_from(threshold_mib).map_err(|_| StorageError::Initialization)?,
+    )?;
+    validate_capacity_episodes(
+        active_episode_id.as_deref(),
+        dismissed_episode_id.as_deref(),
+    )?;
+    Ok(McpImageCapacitySettingsRecord {
+        threshold,
+        active_episode_id,
+        dismissed_episode_id,
+    })
+}
+
+fn reconcile_mcp_image_capacity_settings(
+    mut current: McpImageCapacitySettingsRecord,
+    threshold: McpImageCapacityWarningThreshold,
+    observed_bytes: u64,
+) -> McpImageCapacitySettingsRecord {
+    current.threshold = threshold;
+    if observed_bytes < threshold.bytes() {
+        current.active_episode_id = None;
+        current.dismissed_episode_id = None;
+    } else if current.active_episode_id.is_none() {
+        current.active_episode_id = Some(Uuid::new_v4().to_string());
+        current.dismissed_episode_id = None;
+    }
+    current
+}
+
+fn write_mcp_image_capacity_settings_if_changed(
+    transaction: &Transaction<'_>,
+    next: &McpImageCapacitySettingsRecord,
+) -> Result<bool, StorageError> {
+    let current = read_mcp_image_capacity_settings(transaction)?;
+    if current == *next {
+        return Ok(false);
+    }
+    transaction.execute(
+        "UPDATE app_settings SET mcp_image_capacity_warning_mib = ?1, mcp_image_capacity_active_episode = ?2, mcp_image_capacity_dismissed_episode = ?3 WHERE singleton = 1",
+        params![
+            i64::from(next.threshold.mebibytes()),
+            next.active_episode_id,
+            next.dismissed_episode_id,
+        ],
+    )?;
+    Ok(true)
+}
+
+fn validate_capacity_episodes(
+    active_episode_id: Option<&str>,
+    dismissed_episode_id: Option<&str>,
+) -> Result<(), StorageError> {
+    if active_episode_id.is_some_and(|value| !is_canonical_uuid(value))
+        || dismissed_episode_id.is_some_and(|value| !is_canonical_uuid(value))
+        || dismissed_episode_id.is_some_and(|dismissed| Some(dismissed) != active_episode_id)
+    {
+        return Err(StorageError::Initialization);
+    }
+    Ok(())
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
 fn read_fallback_config(connection: &Connection) -> Result<ValidatedFallbackConfig, StorageError> {
@@ -4918,14 +5210,14 @@ mod tests {
         is_general_balance_source_hash, materialize_routing_decisions, migrate_v1, migrate_v2,
         migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7, migrate_v8, migrate_v9,
         migrate_v10, migrate_v11, migrate_v12, migrate_v13, migrate_v14, migrate_v15, migrate_v16,
-        migrate_v17, migrate_v18, migrate_v19, statistics_attribution, statistics_bucket_windows,
-        validate_balance_query,
+        migrate_v17, migrate_v18, migrate_v19, migrate_v20, migrate_v21, migrate_v22,
+        statistics_attribution, statistics_bucket_windows, validate_balance_query,
     };
     use crate::{
         balance::{BalanceQueryMode, BalanceRouteSource, LEGACY_GENERAL_V1_SOURCE},
         domain::{
             ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationTimeout,
-            RouteId, RouteMoveDirection, ServiceTierPolicy,
+            McpImageCapacityWarningThreshold, RouteId, RouteMoveDirection, ServiceTierPolicy,
         },
         recovery::{
             NoopRecoveryEventSink, RecoveryCoordinator, RecoveryFailureCode, RecoveryHealthKind,
@@ -4938,6 +5230,270 @@ mod tests {
         let database = DatabaseExecutor::open(directory.path().join("data/router.sqlite3"))
             .expect("database opens");
         (directory, database)
+    }
+
+    #[tokio::test]
+    async fn menu_bar_settings_default_update_and_noop_are_non_critical() {
+        let (_directory, database) = database();
+        let settings = database.app_settings().await.expect("settings");
+        assert!(settings.menu_bar.status_text_enabled);
+        assert!(settings.menu_bar.activity_animation_enabled);
+        let revision = database.critical_revision().await.expect("revision");
+
+        assert!(
+            database
+                .set_menu_bar_settings(false, true)
+                .await
+                .expect("change")
+        );
+        assert!(
+            !database
+                .set_menu_bar_settings(false, true)
+                .await
+                .expect("no-op")
+        );
+        assert_eq!(
+            database.critical_revision().await.expect("revision"),
+            revision
+        );
+        let settings = database.app_settings().await.expect("updated settings");
+        assert!(!settings.menu_bar.status_text_enabled);
+        assert!(settings.menu_bar.activity_animation_enabled);
+        database
+            .test_execute(|connection| {
+                connection.pragma_update(None, "ignore_check_constraints", true)?;
+                connection.execute(
+                    "UPDATE app_settings SET menu_bar_activity_animation_enabled = 2",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("corrupt fixture");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Initialization)
+        ));
+    }
+
+    fn migrate_test_database_to_v20(connection: &mut Connection) {
+        migrate_v1(connection).expect("v1");
+        migrate_v2(connection).expect("v2");
+        migrate_v3(connection).expect("v3");
+        migrate_v4(connection).expect("v4");
+        migrate_v5(connection).expect("v5");
+        migrate_v6(connection).expect("v6");
+        migrate_v7(connection).expect("v7");
+        migrate_v8(connection).expect("v8");
+        migrate_v9(connection).expect("v9");
+        migrate_v10(connection).expect("v10");
+        migrate_v11(connection).expect("v11");
+        migrate_v12(connection).expect("v12");
+        migrate_v13(connection).expect("v13");
+        migrate_v14(connection).expect("v14");
+        migrate_v15(connection).expect("v15");
+        migrate_v16(connection).expect("v16");
+        migrate_v17(connection).expect("v17");
+        migrate_v18(connection).expect("v18");
+        migrate_v19(connection).expect("v19");
+        migrate_v20(connection).expect("v20");
+    }
+
+    #[test]
+    fn migration_v21_defaults_both_menu_bar_preferences_and_rolls_back_atomically() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v20(&mut connection);
+        migrate_v21(&mut connection).expect("v21");
+        let values: (i64, i64) = connection
+            .query_row(
+                "SELECT menu_bar_status_text_enabled, menu_bar_activity_animation_enabled FROM app_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("menu bar settings");
+        assert_eq!(values, (1, 1));
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            21
+        );
+
+        let mut rollback = Connection::open_in_memory().expect("rollback database");
+        migrate_test_database_to_v20(&mut rollback);
+        rollback
+            .execute(
+                "ALTER TABLE app_settings ADD COLUMN menu_bar_activity_animation_enabled INTEGER",
+                [],
+            )
+            .expect("collision column");
+        assert!(migrate_v21(&mut rollback).is_err());
+        assert_eq!(
+            rollback
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            20
+        );
+        assert!(
+            rollback
+                .prepare("SELECT menu_bar_status_text_enabled FROM app_settings")
+                .is_err()
+        );
+    }
+
+    fn migrate_test_database_to_v21(connection: &mut Connection) {
+        migrate_test_database_to_v20(connection);
+        migrate_v21(connection).expect("v21");
+    }
+
+    #[test]
+    fn migration_v22_defaults_capacity_policy_and_rolls_back_atomically() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v21(&mut connection);
+        migrate_v22(&mut connection).expect("v22");
+        let values: (i64, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode FROM app_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("capacity settings");
+        assert_eq!(values, (1_024, None, None));
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            22
+        );
+
+        let mut rollback = Connection::open_in_memory().expect("rollback database");
+        migrate_test_database_to_v21(&mut rollback);
+        rollback
+            .execute(
+                "ALTER TABLE app_settings ADD COLUMN mcp_image_capacity_dismissed_episode TEXT",
+                [],
+            )
+            .expect("collision column");
+        assert!(migrate_v22(&mut rollback).is_err());
+        assert_eq!(
+            rollback
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            21
+        );
+        assert!(
+            rollback
+                .prepare("SELECT mcp_image_capacity_warning_mib FROM app_settings")
+                .is_err()
+        );
+        assert!(
+            rollback
+                .prepare("SELECT mcp_image_capacity_active_episode FROM app_settings")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_warning_episode_transitions_are_exact_durable_and_non_critical() {
+        let (_directory, database) = database();
+        let settings = database.app_settings().await.expect("settings");
+        assert_eq!(settings.mcp_image_capacity.threshold.mebibytes(), 1_024);
+        assert!(!settings.mcp_image_capacity.over_threshold());
+        assert!(!settings.mcp_image_capacity.warning_visible());
+        let critical_revision = database.critical_revision().await.expect("revision");
+
+        let threshold_bytes = settings.mcp_image_capacity.threshold.bytes();
+        let active = database
+            .reconcile_mcp_image_capacity(threshold_bytes)
+            .await
+            .expect("cross threshold");
+        let episode = active.active_episode_id.clone().expect("active episode");
+        assert!(active.warning_visible());
+        assert!(
+            !database
+                .dismiss_mcp_image_capacity_warning("stale")
+                .await
+                .expect("stale dismissal")
+        );
+        assert!(
+            database
+                .dismiss_mcp_image_capacity_warning(&episode)
+                .await
+                .expect("exact dismissal")
+        );
+
+        let persisted = database.app_settings().await.expect("persisted settings");
+        assert_eq!(
+            persisted.mcp_image_capacity.active_episode_id.as_deref(),
+            Some(episode.as_str())
+        );
+        assert_eq!(
+            persisted.mcp_image_capacity.dismissed_episode_id.as_deref(),
+            Some(episode.as_str())
+        );
+        assert!(!persisted.mcp_image_capacity.warning_visible());
+        let still_over = database
+            .reconcile_mcp_image_capacity(threshold_bytes + 1)
+            .await
+            .expect("preserve episode");
+        assert_eq!(still_over, persisted.mcp_image_capacity);
+
+        let unavailable_threshold =
+            McpImageCapacityWarningThreshold::parse(1_536).expect("threshold");
+        let saved_without_summary = database
+            .set_mcp_image_capacity_threshold(unavailable_threshold, None)
+            .await
+            .expect("save without aggregate summary");
+        assert_eq!(
+            saved_without_summary.active_episode_id.as_deref(),
+            Some(episode.as_str())
+        );
+        assert_eq!(
+            saved_without_summary.dismissed_episode_id.as_deref(),
+            Some(episode.as_str())
+        );
+        assert_eq!(saved_without_summary.threshold, unavailable_threshold);
+
+        let raised = McpImageCapacityWarningThreshold::parse(2_048).expect("threshold");
+        let below = database
+            .set_mcp_image_capacity_threshold(raised, Some(threshold_bytes))
+            .await
+            .expect("raise threshold");
+        assert!(!below.over_threshold());
+        let lowered = McpImageCapacityWarningThreshold::parse(512).expect("threshold");
+        let new_episode = database
+            .set_mcp_image_capacity_threshold(lowered, Some(threshold_bytes))
+            .await
+            .expect("lower threshold");
+        assert!(new_episode.warning_visible());
+        assert_ne!(
+            new_episode.active_episode_id.as_deref(),
+            Some(episode.as_str())
+        );
+        assert_eq!(
+            database.critical_revision().await.expect("revision"),
+            critical_revision
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_settings_fail_closed_on_constraint_bypassed_values() {
+        let (_directory, database) = database();
+        database
+            .test_execute(|connection| {
+                connection.pragma_update(None, "ignore_check_constraints", true)?;
+                connection.execute(
+                    "UPDATE app_settings SET mcp_image_capacity_warning_mib = 127",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("corrupt threshold");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Validation(_) | StorageError::Initialization)
+        ));
     }
 
     #[tokio::test]

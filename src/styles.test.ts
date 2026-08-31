@@ -59,6 +59,18 @@ describe("cross-window style isolation", () => {
     expect(viewportRule).toContain("height: 100%;");
   });
 
+  it("renders Settings required markers with the shared danger color", () => {
+    const markerRule =
+      styles.match(/\.settings-required-marker \{([^}]*)\}/u)?.[1] ?? "";
+    const glyphRule =
+      styles.match(/\.settings-required-marker::before \{([^}]*)\}/u)?.[1] ??
+      "";
+
+    expect(markerRule).toContain("display: inline-block;");
+    expect(markerRule).toContain("color: var(--red);");
+    expect(glyphRule).toContain('content: "*";');
+  });
+
   it("preserves the Usage page flex layout inside the Radix content wrapper", () => {
     const contentRule =
       styles.match(
@@ -177,6 +189,13 @@ describe("cross-window style isolation", () => {
     expect(contentTitleBandRule).toContain(
       "margin-inline: calc(0px - var(--settings-page-padding-inline));",
     );
+  });
+
+  it("keeps route editor labels compact without changing shared settings rows", () => {
+    const routeFieldsRule =
+      styles.match(/\.route-form-fields \{([^}]*)\}/u)?.[1] ?? "";
+    expect(routeFieldsRule).toContain("--settings-label-width: 96px;");
+    expect(styles).toContain("--settings-label-width: 120px;");
   });
 
   it("shares donut host geometry and limits 200px widths to image controls", () => {

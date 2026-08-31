@@ -144,6 +144,40 @@
       }
     },
     {
+      "id": "readme-product-screenshots",
+      "name": "AI Router README product screenshots",
+      "version": "2026-08-21 / 9dd77e99",
+      "license": "MIT; rendered Lucide icons remain ISC",
+      "upstream": "https://github.com/Angry3D/ai-router",
+      "noticeMarker": "<!-- provenance:readme-product-screenshots -->",
+      "localPaths": [
+        "docs/images/readme/README.md",
+        "docs/images/readme/menu-overview-dark.png",
+        "docs/images/readme/menu-overview-light.png",
+        "docs/images/readme/route-overview-dark.png",
+        "docs/images/readme/route-overview-light.png",
+        "third-party/licenses/ISC-Lucide.txt"
+      ],
+      "sourceRecord": {
+        "path": "docs/images/readme/README.md",
+        "requiredStrings": [
+          "<!-- provenance:readme-product-screenshots -->",
+          "2026-08-21",
+          "com.relax.airouter.qa",
+          "Synthetic A",
+          "查看完整画面",
+          "ISC-Lucide.txt"
+        ]
+      },
+      "hashes": {
+        "docs/images/readme/menu-overview-dark.png": "6d742befee5a4f5cbae058006a2eb621d89f7bd22c5ed76359f2e45aa8c62a6b",
+        "docs/images/readme/menu-overview-light.png": "13fd3aed0e73babaf668c1df8615398a62f0b9853ce0817f57b1b9b7325806a9",
+        "docs/images/readme/route-overview-dark.png": "65fca16ffdeb0c10c9bcc5fdf50f3695cac9e9b3eff9769e1252125e4819209b",
+        "docs/images/readme/route-overview-light.png": "4671029bbad6291584a8792ad86d2802833ccc05b34930d83aa051f52d83d9aa",
+        "third-party/licenses/ISC-Lucide.txt": "1e7290b35280a048667bbf0ebabac1c7fd52a75300e8b2946ac165715997f2bc"
+      }
+    },
+    {
       "id": "openai-pricing-snapshots",
       "name": "OpenAI pricing snapshots",
       "version": "2026-07-27 / 2026-07-28",
@@ -218,7 +252,11 @@
     "src-tauri/icons/tray-normal.png",
     "src-tauri/icons/tray-normal.svg",
     "src-tauri/icons/tray-route.png",
-    "src-tauri/icons/tray-route.svg"
+    "src-tauri/icons/tray-route.svg",
+    "docs/images/readme/menu-overview-dark.png",
+    "docs/images/readme/menu-overview-light.png",
+    "docs/images/readme/route-overview-dark.png",
+    "docs/images/readme/route-overview-light.png"
   ],
   "declaredVisualAssetHashes": {
     "src-tauri/icons/app-icon-qa.icns": "0a74c4bcde5a87735a8e9bc07d77d5c21e2841d5f5019c431052ac5487a8ad4b",
@@ -230,14 +268,14 @@
     "src-tauri/icons/icon.png": "65afb3b08935ba94e610b544ebbdc74a4f174b31c35696b429a08da79fbdf141",
     "src-tauri/icons/tray-active-a.png": "dd6dcf9a3dfb42577e634b0ff5a95ea9723e9947ccbc1aa2fb565f8466ba8826",
     "src-tauri/icons/tray-active-a.svg": "a014ebae7d3ef1b2ce40a87c848c6a9401943b0df11d11db1e912d76ae0f9b86",
-    "src-tauri/icons/tray-active-b.png": "58cbe3f380e925c04de2a672ea4f13ff8acacba811a3374fb7e4da3bcb628da9",
-    "src-tauri/icons/tray-active-b.svg": "eaedb7f9b2bf6e2331b8cd56701b025ad62275e3b073e9b5a633fe898a99166f",
-    "src-tauri/icons/tray-active-c.png": "663dd21ca8489188ce7bd2640b171514546361848575bd3c70a826ba36382e85",
-    "src-tauri/icons/tray-active-c.svg": "4074a9683c318416318861e4480cd7b9cde552d1cf78cdb38284ca20864d2f88",
+    "src-tauri/icons/tray-active-b.png": "37cfb55b36397be5d26226e7e9af43a5c260ba4a2d3d3c6bc0c5f5b20890a5cb",
+    "src-tauri/icons/tray-active-b.svg": "c06d7756a2296726118a0ec506a616a86047076cb8d95b123a0d34e8923c48df",
+    "src-tauri/icons/tray-active-c.png": "428246c8fafa0f71e465213740bc32258302e19849d6d3cfbd24855d21f58142",
+    "src-tauri/icons/tray-active-c.svg": "fb0f143695f87bb5b8f4d9bf65ee81b113b48150d03ee12695a9cf99f0166607",
     "src-tauri/icons/tray-active-d.png": "bb310d7e86f2f6ce334b872d07b5ff57429dbe223bc17ff76a3b799f749e9af8",
     "src-tauri/icons/tray-active-d.svg": "b43ef81be2870d49ebbadb40bc9c71936161f9c2aa9a3f3fa0a6b93bc006ac4f",
-    "src-tauri/icons/tray-active-static.png": "6e6d764807646597d50a3185a15fc65a7ad5fa80af79b02e25cb0801bd6f025d",
-    "src-tauri/icons/tray-active-static.svg": "6affa014b1e9f7fc69d0fbfff59bd94b1cd597411fbc7ad72843e29b6dc76cf5",
+    "src-tauri/icons/tray-active-static.png": "3aff10b6ba2f2c9034851473aa952555814b3e64f144539cf6c9ab3f7bae597b",
+    "src-tauri/icons/tray-active-static.svg": "199161c3385e9ebdf2ad07d18f4ed49365a58932c97a792f8e3037c05a0d332b",
     "src-tauri/icons/tray-attention.png": "bf055cd128d0b780a652948fd295a25bf13e2d9e95a67c0e4eb4118952734fef",
     "src-tauri/icons/tray-attention.svg": "0117bb575c96af28348d114fd4cace369575706a1e146ffdc87bf538edac1883",
     "src-tauri/icons/tray-failure.png": "3b73147ec968a8d1f87ad03b7177e2ff1e444422eff5d310c6b8cc66193ca5a4",
@@ -245,7 +283,11 @@
     "src-tauri/icons/tray-normal.png": "1681be125693830a441fbbd5c07d8061861545ce912403b5ad6d6095a7a1c934",
     "src-tauri/icons/tray-normal.svg": "3a62df9c9d0ddfbc73bfc393e7502642deb48e0754a5ee2de6f34bf3235b204d",
     "src-tauri/icons/tray-route.png": "c5e051233187abf0b3e786e1f2be77ff976a06ed84cc1a477e87cbabdd5aedd8",
-    "src-tauri/icons/tray-route.svg": "6fb4e41d93fc838314107f2f392e1d40d26a808d7267aa4c609b511c139c02c1"
+    "src-tauri/icons/tray-route.svg": "6fb4e41d93fc838314107f2f392e1d40d26a808d7267aa4c609b511c139c02c1",
+    "docs/images/readme/menu-overview-dark.png": "6d742befee5a4f5cbae058006a2eb621d89f7bd22c5ed76359f2e45aa8c62a6b",
+    "docs/images/readme/menu-overview-light.png": "13fd3aed0e73babaf668c1df8615398a62f0b9853ce0817f57b1b9b7325806a9",
+    "docs/images/readme/route-overview-dark.png": "65fca16ffdeb0c10c9bcc5fdf50f3695cac9e9b3eff9769e1252125e4819209b",
+    "docs/images/readme/route-overview-light.png": "4671029bbad6291584a8792ad86d2802833ccc05b34930d83aa051f52d83d9aa"
   },
   "publicTree": {
     "forbiddenPathPrefixes": [".agents/", ".claude/", ".codex/", ".trellis/"],

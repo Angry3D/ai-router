@@ -24,9 +24,10 @@ the existing valid `.icns` instead of introducing binary-only churn.
 
 The `tray-*.svg` and `tray-*.png` files are separate macOS template assets.
 `tray-active-a` through `tray-active-d` and `tray-active-static` use the same
-Route geometry plus the approved activity bead. The moving frames advance from
-the solid head through two enlarged middle beads to the solid tail every
-300 ms; the static center bead is the Reduce Motion fallback.
+Route geometry plus the approved radius-3 activity bead. The moving frames
+advance from the solid head through two middle beads to the solid tail every
+300 ms; the static center bead is shared by Waiting, Reduce Motion, and the
+disabled-animation projection.
 `pnpm icons:generate` rebuilds these 44 px PNGs from their SVG sources on macOS.
 Do not substitute the coloured application icon for `tray-route.png`: the
 native status item requires transparent, monochrome template pixels.

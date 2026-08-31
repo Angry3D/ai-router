@@ -15,6 +15,7 @@ import {
   previewRouteEdits,
   previewSettingsSnapshot,
 } from "../../previewFixtures";
+import { RouteEditor } from "./RouteEditor";
 import { SettingsWindow } from "./SettingsWindow";
 import customBalanceScriptScaffold from "./customBalanceScriptScaffold.txt?raw";
 
@@ -167,6 +168,31 @@ async function renderSettings(
   };
 }
 
+async function renderRouteEditor(newRoute: boolean) {
+  const client = createRouterQueryClient();
+  const routeId = newRoute ? null : previewRouteEdits[0].routeId;
+  if (routeId !== null) {
+    ipc.getRouteEdit.mockResolvedValue(structuredClone(previewRouteEdits[0]));
+  }
+  const rendered = render(
+    <QueryClientProvider client={client}>
+      <RouteEditor
+        routeId={routeId}
+        newRoute={newRoute}
+        activeRouteId={previewRouteEdits[0].routeId}
+        riskConfirmed={false}
+        externalBusy={false}
+        onDirtyChange={vi.fn()}
+        onCancel={vi.fn()}
+        onSaved={vi.fn()}
+        onDeleted={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  await screen.findByLabelText("路由名称");
+  return rendered;
+}
+
 beforeEach(() => {
   ipc.clearRequestHistory.mockReset();
   ipc.clearRuntimeLogs.mockReset();
@@ -306,6 +332,62 @@ beforeEach(() => {
 });
 
 describe("RouteEditor interactions", () => {
+  it("marks only the three base route fields as required in edit and new states", async () => {
+    const rendered = await renderRouteEditor(false);
+
+    expect(screen.getByLabelText("路由名称")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("Base URL")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("API Key")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    for (const label of ["路由名称", "Base URL", "API Key"]) {
+      const marker = screen
+        .getByLabelText<HTMLInputElement>(label)
+        .labels?.[0]?.querySelector(".settings-required-marker");
+      expect(marker).toHaveAttribute("aria-hidden", "true");
+    }
+    expect(document.querySelectorAll(".settings-required-marker")).toHaveLength(
+      3,
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "自定义脚本" }));
+    expect(screen.getByLabelText("JavaScript 表达式")).not.toHaveAttribute(
+      "aria-required",
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "通用查询" }));
+
+    rendered.unmount();
+    await renderRouteEditor(true);
+
+    expect(screen.getByLabelText("路由名称")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("Base URL")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("API Key")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    for (const label of ["路由名称", "Base URL", "API Key"]) {
+      const marker = screen
+        .getByLabelText<HTMLInputElement>(label)
+        .labels?.[0]?.querySelector(".settings-required-marker");
+      expect(marker).toHaveAttribute("aria-hidden", "true");
+    }
+    expect(document.querySelectorAll(".settings-required-marker")).toHaveLength(
+      3,
+    );
+  });
+
   it("marks the editor title band without marking form controls", async () => {
     await renderSettings();
 
@@ -392,7 +474,7 @@ describe("RouteEditor interactions", () => {
     expect(omit).toBeChecked();
     expect(save).toBeEnabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
     expect(
       screen.getByRole("alertdialog", { name: "放弃未保存的修改？" }),
     ).toBeInTheDocument();
@@ -496,7 +578,7 @@ describe("RouteEditor interactions", () => {
       "placeholder",
       "128000",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
     expect(
       screen.queryByRole("heading", { name: "自定义模型" }),
     ).not.toBeInTheDocument();
@@ -706,7 +788,7 @@ describe("RouteEditor interactions", () => {
       "preview-key-not-real",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
 
     expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
     expect(
@@ -745,7 +827,7 @@ describe("RouteEditor interactions", () => {
 
   it("previews complete endpoints canonically and rejects incompatible paths locally", async () => {
     await renderSettings();
-    const input = screen.getByLabelText("Responses Base URL");
+    const input = screen.getByLabelText("Base URL");
     const probe = screen.getByRole("button", { name: "检查推理地址" });
 
     fireEvent.change(input, {
@@ -774,7 +856,7 @@ describe("RouteEditor interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "检查推理地址" }));
     expect(await screen.findByText("可达 · 18 ms")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("Responses Base URL"), {
+    fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "https://second.example/v1" },
     });
     expect(screen.queryByText("可达 · 18 ms")).not.toBeInTheDocument();
@@ -801,7 +883,7 @@ describe("RouteEditor interactions", () => {
 
     fireEvent.click(probe);
     expect(probe).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Responses Base URL"), {
+    fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "https://changed.example/v1" },
     });
     resolveProbe?.({ status: "reachable", ttfbMs: 12, errorCategory: null });
@@ -812,7 +894,7 @@ describe("RouteEditor interactions", () => {
 
   it("reloads the backend-owned canonical prefix after save", async () => {
     await renderSettings();
-    fireEvent.change(screen.getByLabelText("Responses Base URL"), {
+    fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "https://example.test/v1/responses" },
     });
     ipc.getRouteEdit.mockResolvedValue({
@@ -830,7 +912,7 @@ describe("RouteEditor interactions", () => {
         }),
       ),
     );
-    expect(await screen.findByLabelText("Responses Base URL")).toHaveValue(
+    expect(await screen.findByLabelText("Base URL")).toHaveValue(
       "https://example.test/v1",
     );
   });

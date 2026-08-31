@@ -659,6 +659,26 @@ body[data-view="settings"] .app-variant-badge {
   border-bottom: 1px solid var(--warning-border);
 }
 
+.menu-capacity-notice {
+  grid-template-columns: 18px minmax(0, 1fr) auto 28px;
+  align-items: center;
+}
+
+.menu-capacity-notice > svg {
+  align-self: start;
+}
+
+.menu-capacity-notice .menu-capacity-manage {
+  width: auto;
+  min-width: 46px;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+
+.menu-capacity-notice .menu-capacity-dismiss {
+  width: 28px;
+}
+
 .menu-restart-notice > svg {
   margin-top: 2px;
   color: var(--orange);
@@ -1072,7 +1092,8 @@ body[data-view="settings"] .app-variant-badge {
   place-items: center;
 }
 
-.application-update-indicator {
+.application-update-indicator,
+.settings-navigation-indicator {
   position: absolute;
   top: -1px;
   right: -2px;
@@ -1640,6 +1661,7 @@ body[data-view="settings"] .app-variant-badge {
 }
 
 .route-form-fields {
+  --settings-label-width: 96px;
   min-width: 0;
   padding: 0;
   margin: 0;
@@ -1734,6 +1756,17 @@ body[data-view="settings"] .app-variant-badge {
   white-space: nowrap;
 }
 
+.settings-required-marker {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--red);
+  font-weight: 600;
+}
+
+.settings-required-marker::before {
+  content: "*";
+}
+
 .settings-field-control {
   min-width: 0;
 }
@@ -1810,6 +1843,65 @@ body[data-view="settings"] .app-variant-badge {
 
 .images-generation-timeout-control {
   grid-template-columns: minmax(0, 200px) auto;
+}
+
+.mcp-image-storage-settings {
+  min-width: 0;
+}
+
+.mcp-image-capacity-row {
+  align-items: start;
+}
+
+.mcp-image-capacity-row > .settings-field-label {
+  padding-top: 7px;
+}
+
+.mcp-image-capacity-control {
+  display: grid;
+  width: min(100%, 430px);
+  min-height: var(--settings-control-height);
+  grid-template-columns: minmax(0, 120px) auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-image-capacity-unit {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.mcp-image-capacity-control .settings-button {
+  justify-self: start;
+}
+
+.mcp-image-capacity-control .settings-status {
+  margin-left: 0;
+}
+
+.mcp-image-capacity-row .parameter-field-error {
+  margin-top: 4px;
+}
+
+.mcp-image-capacity-warning {
+  min-width: 0;
+  padding: 7px 10px;
+  margin: 6px 0 10px;
+  color: var(--warning-text);
+  background: var(--inline-warning-surface);
+  border-left: 3px solid var(--orange);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-image-capacity-message {
+  margin: 4px 0 8px;
+}
+
+.mcp-image-storage-actions {
+  margin-top: 6px;
 }
 
 .settings-text-input:focus,
@@ -1973,6 +2065,19 @@ body[data-view="settings"] .app-variant-badge {
   align-items: center;
   gap: 9px;
   font-size: 13px;
+}
+
+.menu-bar-settings-list {
+  display: grid;
+  gap: 4px;
+}
+
+.menu-bar-settings-error {
+  min-height: 18px;
+  margin: 2px 0 0;
+  color: var(--red);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .settings-switch-control {

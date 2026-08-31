@@ -6,9 +6,11 @@ import type { CodexRecoverySummaryDto } from "./CodexRecoverySummaryDto";
 import type { FallbackStateDto } from "./FallbackStateDto";
 import type { HistorySummaryDto } from "./HistorySummaryDto";
 import type { ImagesGenerationSettingsDto } from "./ImagesGenerationSettingsDto";
+import type { McpImageCapacityDto } from "./McpImageCapacityDto";
+import type { MenuBarSettingsDto } from "./MenuBarSettingsDto";
 import type { MetadataFailureDto } from "./MetadataFailureDto";
 import type { RecoveryHealthDto } from "./RecoveryHealthDto";
 import type { RouteId } from "./RouteId";
 import type { RouteSummaryDto } from "./RouteSummaryDto";
 
-export type SettingsSnapshotDto = { routes: Array<RouteSummaryDto>, activeRouteId: RouteId | null, fallback: FallbackStateDto, proxyPort: number, codexStatus: CodexConfigStatus, baseline: CodexBaselineSummaryDto, originalBackup: CodexBaselineSummaryDto, recoveryConfig: CodexRecoverySummaryDto, balanceScriptRiskConfirmed: boolean, balanceQuery: BalanceQuerySettingsDto, imagesGeneration: ImagesGenerationSettingsDto, history: HistorySummaryDto, metadataFailure: MetadataFailureDto, recovery: RecoveryHealthDto, };
+export type SettingsSnapshotDto = { routes: Array<RouteSummaryDto>, activeRouteId: RouteId | null, fallback: FallbackStateDto, proxyPort: number, codexStatus: CodexConfigStatus, baseline: CodexBaselineSummaryDto, originalBackup: CodexBaselineSummaryDto, recoveryConfig: CodexRecoverySummaryDto, balanceScriptRiskConfirmed: boolean, balanceQuery: BalanceQuerySettingsDto, imagesGeneration: ImagesGenerationSettingsDto, mcpImageCapacity: McpImageCapacityDto, history: HistorySummaryDto, metadataFailure: MetadataFailureDto, recovery: RecoveryHealthDto, menuBar: MenuBarSettingsDto, };

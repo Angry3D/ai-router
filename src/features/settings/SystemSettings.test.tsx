@@ -41,6 +41,7 @@ const ipc = vi.hoisted(() => ({
   testBalanceQuery: vi.fn(),
   updateBalanceQuerySettings: vi.fn(),
   updateImagesGenerationSettings: vi.fn(),
+  updateMenuBarSettings: vi.fn(),
   getRunningAppVersion: vi.fn(),
   hideSettingsWindow: vi.fn(),
   quitApplication: vi.fn(),
@@ -98,6 +99,7 @@ vi.mock("../../api/ipc", () => ({
   testBalanceQuery: ipc.testBalanceQuery,
   updateBalanceQuerySettings: ipc.updateBalanceQuerySettings,
   updateImagesGenerationSettings: ipc.updateImagesGenerationSettings,
+  updateMenuBarSettings: ipc.updateMenuBarSettings,
   quitApplication: ipc.quitApplication,
 }));
 
@@ -183,6 +185,8 @@ beforeEach(() => {
   ipc.testBalanceQuery.mockReset();
   ipc.updateBalanceQuerySettings.mockReset();
   ipc.updateImagesGenerationSettings.mockReset();
+  ipc.updateMenuBarSettings.mockReset();
+  ipc.updateMenuBarSettings.mockResolvedValue({ revision: 1 });
   ipc.getRunningAppVersion.mockReset();
   ipc.quitApplication.mockReset();
   ipc.tauriRuntime = false;
@@ -350,6 +354,7 @@ describe("SystemSettings interactions", () => {
         .map((heading) => heading.textContent),
     ).toEqual([
       "外观",
+      "菜单栏",
       "应用更新",
       "余额查询",
       "数据库恢复",
@@ -372,6 +377,71 @@ describe("SystemSettings interactions", () => {
     expect(
       screen.queryByRole("heading", { name: "数据与日志" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("submits menu bar settings as one complete preference object", async () => {
+    const { client } = await renderSettings();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+
+    const statusText = screen.getByRole("switch", { name: "菜单栏状态文字" });
+    const activityAnimation = screen.getByRole("switch", { name: "菜单栏活动动画" });
+    expect(statusText).toBeChecked();
+    expect(activityAnimation).toBeChecked();
+
+    fireEvent.click(statusText);
+    await waitFor(() =>
+      expect(ipc.updateMenuBarSettings).toHaveBeenCalledWith({
+        statusTextEnabled: false,
+        activityAnimationEnabled: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.settings }),
+    );
+    await waitFor(() => expect(statusText).not.toBeDisabled());
+  });
+
+  it("locks both menu bar switches while pending and rolls back on failure", async () => {
+    let rejectUpdate: ((reason: Error) => void) | undefined;
+    ipc.updateMenuBarSettings.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectUpdate = reject;
+        }),
+    );
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    const statusText = screen.getByRole("switch", { name: "菜单栏状态文字" });
+    const activityAnimation = screen.getByRole("switch", { name: "菜单栏活动动画" });
+
+    fireEvent.click(statusText);
+    expect(statusText).toBeDisabled();
+    expect(activityAnimation).toBeDisabled();
+    rejectUpdate?.(new Error("write failed"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(statusText).toBeChecked();
+    expect(activityAnimation).toBeChecked();
+  });
+
+  it("syncs menu bar switches from a newer authoritative settings snapshot", async () => {
+    const { client } = await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    const statusText = screen.getByRole("switch", { name: "菜单栏状态文字" });
+    const activityAnimation = screen.getByRole("switch", { name: "菜单栏活动动画" });
+
+    client.setQueryData(queryKeys.settings, {
+      ...previewSettingsSnapshot,
+      menuBar: {
+        statusTextEnabled: false,
+        activityAnimationEnabled: false,
+      },
+    });
+
+    await waitFor(() => expect(statusText).not.toBeChecked());
+    expect(activityAnimation).not.toBeChecked();
+    expect(ipc.updateMenuBarSettings).not.toHaveBeenCalled();
   });
 
   it("shows the database recovery explanation in the help tooltip", async () => {

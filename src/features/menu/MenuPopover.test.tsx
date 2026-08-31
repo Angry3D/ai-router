@@ -26,6 +26,7 @@ const ipc = vi.hoisted(() => ({
   connectCodex: vi.fn(),
   completeMenuShow: vi.fn(),
   dismissCodexRestartNotice: vi.fn(),
+  dismissMcpImageCapacityWarning: vi.fn(),
   getMenuSnapshot: vi.fn(),
   getApplicationUpdateSnapshot: vi.fn(),
   getUsageHistory: vi.fn(),
@@ -47,6 +48,7 @@ vi.mock("../../api/ipc", () => ({
   connectCodex: ipc.connectCodex,
   completeMenuShow: ipc.completeMenuShow,
   dismissCodexRestartNotice: ipc.dismissCodexRestartNotice,
+  dismissMcpImageCapacityWarning: ipc.dismissMcpImageCapacityWarning,
   getBootstrapSnapshot: vi.fn(),
   getMenuSnapshot: ipc.getMenuSnapshot,
   getApplicationUpdateSnapshot: ipc.getApplicationUpdateSnapshot,
@@ -124,6 +126,15 @@ function menuSnapshot(
     balanceBatch: null,
     codexStatus: "connected" as const,
     codexRestartNotice: null,
+    mcpImageCapacity: {
+      available: true,
+      imageCount: 0,
+      bytes: 0,
+      thresholdMib: 1024,
+      overThreshold: false,
+      warningEpisodeId: null,
+      warningVisible: false,
+    },
   };
 }
 
@@ -198,6 +209,7 @@ beforeEach(() => {
   ipc.connectCodex.mockReset();
   ipc.completeMenuShow.mockReset();
   ipc.dismissCodexRestartNotice.mockReset();
+  ipc.dismissMcpImageCapacityWarning.mockReset();
   ipc.getMenuSnapshot.mockReset();
   ipc.getApplicationUpdateSnapshot.mockReset();
   ipc.getUsageHistory.mockReset();
@@ -1002,6 +1014,145 @@ describe("P8 menu interactions", () => {
     ).not.toBeInTheDocument();
     await waitFor(() =>
       expect(ipc.dismissCodexRestartNotice).toHaveBeenCalledWith("notice-1"),
+    );
+  });
+
+  it("stacks the image capacity reminder and opens its exact management target", () => {
+    const snapshot = menuSnapshot();
+    snapshot.codexRestartNotice = {
+      noticeId: "notice-1",
+      routeName: "备用中转",
+    };
+    snapshot.mcpImageCapacity = {
+      available: true,
+      imageCount: 166,
+      bytes: 1_267_015_352,
+      thresholdMib: 1024,
+      overThreshold: true,
+      warningEpisodeId: "capacity-1",
+      warningVisible: true,
+    };
+    renderMenu(snapshot);
+
+    const restart = screen.getByLabelText("Codex 模型列表更新提醒");
+    const capacity = screen.getByLabelText("生成图片容量提醒");
+    expect(restart.compareDocumentPosition(capacity)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(capacity).toHaveTextContent("生成图片占用 1.18 GB");
+    expect(capacity).toHaveTextContent("已达到 1 GB 提醒阈值");
+    expect(
+      within(capacity).getByRole("button", {
+        name: "本次超限期间不再提醒",
+      }),
+    ).toHaveAttribute("title", "本次超限期间不再提醒");
+
+    fireEvent.click(within(capacity).getByRole("button", { name: "管理" }));
+    expect(ipc.showSettingsWindow).toHaveBeenCalledWith(
+      "codex",
+      false,
+      "image_generation",
+    );
+    expect(ipc.dismissMcpImageCapacityWarning).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["below threshold", true, false, null, false],
+    ["dismissed episode", true, true, "capacity-1", false],
+    ["unavailable summary", false, true, "capacity-1", true],
+  ])(
+    "does not show the image capacity reminder for %s",
+    (_label, available, overThreshold, warningEpisodeId, warningVisible) => {
+      const snapshot = menuSnapshot();
+      snapshot.mcpImageCapacity = {
+        available,
+        imageCount: overThreshold ? 166 : 12,
+        bytes: overThreshold ? 1_267_015_352 : 12 * 1024 ** 2,
+        thresholdMib: 1024,
+        overThreshold,
+        warningEpisodeId,
+        warningVisible,
+      };
+      renderMenu(snapshot);
+
+      expect(
+        screen.queryByLabelText("生成图片容量提醒"),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("restores the exact capacity episode after dismissal fails", async () => {
+    const snapshot = menuSnapshot();
+    snapshot.mcpImageCapacity = {
+      available: true,
+      imageCount: 166,
+      bytes: 1_267_015_352,
+      thresholdMib: 1024,
+      overThreshold: true,
+      warningEpisodeId: "capacity-1",
+      warningVisible: true,
+    };
+    ipc.dismissMcpImageCapacityWarning.mockRejectedValueOnce(
+      new Error("injected"),
+    );
+    renderMenu(snapshot);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "本次超限期间不再提醒" }),
+    );
+    expect(
+      screen.queryByLabelText("生成图片容量提醒"),
+    ).not.toBeInTheDocument();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(screen.getByLabelText("生成图片容量提醒")).toBeInTheDocument();
+    expect(ipc.dismissMcpImageCapacityWarning).toHaveBeenCalledWith(
+      "capacity-1",
+    );
+  });
+
+  it("cannot hide a newer capacity episode with an older dismissal result", async () => {
+    const snapshot = menuSnapshot();
+    snapshot.mcpImageCapacity = {
+      available: true,
+      imageCount: 166,
+      bytes: 1_267_015_352,
+      thresholdMib: 1024,
+      overThreshold: true,
+      warningEpisodeId: "capacity-1",
+      warningVisible: true,
+    };
+    let rejectDismissal: ((reason: Error) => void) | undefined;
+    ipc.dismissMcpImageCapacityWarning.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectDismissal = reject;
+      }),
+    );
+    const { client } = renderMenu(snapshot);
+    fireEvent.click(
+      screen.getByRole("button", { name: "本次超限期间不再提醒" }),
+    );
+
+    act(() => {
+      client.setQueryData(queryKeys.menu, {
+        ...snapshot,
+        mcpImageCapacity: {
+          ...snapshot.mcpImageCapacity,
+          warningEpisodeId: "capacity-2",
+          bytes: 1_503_238_553,
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(screen.getByLabelText("生成图片容量提醒")).toHaveTextContent(
+        "1.4 GB",
+      ),
+    );
+
+    rejectDismissal?.(new Error("injected"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(screen.getByLabelText("生成图片容量提醒")).toHaveTextContent(
+      "1.4 GB",
     );
   });
 

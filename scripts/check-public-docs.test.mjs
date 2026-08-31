@@ -7,6 +7,7 @@ import {
   checkPublicDocs,
   validateMarkdownLinks,
   validatePublicText,
+  validateReleaseInventoryContract,
   validateSensitiveWarning,
   validateVersionIndependentProjectClaims,
 } from "./check-public-docs.mjs";
@@ -16,7 +17,7 @@ const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 describe("public documentation contract", () => {
   it("accepts the repository public documentation surface", async () => {
     await expect(checkPublicDocs(PROJECT_ROOT)).resolves.toMatchObject({
-      requiredFiles: 20,
+      requiredFiles: 21,
     });
   });
 
@@ -69,6 +70,36 @@ describe("public documentation contract", () => {
     files.set("README.md", "下载入口为 GitHub Releases。");
     expect(() => validateVersionIndependentProjectClaims(files)).toThrow(
       "项目仍处于早期开发阶段",
+    );
+  });
+
+  it("binds the release inventory command to the documented human gate", () => {
+    const packageJson = {
+      scripts: { "release:inventory": "node scripts/release-inventory.mjs" },
+    };
+    const files = new Map([
+      [
+        "docs/engineering/releasing.md",
+        "运行 pnpm release:inventory；不能自动证明语义完整性。",
+      ],
+      [
+        "release-notes/README.md",
+        "Run pnpm release:inventory and record a concise exclusion reason.",
+      ],
+    ]);
+
+    expect(() =>
+      validateReleaseInventoryContract(packageJson, files),
+    ).not.toThrow();
+    packageJson.scripts["release:inventory"] = "node scripts/other.mjs";
+    expect(() => validateReleaseInventoryContract(packageJson, files)).toThrow(
+      "release:inventory does not invoke",
+    );
+    packageJson.scripts["release:inventory"] =
+      "node scripts/release-inventory.mjs";
+    files.set("release-notes/README.md", "pnpm release:inventory");
+    expect(() => validateReleaseInventoryContract(packageJson, files)).toThrow(
+      "record a concise exclusion reason",
     );
   });
 });

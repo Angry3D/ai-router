@@ -52,6 +52,12 @@ const IMAGE_BASE64_PREFIX_SENTINEL: &str = "IMAGES_BASE64_PREFIX_SENTINEL_7a2f";
 const IMAGE_BASE64_SUFFIX_SENTINEL: &str = "IMAGES_BASE64_SUFFIX_SENTINEL_19c3";
 const IMAGE_ROUTE_KEY_SENTINEL: &str = "IMAGES_ROUTE_KEY_SENTINEL_b5d1";
 const IMAGE_UPSTREAM_ERROR_SENTINEL: &str = "IMAGES_UPSTREAM_ERROR_SENTINEL_e26a";
+const IMAGE_MCP_PROMPT_SENTINEL: &str = "IMAGES_MCP_PROMPT_SENTINEL_719e";
+const IMAGE_PROVIDER_CODE_SENTINEL: &str = "IMAGES_PROVIDER_CODE_SENTINEL_d524";
+const IMAGE_PROVIDER_REQUEST_ID_SENTINEL: &str = "IMAGES_PROVIDER_REQUEST_ID_SENTINEL_164b";
+const IMAGE_PROVIDER_ARBITRARY_SENTINEL: &str = "IMAGES_PROVIDER_ARBITRARY_SENTINEL_791a";
+const IMAGE_PROVIDER_HEADER_SENTINEL: &str = "IMAGES_PROVIDER_HEADER_SENTINEL_b83c";
+const IMAGE_ALLOWED_TRANSIENT_MESSAGE: &str = "benign transient provider detail";
 
 #[derive(Clone, Default)]
 struct MockResponsesState {
@@ -85,6 +91,24 @@ async fn mock_images_handler(State(state): State<MockImagesState>, request: Requ
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(state.success_body))
             .expect("image success response");
+    }
+    if call_index >= 3 {
+        return Response::builder()
+            .status(StatusCode::IM_A_TEAPOT)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-provider-request-id", IMAGE_PROVIDER_HEADER_SENTINEL)
+            .body(Body::from(
+                json!({
+                    "error": {
+                        "code": IMAGE_PROVIDER_CODE_SENTINEL,
+                        "message": format!("  benign\ntransient\u{0} provider detail  "),
+                        "request_id": IMAGE_PROVIDER_REQUEST_ID_SENTINEL
+                    },
+                    "arbitrary": IMAGE_PROVIDER_ARBITRARY_SENTINEL
+                })
+                .to_string(),
+            ))
+            .expect("unknown image error response");
     }
     Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -169,6 +193,24 @@ fn contains(bytes: &[u8], sentinel: &str) -> bool {
     bytes
         .windows(sentinel.len())
         .any(|window| window == sentinel.as_bytes())
+}
+
+async fn mcp_sse_json(response: reqwest::Response) -> serde_json::Value {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let body = response.text().await.expect("MCP SSE body");
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .filter(|data| !data.is_empty())
+        .find_map(|data| serde_json::from_str(data).ok())
+        .expect("MCP SSE JSON data")
 }
 
 async fn send_test_requests(endpoint: &str) -> (Bytes, Bytes) {
@@ -477,7 +519,8 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
     });
     let proxy_state = ProxyIngressState::new(GATEWAY_TOKEN_SENTINEL, Arc::new(forwarder))
         .with_runtime_sinks(history.clone(), diagnostics.clone())
-        .with_routing_store(routing);
+        .with_routing_store(routing)
+        .with_mcp_image_asset_root(temporary.path().join("mcp-images"));
     let proxy = ProxyServerHandle::start(0, build_proxy_router(proxy_state))
         .await
         .expect("local proxy");
@@ -523,6 +566,89 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         );
     }
 
+    let mcp_endpoint = format!("http://{}/mcp", proxy.address());
+    let initialize = client
+        .post(&mcp_endpoint)
+        .bearer_auth(GATEWAY_TOKEN_SENTINEL)
+        .header(header::HOST, "127.0.0.1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .body(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"privacy-test","version":"1"}}}"#,
+        )
+        .send()
+        .await
+        .expect("MCP initialize");
+    let session_id = initialize
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("MCP session ID")
+        .to_owned();
+    let _ = mcp_sse_json(initialize).await;
+    let mcp_call = client
+        .post(&mcp_endpoint)
+        .bearer_auth(GATEWAY_TOKEN_SENTINEL)
+        .header(header::HOST, "127.0.0.1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id)
+        .header("mcp-protocol-version", "2025-06-18")
+        .body(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "generate_image",
+                    "arguments": {"prompt": IMAGE_MCP_PROMPT_SENTINEL}
+                }
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("MCP image call");
+    let mcp_error = mcp_sse_json(mcp_call).await;
+    assert_eq!(mcp_error["error"]["code"], -32603);
+    assert_eq!(
+        mcp_error["error"]["message"],
+        format!(
+            "The image provider returned an unrecognized error. {IMAGE_ALLOWED_TRANSIENT_MESSAGE}"
+        )
+    );
+    let mcp_data = &mcp_error["error"]["data"];
+    assert_eq!(mcp_data.as_object().map(serde_json::Map::len), Some(6));
+    assert_eq!(mcp_data["code"], "images_upstream_http_status");
+    assert_eq!(mcp_data["stage"], "upstream_http_status");
+    assert_eq!(mcp_data["upstreamStatus"], 418);
+    assert_eq!(mcp_data["category"], "unknown_upstream");
+    assert_eq!(mcp_data["retryable"], false);
+    uuid::Uuid::parse_str(mcp_data["requestId"].as_str().expect("local request ID"))
+        .expect("UUID request ID");
+    let serialized_mcp_error = serde_json::to_vec(&mcp_error).expect("serialized MCP error");
+    assert!(contains(
+        &serialized_mcp_error,
+        IMAGE_ALLOWED_TRANSIENT_MESSAGE
+    ));
+    for forbidden in [
+        IMAGE_PROMPT_SENTINEL,
+        IMAGE_MCP_PROMPT_SENTINEL,
+        IMAGE_BASE64_PREFIX_SENTINEL,
+        IMAGE_BASE64_SUFFIX_SENTINEL,
+        IMAGE_ROUTE_KEY_SENTINEL,
+        IMAGE_PROVIDER_CODE_SENTINEL,
+        IMAGE_PROVIDER_REQUEST_ID_SENTINEL,
+        IMAGE_PROVIDER_ARBITRARY_SENTINEL,
+        IMAGE_PROVIDER_HEADER_SENTINEL,
+        GATEWAY_TOKEN_SENTINEL,
+    ] {
+        assert!(
+            !contains(&serialized_mcp_error, forbidden),
+            "MCP error leaked {forbidden}"
+        );
+    }
+
     history.shutdown().await;
     proxy.shutdown().await;
     image_upstream.shutdown().await;
@@ -532,8 +658,8 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
             .requests
             .lock()
             .expect("image capture mutex");
-        assert_eq!(captured.len(), 2, "each incoming request gets one attempt");
-        for request in captured.iter() {
+        assert_eq!(captured.len(), 3, "each incoming request gets one attempt");
+        for (index, request) in captured.iter().enumerate() {
             assert_eq!(
                 request.headers.get(header::AUTHORIZATION),
                 Some(
@@ -542,7 +668,11 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
                 )
             );
             assert!(request.headers.get("x-api-key").is_none());
-            assert!(contains(&request.body, IMAGE_PROMPT_SENTINEL));
+            if index < 2 {
+                assert!(contains(&request.body, IMAGE_PROMPT_SENTINEL));
+            } else {
+                assert!(contains(&request.body, IMAGE_MCP_PROMPT_SENTINEL));
+            }
             assert!(!contains(&request.body, GATEWAY_TOKEN_SENTINEL));
         }
     }
@@ -586,6 +716,12 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         IMAGE_BASE64_PREFIX_SENTINEL,
         IMAGE_BASE64_SUFFIX_SENTINEL,
         IMAGE_UPSTREAM_ERROR_SENTINEL,
+        IMAGE_MCP_PROMPT_SENTINEL,
+        IMAGE_PROVIDER_CODE_SENTINEL,
+        IMAGE_PROVIDER_REQUEST_ID_SENTINEL,
+        IMAGE_PROVIDER_ARBITRARY_SENTINEL,
+        IMAGE_PROVIDER_HEADER_SENTINEL,
+        IMAGE_ALLOWED_TRANSIENT_MESSAGE,
     ] {
         assert!(
             !contains(&database_bytes, forbidden),

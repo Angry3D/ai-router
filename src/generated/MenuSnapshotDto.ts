@@ -4,6 +4,7 @@ import type { BalanceRefreshBatchState } from "./BalanceRefreshBatchState";
 import type { BootstrapSnapshotDto } from "./BootstrapSnapshotDto";
 import type { CodexConfigStatus } from "./CodexConfigStatus";
 import type { CodexRestartNoticeDto } from "./CodexRestartNoticeDto";
+import type { McpImageCapacityDto } from "./McpImageCapacityDto";
 import type { RouteId } from "./RouteId";
 
-export type MenuSnapshotDto = { bootstrap: BootstrapSnapshotDto, balances: Array<BalanceDisplaySnapshot>, balanceEnabledRouteIds: Array<RouteId>, balanceBatch: BalanceRefreshBatchState | null, codexStatus: CodexConfigStatus, codexRestartNotice: CodexRestartNoticeDto | null, };
+export type MenuSnapshotDto = { bootstrap: BootstrapSnapshotDto, balances: Array<BalanceDisplaySnapshot>, balanceEnabledRouteIds: Array<RouteId>, balanceBatch: BalanceRefreshBatchState | null, codexStatus: CodexConfigStatus, codexRestartNotice: CodexRestartNoticeDto | null, mcpImageCapacity: McpImageCapacityDto, };

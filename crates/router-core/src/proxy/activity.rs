@@ -10,12 +10,21 @@ use std::{
 use axum::body::{Body, Bytes};
 use http_body::{Frame, SizeHint};
 use sha2::{Digest, Sha256};
+use tokio::sync::oneshot;
 
 const TOOL_HANDOFF_TIMEOUT: Duration = Duration::from_mins(15);
 const MAX_WAITING_TURNS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogicalRequestActivityPhase {
+    Idle,
+    Live,
+    Waiting,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LogicalRequestActivityTransition {
+    pub phase: LogicalRequestActivityPhase,
     pub active: bool,
     pub count: usize,
     pub revision: u64,
@@ -85,6 +94,12 @@ impl TurnKey {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct EpochTurnKey {
+    epoch: u64,
+    turn: TurnKey,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TurnPhase {
     Live,
@@ -96,14 +111,16 @@ struct TurnActivity {
     latest_disposition: Option<RequestActivityDisposition>,
     live_generations: HashSet<u64>,
     phase: TurnPhase,
+    wait_cancel: Option<oneshot::Sender<()>>,
 }
 
 struct ActivityState {
     count: usize,
     revision: u64,
+    epoch: u64,
     next_generation: u64,
     waiting_turns: usize,
-    turns: HashMap<TurnKey, TurnActivity>,
+    turns: HashMap<EpochTurnKey, TurnActivity>,
     pending_transitions: VecDeque<LogicalRequestActivityTransition>,
     dispatching: bool,
 }
@@ -132,6 +149,7 @@ impl LogicalRequestActivityTracker {
                 state: Mutex::new(ActivityState {
                     count: 0,
                     revision: 0,
+                    epoch: 0,
                     next_generation: 0,
                     waiting_turns: 0,
                     turns: HashMap::new(),
@@ -150,15 +168,19 @@ impl LogicalRequestActivityTracker {
 
     #[must_use]
     pub fn acquire_turn(&self, turn_id: Option<&str>) -> Option<LogicalRequestActivityGuard> {
-        let requested_key = turn_id.and_then(TurnKey::from_turn_id);
+        let requested_turn = turn_id.and_then(TurnKey::from_turn_id);
         let mut state = self
             .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = requested_key
+        let key = requested_turn
+            .map(|turn| EpochTurnKey {
+                epoch: state.epoch,
+                turn,
+            })
             .filter(|key| state.turns.contains_key(key) || state.waiting_turns < MAX_WAITING_TURNS);
-        let previous = state.count;
+        let previous_phase = Self::derived_phase(&state);
         let generation = if let Some(key) = key {
             state.next_generation = state.next_generation.checked_add(1)?;
             let generation = state.next_generation;
@@ -166,6 +188,9 @@ impl LogicalRequestActivityTracker {
             if let Some(turn) = state.turns.get_mut(&key) {
                 if turn.phase == TurnPhase::Waiting {
                     turn.phase = TurnPhase::Live;
+                    if let Some(cancel) = turn.wait_cancel.take() {
+                        let _ = cancel.send(());
+                    }
                     resumed_wait = true;
                 }
                 turn.latest_generation = generation;
@@ -180,6 +205,7 @@ impl LogicalRequestActivityTracker {
                         latest_disposition: None,
                         live_generations: HashSet::from([generation]),
                         phase: TurnPhase::Live,
+                        wait_cancel: None,
                     },
                 );
             }
@@ -191,7 +217,7 @@ impl LogicalRequestActivityTracker {
             state.count = state.count.checked_add(1)?;
             None
         };
-        Self::record_change(&mut state, previous);
+        Self::record_change(&mut state, previous_phase);
         let should_dispatch = Self::start_dispatch(&mut state);
         drop(state);
         if should_dispatch {
@@ -216,9 +242,49 @@ impl LogicalRequestActivityTracker {
         (state.count, state.revision)
     }
 
+    #[must_use]
+    pub fn phase(&self) -> LogicalRequestActivityPhase {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::derived_phase(&state)
+    }
+
+    pub fn begin_new_epoch(&self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_phase = Self::derived_phase(&state);
+        state.epoch = state.epoch.saturating_add(1);
+        let waiting_keys = state
+            .turns
+            .iter()
+            .filter_map(|(key, turn)| (turn.phase == TurnPhase::Waiting).then_some(*key))
+            .collect::<Vec<_>>();
+        for key in waiting_keys {
+            if let Some(mut turn) = state.turns.remove(&key) {
+                if let Some(cancel) = turn.wait_cancel.take() {
+                    let _ = cancel.send(());
+                }
+                state.count = state.count.saturating_sub(1);
+                state.waiting_turns = state.waiting_turns.saturating_sub(1);
+            }
+        }
+        Self::record_change(&mut state, previous_phase);
+        let should_dispatch = Self::start_dispatch(&mut state);
+        drop(state);
+        if should_dispatch {
+            self.dispatch_transitions();
+        }
+    }
+
     fn release(
         &self,
-        key: Option<TurnKey>,
+        key: Option<EpochTurnKey>,
         generation: Option<u64>,
         disposition: RequestActivityDisposition,
         timeout_runtime: Option<tokio::runtime::Handle>,
@@ -229,12 +295,14 @@ impl LogicalRequestActivityTracker {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = state.count;
+        let previous_phase = Self::derived_phase(&state);
         match (key, generation) {
             (Some(key), Some(generation)) => {
                 let mut remove_turn = false;
                 let mut entered_wait = None;
-                let can_wait = state.waiting_turns < MAX_WAITING_TURNS && timeout_runtime.is_some();
+                let can_wait = key.epoch == state.epoch
+                    && state.waiting_turns < MAX_WAITING_TURNS
+                    && timeout_runtime.is_some();
                 if let Some(turn) = state.turns.get_mut(&key) {
                     turn.live_generations.remove(&generation);
                     if generation == turn.latest_generation {
@@ -245,8 +313,11 @@ impl LogicalRequestActivityTracker {
                             == Some(RequestActivityDisposition::ClientToolHandoff)
                             && can_wait
                         {
+                            let (cancel, cancelled) = oneshot::channel();
                             turn.phase = TurnPhase::Waiting;
+                            turn.wait_cancel = Some(cancel);
                             entered_wait = Some(turn.latest_generation);
+                            timeout = Some((key, turn.latest_generation, cancelled));
                         } else {
                             remove_turn = true;
                         }
@@ -254,7 +325,7 @@ impl LogicalRequestActivityTracker {
                 }
                 if let Some(wait_generation) = entered_wait {
                     state.waiting_turns = state.waiting_turns.saturating_add(1);
-                    timeout = Some((key, wait_generation));
+                    debug_assert_eq!(timeout.as_ref().map(|entry| entry.1), Some(wait_generation));
                 }
                 if remove_turn && state.turns.remove(&key).is_some() {
                     state.count = state.count.saturating_sub(1);
@@ -262,37 +333,44 @@ impl LogicalRequestActivityTracker {
             }
             _ => state.count = state.count.saturating_sub(1),
         }
-        Self::record_change(&mut state, previous);
+        Self::record_change(&mut state, previous_phase);
         let should_dispatch = Self::start_dispatch(&mut state);
         drop(state);
         if should_dispatch {
             self.dispatch_transitions();
         }
-        if let (Some((key, generation)), Some(timeout_runtime)) = (timeout, timeout_runtime) {
-            self.spawn_wait_timeout(key, generation, &timeout_runtime);
+        if let (Some((key, generation, cancelled)), Some(timeout_runtime)) =
+            (timeout, timeout_runtime)
+        {
+            self.spawn_wait_timeout(key, generation, cancelled, &timeout_runtime);
         }
     }
 
     fn spawn_wait_timeout(
         &self,
-        key: TurnKey,
+        key: EpochTurnKey,
         generation: u64,
+        mut cancelled: oneshot::Receiver<()>,
         timeout_runtime: &tokio::runtime::Handle,
     ) {
         let tracker = self.clone();
         timeout_runtime.spawn(async move {
-            tokio::time::sleep(TOOL_HANDOFF_TIMEOUT).await;
-            tracker.expire_wait(key, generation);
+            tokio::select! {
+                () = tokio::time::sleep(TOOL_HANDOFF_TIMEOUT) => {
+                    tracker.expire_wait(key, generation);
+                }
+                _ = &mut cancelled => {}
+            }
         });
     }
 
-    fn expire_wait(&self, key: TurnKey, generation: u64) {
+    fn expire_wait(&self, key: EpochTurnKey, generation: u64) {
         let mut state = self
             .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = state.count;
+        let previous_phase = Self::derived_phase(&state);
         let matches = state.turns.get(&key).is_some_and(|turn| {
             turn.phase == TurnPhase::Waiting && turn.latest_generation == generation
         });
@@ -301,10 +379,10 @@ impl LogicalRequestActivityTracker {
             state.waiting_turns = state.waiting_turns.saturating_sub(1);
             state.count = state.count.saturating_sub(1);
         }
-        if state.count == previous {
+        if !matches {
             return;
         }
-        Self::record_change(&mut state, previous);
+        Self::record_change(&mut state, previous_phase);
         let should_dispatch = Self::start_dispatch(&mut state);
         drop(state);
         if should_dispatch {
@@ -312,13 +390,25 @@ impl LogicalRequestActivityTracker {
         }
     }
 
-    fn record_change(state: &mut ActivityState, previous: usize) {
+    fn derived_phase(state: &ActivityState) -> LogicalRequestActivityPhase {
+        if state.count == 0 {
+            LogicalRequestActivityPhase::Idle
+        } else if state.count > state.waiting_turns {
+            LogicalRequestActivityPhase::Live
+        } else {
+            LogicalRequestActivityPhase::Waiting
+        }
+    }
+
+    fn record_change(state: &mut ActivityState, previous_phase: LogicalRequestActivityPhase) {
         state.revision = state.revision.saturating_add(1);
-        if previous == 0 && state.count > 0 || previous > 0 && state.count == 0 {
+        let phase = Self::derived_phase(state);
+        if previous_phase != phase {
             state
                 .pending_transitions
                 .push_back(LogicalRequestActivityTransition {
-                    active: state.count > 0,
+                    phase,
+                    active: phase != LogicalRequestActivityPhase::Idle,
                     count: state.count,
                     revision: state.revision,
                 });
@@ -357,7 +447,7 @@ impl LogicalRequestActivityTracker {
 
 pub struct LogicalRequestActivityGuard {
     tracker: Option<LogicalRequestActivityTracker>,
-    key: Option<TurnKey>,
+    key: Option<EpochTurnKey>,
     generation: Option<u64>,
     reporter: LogicalRequestActivityReporter,
     timeout_runtime: Option<tokio::runtime::Handle>,
@@ -505,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn tracker_notifies_only_zero_nonzero_transitions() {
+    fn tracker_notifies_only_global_phase_transitions() {
         let sink = Arc::new(RecordingSink::default());
         let tracker = LogicalRequestActivityTracker::new(sink.clone());
 
@@ -516,7 +606,18 @@ mod tests {
         assert_eq!(tracker.snapshot(), (1, 3));
         drop(second);
         assert_eq!(tracker.snapshot(), (0, 4));
-        assert_eq!(sink.0.lock().expect("activity sink mutex").len(), 2);
+        assert_eq!(
+            sink.0
+                .lock()
+                .expect("activity sink mutex")
+                .iter()
+                .map(|transition| transition.phase)
+                .collect::<Vec<_>>(),
+            [
+                LogicalRequestActivityPhase::Live,
+                LogicalRequestActivityPhase::Idle
+            ]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -535,7 +636,20 @@ mod tests {
             .expect("continuation lease");
         drop(continuation);
         assert_eq!(tracker.snapshot().0, 0);
-        assert_eq!(sink.0.lock().expect("sink").len(), 2);
+        assert_eq!(
+            sink.0
+                .lock()
+                .expect("sink")
+                .iter()
+                .map(|transition| transition.phase)
+                .collect::<Vec<_>>(),
+            [
+                LogicalRequestActivityPhase::Live,
+                LogicalRequestActivityPhase::Waiting,
+                LogicalRequestActivityPhase::Live,
+                LogicalRequestActivityPhase::Idle,
+            ]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -646,6 +760,80 @@ mod tests {
             .mark_terminal(RequestActivityDisposition::ClientToolHandoff);
         drop(overflow);
         assert_eq!(tracker.snapshot().0, MAX_WAITING_TURNS);
+
+        let resumed = tracker
+            .acquire_turn(Some("turn-0"))
+            .expect("existing turn resumes at capacity");
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Live);
+        resumed
+            .reporter()
+            .mark_terminal(RequestActivityDisposition::ClientToolHandoff);
+        drop(resumed);
+        assert_eq!(tracker.snapshot().0, MAX_WAITING_TURNS);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Waiting);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_activity_wins_over_waiting_and_epoch_reset_clears_waits() {
+        let sink = Arc::new(RecordingSink::default());
+        let tracker = LogicalRequestActivityTracker::new(sink.clone());
+        let waiting = tracker
+            .acquire_turn(Some("waiting-turn"))
+            .expect("waiting lease");
+        waiting
+            .reporter()
+            .mark_terminal(RequestActivityDisposition::ClientToolHandoff);
+        drop(waiting);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Waiting);
+
+        let live = tracker.acquire().expect("anonymous live lease");
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Live);
+        drop(live);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Waiting);
+
+        tracker.begin_new_epoch();
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Idle);
+        assert_eq!(tracker.snapshot().0, 0);
+        assert_eq!(
+            sink.0
+                .lock()
+                .expect("sink")
+                .iter()
+                .map(|transition| transition.phase)
+                .collect::<Vec<_>>(),
+            [
+                LogicalRequestActivityPhase::Live,
+                LogicalRequestActivityPhase::Waiting,
+                LogicalRequestActivityPhase::Live,
+                LogicalRequestActivityPhase::Waiting,
+                LogicalRequestActivityPhase::Idle,
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn old_epoch_live_guard_cannot_wait_or_join_a_new_same_turn() {
+        let tracker = LogicalRequestActivityTracker::default();
+        let old = tracker.acquire_turn(Some("same-turn")).expect("old lease");
+        tracker.begin_new_epoch();
+        let current = tracker
+            .acquire_turn(Some("same-turn"))
+            .expect("current lease");
+        assert_eq!(tracker.snapshot().0, 2);
+
+        old.reporter()
+            .mark_terminal(RequestActivityDisposition::ClientToolHandoff);
+        drop(old);
+        assert_eq!(tracker.snapshot().0, 1);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Live);
+
+        current
+            .reporter()
+            .mark_terminal(RequestActivityDisposition::ClientToolHandoff);
+        drop(current);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Waiting);
+        tracker.begin_new_epoch();
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Idle);
     }
 
     #[tokio::test]

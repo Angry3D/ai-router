@@ -49,6 +49,7 @@ describe("license and provenance gate", () => {
     expect(report.thirdParty.map((entry) => entry.id)).toEqual([
       "openai-codex-base-instructions",
       "lucide-icons",
+      "readme-product-screenshots",
       "openai-pricing-snapshots",
     ]);
   });

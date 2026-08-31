@@ -9,14 +9,14 @@ use router_core::{
         CodexBaselineSummaryDto, CodexImagesMcpRepairPreviewDto, CodexModelDto,
         CodexModelsActivation, CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto,
         CodexRecoveryUpdatePreviewDto, CodexRestartNoticeDto, FallbackStopReasonDto,
-        HistorySummaryDto, ImagesGenerationSettingsDto, MenuSnapshotDto, MetadataFailureDto,
-        RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
-        ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
-        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
-        RouteSaveResultDto, RoutingDecisionDto, RoutingSkippedRouteDto, SettingsSnapshotDto,
-        UpdateImagesGenerationSettingsInputDto, UsageAttemptDto, UsageCostDto, UsageCostStateDto,
-        UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto,
-        UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
+        HistorySummaryDto, ImagesGenerationSettingsDto, McpImageCapacityDto, MenuBarSettingsDto,
+        MenuSnapshotDto, MetadataFailureDto, RecoveryCandidateDto, RecoveryHealthDto,
+        RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult,
+        RouteActivationPreviewDto, RouteActivationResultDto, RouteCatalogMode, RouteEditDto,
+        RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto, RoutingSkippedRouteDto,
+        SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto, UsageAttemptDto, UsageCostDto,
+        UsageCostStateDto, UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto,
+        UsageHistoryQueryDto, UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
         UsageStatisticsAttributionDimensionDto, UsageStatisticsAttributionDto,
         UsageStatisticsAttributionMetricDto, UsageStatisticsBucketDto, UsageStatisticsDto,
         UsageStatisticsGranularityDto, UsageStatisticsQueryDto, UsageStatisticsTokensDto,
@@ -77,6 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     FallbackStopReasonDto::export_all_to(&output)?;
     HistorySummaryDto::export_all_to(&output)?;
     ImagesGenerationSettingsDto::export_all_to(&output)?;
+    McpImageCapacityDto::export_all_to(&output)?;
     MenuSnapshotDto::export_all_to(&output)?;
     MetadataFailureDto::export_all_to(&output)?;
     RecoveryCandidateDto::export_all_to(&output)?;
@@ -93,6 +94,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     RoutingDecisionDto::export_all_to(&output)?;
     RoutingSkippedRouteDto::export_all_to(&output)?;
     SettingsSnapshotDto::export_all_to(&output)?;
+    MenuBarSettingsDto::export_all_to(&output)?;
     UpdateImagesGenerationSettingsInputDto::export_all_to(&output)?;
     UsageAttemptDto::export_all_to(&output)?;
     UsageCostDto::export_all_to(&output)?;

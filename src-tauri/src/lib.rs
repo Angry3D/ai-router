@@ -16,7 +16,9 @@ use popover::{
 };
 use router_core::app_api::{ApplicationUpdateProgressDto, ApplicationUpdateSnapshotDto};
 use router_core::lifecycle::{AppCoordinator, AppLifecycleIssue, AppLifecyclePhase};
-use router_core::proxy::{LogicalRequestActivitySink, LogicalRequestActivityTransition};
+use router_core::proxy::{
+    LogicalRequestActivityPhase, LogicalRequestActivitySink, LogicalRequestActivityTransition,
+};
 use router_core::qa_acceptance::QaAcceptanceRoot;
 use router_core::state::{
     AppRuntimeState, BootstrapSnapshotDto, IpcErrorDto, StateArea, StateChangedEventDto,
@@ -25,20 +27,21 @@ use router_core::state::{
 use runtime::{
     DesktopLifecycleServices, DesktopRuntimeProfile, RuntimeLogController,
     SafeRuntimeDiagnosticSink, activate_existing_instance, apply_proxy_port,
-    check_route_reachability, clear_request_history, clear_runtime_logs,
+    check_route_reachability, clear_mcp_images, clear_request_history, clear_runtime_logs,
     confirm_codex_images_mcp_repair, confirm_reset_codex_recovery_to_baseline,
     confirm_route_activation, confirm_update_codex_recovery, connect_codex, create_recovery_point,
-    delete_route, dismiss_codex_restart_notice, finish_runtime_log_setup, get_menu_snapshot,
-    get_recovery_snapshot, get_route_edit, get_settings_snapshot, get_usage_history,
-    get_usage_request_detail, get_usage_route_options, get_usage_statistics,
-    mark_first_run_presented, open_codex_config, open_runtime_log_directory,
-    preview_codex_images_mcp_repair, preview_reset_codex_recovery_to_baseline,
-    preview_route_activation, preview_update_codex_recovery, quit_application, reconnect_codex,
-    refresh_all_balances, refresh_balance, reorder_routes_and_fallback, restore_codex,
-    restore_recovery_point, retry_database_startup, runtime_log_bootstrap_plugin,
-    runtime_log_plugin, save_route, set_fallback_enabled, show_settings_window,
-    start_over_database, test_balance_query, update_appearance_preference,
-    update_balance_query_settings, update_images_generation_settings,
+    delete_route, dismiss_codex_restart_notice, dismiss_mcp_image_capacity_warning,
+    finish_runtime_log_setup, get_menu_snapshot, get_recovery_snapshot, get_route_edit,
+    get_settings_snapshot, get_usage_history, get_usage_request_detail, get_usage_route_options,
+    get_usage_statistics, mark_first_run_presented, open_codex_config, open_mcp_image_directory,
+    open_runtime_log_directory, preview_codex_images_mcp_repair,
+    preview_reset_codex_recovery_to_baseline, preview_route_activation,
+    preview_update_codex_recovery, quit_application, reconnect_codex, refresh_all_balances,
+    refresh_balance, reorder_routes_and_fallback, restore_codex, restore_recovery_point,
+    retry_database_startup, runtime_log_bootstrap_plugin, runtime_log_plugin, save_route,
+    set_fallback_enabled, show_settings_window, start_over_database, test_balance_query,
+    update_appearance_preference, update_balance_query_settings, update_images_generation_settings,
+    update_mcp_image_capacity_threshold, update_menu_bar_settings,
 };
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, ipc::Channel};
 
@@ -60,7 +63,9 @@ struct TrayRefreshCoordinator {
     apply_gate: Mutex<()>,
     activity: Mutex<TrayActivityProjection>,
     animation: Mutex<TrayAnimationProjection>,
+    monitor_generation: AtomicU64,
     reduce_motion: AtomicU8,
+    activity_animation_enabled: AtomicBool,
     assets: TrayIconAssets,
 }
 
@@ -73,7 +78,9 @@ impl TrayRefreshCoordinator {
             apply_gate: Mutex::new(()),
             activity: Mutex::new(TrayActivityProjection::default()),
             animation: Mutex::new(TrayAnimationProjection::default()),
+            monitor_generation: AtomicU64::new(0),
             reduce_motion: AtomicU8::new(ReduceMotionState::from_observation(reduce_motion) as u8),
+            activity_animation_enabled: AtomicBool::new(false),
             assets,
         }
     }
@@ -113,6 +120,10 @@ impl TrayRefreshCoordinator {
     }
 
     fn apply_activity_transition(&self, transition: LogicalRequestActivityTransition) -> bool {
+        let _apply_guard = self
+            .apply_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut activity = self
             .activity
             .lock()
@@ -121,15 +132,32 @@ impl TrayRefreshCoordinator {
             return false;
         }
         activity.revision = transition.revision;
-        activity.active = transition.active;
+        activity.phase = transition.phase;
+        let mut animation = self
+            .animation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !animation.shutdown {
+            animation.generation = animation.generation.saturating_add(1);
+            animation.mode = None;
+        }
+        self.monitor_generation.fetch_add(1, Ordering::AcqRel);
         true
     }
 
-    fn active(&self) -> bool {
+    fn phase(&self) -> LogicalRequestActivityPhase {
         self.activity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .active
+            .phase
+    }
+
+    fn live_activity_revision(&self) -> Option<u64> {
+        let activity = self
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (activity.phase == LogicalRequestActivityPhase::Live).then_some(activity.revision)
     }
 
     fn observe_reduce_motion(&self, reduce_motion: Option<bool>) -> Option<(bool, bool)> {
@@ -145,13 +173,14 @@ impl TrayRefreshCoordinator {
         ReduceMotionState::from_raw(self.reduce_motion.load(Ordering::Acquire)).blocks_animation()
     }
 
-    fn activity_is_current(&self, revision: u64) -> bool {
+    fn live_activity_is_current(&self, revision: u64) -> bool {
         let activity = self
             .activity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        activity.active
+        activity.phase == LogicalRequestActivityPhase::Live
             && activity.revision == revision
+            && self.activity_animation_enabled.load(Ordering::Acquire)
             && !self
                 .animation
                 .lock()
@@ -159,8 +188,42 @@ impl TrayRefreshCoordinator {
                 .shutdown
     }
 
+    fn begin_reduce_motion_monitor(&self, activity_revision: u64) -> Option<u64> {
+        let _apply_guard = self
+            .apply_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.live_activity_is_current(activity_revision) {
+            return None;
+        }
+        Some(self.monitor_generation.fetch_add(1, Ordering::AcqRel) + 1)
+    }
+
+    fn monitor_is_current(&self, activity_revision: u64, monitor_generation: u64) -> bool {
+        self.monitor_generation.load(Ordering::Acquire) == monitor_generation
+            && self.live_activity_is_current(activity_revision)
+    }
+
+    fn observe_reduce_motion_if_current(
+        &self,
+        activity_revision: u64,
+        monitor_generation: u64,
+        observation: Option<bool>,
+    ) -> Option<(bool, bool)> {
+        let _apply_guard = self
+            .apply_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.monitor_is_current(activity_revision, monitor_generation) {
+            return None;
+        }
+        self.observe_reduce_motion(observation)
+    }
+
     fn transition_projection(&self, visual_state: TrayVisualState) -> TrayProjectionDecision {
-        let animated = visual_state == TrayVisualState::Active && !self.reduce_motion();
+        let animated = visual_state == TrayVisualState::Active
+            && self.activity_animation_enabled.load(Ordering::Acquire)
+            && !self.reduce_motion();
         let desired = if animated {
             TrayProjectionMode::Animated
         } else {
@@ -196,11 +259,17 @@ impl TrayRefreshCoordinator {
             && animation.mode == Some(TrayProjectionMode::Animated)
     }
 
-    fn invalidate_animation(&self) {
+    fn set_activity_animation_enabled(&self, enabled: bool) -> bool {
         let _apply_guard = self
             .apply_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = self
+            .activity_animation_enabled
+            .swap(enabled, Ordering::AcqRel);
+        if previous == enabled {
+            return false;
+        }
         let mut animation = self
             .animation
             .lock()
@@ -209,6 +278,8 @@ impl TrayRefreshCoordinator {
             animation.generation = animation.generation.saturating_add(1);
             animation.mode = None;
         }
+        self.monitor_generation.fetch_add(1, Ordering::AcqRel);
+        true
     }
 
     fn shutdown(&self) {
@@ -224,6 +295,7 @@ impl TrayRefreshCoordinator {
         animation.shutdown = true;
         animation.generation = animation.generation.saturating_add(1);
         animation.mode = None;
+        self.monitor_generation.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -257,10 +329,18 @@ impl ReduceMotionState {
     }
 }
 
-#[derive(Default)]
 struct TrayActivityProjection {
-    active: bool,
+    phase: LogicalRequestActivityPhase,
     revision: u64,
+}
+
+impl Default for TrayActivityProjection {
+    fn default() -> Self {
+        Self {
+            phase: LogicalRequestActivityPhase::Idle,
+            revision: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,7 +385,7 @@ impl TrayIconAssets {
     fn static_image(&self, visual_state: TrayVisualState) -> tauri::image::Image<'static> {
         match visual_state {
             TrayVisualState::Ready => self.ready.clone(),
-            TrayVisualState::Active => self.active_static.clone(),
+            TrayVisualState::Active | TrayVisualState::Waiting => self.active_static.clone(),
         }
     }
 }
@@ -316,13 +396,30 @@ fn decode_tray_icon(bytes: &'static [u8]) -> tauri::Result<tauri::image::Image<'
 
 impl StateEventSink for TauriStateEventSink {
     fn publish(&self, event: &StateChangedEventDto) -> Result<(), StateEventError> {
-        self.app_handle
-            .emit(STATE_CHANGED_EVENT, event)
-            .map_err(|_| StateEventError)?;
+        if event.areas.contains(&StateArea::MenuBar)
+            && let Some(runtime) = self.app_handle.try_state::<Arc<AppRuntimeState>>()
+            && let Some(settings) = runtime.menu_bar_settings()
+        {
+            let changed = self
+                .tray_refresh
+                .set_activity_animation_enabled(settings.activity_animation_enabled);
+            if changed
+                && settings.activity_animation_enabled
+                && let Some(revision) = self.tray_refresh.live_activity_revision()
+            {
+                start_reduce_motion_monitor(
+                    self.app_handle.clone(),
+                    Arc::clone(&self.tray_refresh),
+                    revision,
+                );
+            }
+        }
         if state_event_affects_tray(event) {
             let _ = schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh));
         }
-        Ok(())
+        self.app_handle
+            .emit(STATE_CHANGED_EVENT, event)
+            .map_err(|_| StateEventError)
     }
 }
 
@@ -334,19 +431,21 @@ struct TauriLogicalRequestActivitySink {
 impl LogicalRequestActivitySink for TauriLogicalRequestActivitySink {
     fn activity_changed(&self, transition: LogicalRequestActivityTransition) {
         if self.tray_refresh.apply_activity_transition(transition) {
-            if transition.active {
-                self.tray_refresh.invalidate_animation();
-                if !schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh)) {
-                    return;
-                }
+            if !schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh)) {
+                return;
+            }
+            if transition.phase == LogicalRequestActivityPhase::Live
+                && self
+                    .tray_refresh
+                    .activity_animation_enabled
+                    .load(Ordering::Acquire)
+            {
                 start_reduce_motion_monitor(
                     self.app_handle.clone(),
                     Arc::clone(&self.tray_refresh),
                     transition.revision,
                 );
-                return;
             }
-            let _ = schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh));
         }
     }
 }
@@ -375,14 +474,15 @@ fn schedule_tray_refresh(app_handle: AppHandle, refresh: Arc<TrayRefreshCoordina
             &snapshot,
             balance.as_ref(),
             services.is_isolated(),
-            refresh.active(),
+            refresh.phase(),
         );
+        let menu_bar = runtime.menu_bar_settings();
         let _apply_guard = refresh
             .apply_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if refresh.can_apply(revision) {
-            apply_tray_projection(&app_handle, &refresh, presentation);
+            apply_tray_projection(&app_handle, &refresh, presentation, menu_bar);
         }
     });
     true
@@ -392,6 +492,7 @@ fn apply_tray_projection(
     app_handle: &AppHandle,
     refresh: &Arc<TrayRefreshCoordinator>,
     presentation: TrayPresentation,
+    menu_bar: Option<router_core::app_api::MenuBarSettingsDto>,
 ) {
     let decision = refresh.transition_projection(presentation.visual_state);
     let Some(tray) = app_handle.tray_by_id("main") else {
@@ -405,11 +506,28 @@ fn apply_tray_projection(
         };
         let _ = tray.set_icon_with_as_template(Some(image), true);
     }
-    let _ = tray.set_title(Some(presentation.title));
+    let title = project_tray_title(
+        presentation.title,
+        menu_bar,
+        app_handle.config().identifier != router_core::qa_acceptance::PRODUCTION_APP_IDENTIFIER,
+    );
+    let _ = tray.set_title(title);
     let _ = tray.set_tooltip(Some(presentation.tooltip));
 
     if decision.changed && decision.animated {
         start_tray_animation(app_handle.clone(), Arc::clone(refresh), decision.generation);
+    }
+}
+
+fn project_tray_title(
+    enabled_title: String,
+    menu_bar: Option<router_core::app_api::MenuBarSettingsDto>,
+    isolated: bool,
+) -> Option<String> {
+    match menu_bar {
+        Some(settings) if settings.status_text_enabled => Some(enabled_title),
+        _ if isolated => Some("QA".to_owned()),
+        _ => None,
     }
 }
 
@@ -450,12 +568,15 @@ fn start_reduce_motion_monitor(
     refresh: Arc<TrayRefreshCoordinator>,
     activity_revision: u64,
 ) {
+    let Some(monitor_generation) = refresh.begin_reduce_motion_monitor(activity_revision) else {
+        return;
+    };
     tauri::async_runtime::spawn(async move {
         loop {
-            if !refresh.activity_is_current(activity_revision) {
+            if !refresh.monitor_is_current(activity_revision, monitor_generation) {
                 return;
             }
-            if refresh_system_reduce_motion(&refresh, activity_revision)
+            if refresh_system_reduce_motion(&refresh, activity_revision, monitor_generation)
                 .await
                 .is_some_and(|(_, changed)| changed)
             {
@@ -469,19 +590,17 @@ fn start_reduce_motion_monitor(
 async fn refresh_system_reduce_motion(
     refresh: &Arc<TrayRefreshCoordinator>,
     activity_revision: u64,
+    monitor_generation: u64,
 ) -> Option<(bool, bool)> {
     let _query_guard = refresh.reduce_motion_gate.lock().await;
-    if !refresh.activity_is_current(activity_revision) {
+    if !refresh.monitor_is_current(activity_revision, monitor_generation) {
         return None;
     }
     let observation = tauri::async_runtime::spawn_blocking(system_reduce_motion)
         .await
         .ok()
         .flatten();
-    if !refresh.activity_is_current(activity_revision) {
-        return None;
-    }
-    refresh.observe_reduce_motion(observation)
+    refresh.observe_reduce_motion_if_current(activity_revision, monitor_generation, observation)
 }
 
 #[cfg(target_os = "macos")]
@@ -511,7 +630,11 @@ fn state_event_affects_tray(event: &StateChangedEventDto) -> bool {
     event.areas.iter().any(|area| {
         matches!(
             area,
-            StateArea::Routes | StateArea::Route | StateArea::Balance | StateArea::Proxy
+            StateArea::Routes
+                | StateArea::Route
+                | StateArea::Balance
+                | StateArea::Proxy
+                | StateArea::MenuBar
         )
     })
 }
@@ -654,10 +777,13 @@ pub fn run() {
             preview_route_activation,
             confirm_route_activation,
             dismiss_codex_restart_notice,
+            dismiss_mcp_image_capacity_warning,
             set_fallback_enabled,
             update_balance_query_settings,
             update_appearance_preference,
+            update_menu_bar_settings,
             update_images_generation_settings,
+            update_mcp_image_capacity_threshold,
             reorder_routes_and_fallback,
             refresh_balance,
             refresh_all_balances,
@@ -676,6 +802,8 @@ pub fn run() {
             clear_request_history,
             mark_first_run_presented,
             open_codex_config,
+            open_mcp_image_directory,
+            clear_mcp_images,
             open_runtime_log_directory,
             clear_runtime_logs,
             show_settings_window,
@@ -749,8 +877,12 @@ fn setup_application(
         .icon(tray_icon)
         .icon_as_template(true)
         .tooltip(format!("{app_name} 正在启动"))
-        .title(initial_tray_title(profile.is_isolated()))
         .show_menu_on_left_click(false);
+    let tray_builder = if profile.is_isolated() {
+        tray_builder.title(initial_tray_title(true))
+    } else {
+        tray_builder
+    };
     tray_builder.build(app)?;
     let tray_refresh = Arc::new(TrayRefreshCoordinator::new(
         tray_assets,
@@ -820,6 +952,18 @@ fn setup_application(
 mod tests {
     use super::*;
 
+    fn activity_transition(
+        phase: LogicalRequestActivityPhase,
+        revision: u64,
+    ) -> LogicalRequestActivityTransition {
+        LogicalRequestActivityTransition {
+            phase,
+            active: phase != LogicalRequestActivityPhase::Idle,
+            count: usize::from(phase != LogicalRequestActivityPhase::Idle),
+            revision,
+        }
+    }
+
     #[test]
     fn tray_refresh_revision_never_regresses() {
         let refresh = TrayRefreshCoordinator::new(
@@ -838,47 +982,64 @@ mod tests {
     }
 
     #[test]
-    fn tray_activity_rejects_stale_transitions_and_keeps_latest_state() {
+    fn tray_activity_phase_changes_invalidate_animation_and_monitor_synchronously() {
         let refresh = TrayRefreshCoordinator::new(
             TrayIconAssets::decode().expect("tray assets"),
             Some(false),
         );
+        refresh.set_activity_animation_enabled(true);
         assert!(
-            refresh.apply_activity_transition(LogicalRequestActivityTransition {
-                active: true,
-                count: 1,
-                revision: 3,
-            })
+            refresh.apply_activity_transition(activity_transition(
+                LogicalRequestActivityPhase::Live,
+                3,
+            ))
         );
-        assert!(
-            !refresh.apply_activity_transition(LogicalRequestActivityTransition {
-                active: false,
-                count: 0,
-                revision: 2,
-            })
-        );
-        assert!(refresh.active());
-        assert!(refresh.activity_is_current(3));
+        let live = refresh.transition_projection(TrayVisualState::Active);
+        assert!(live.animated);
+        assert!(refresh.animation_is_current(live.generation));
+        let live_monitor = refresh
+            .begin_reduce_motion_monitor(3)
+            .expect("live monitor");
+        assert!(refresh.monitor_is_current(3, live_monitor));
+
+        assert!(!refresh.apply_activity_transition(activity_transition(
+            LogicalRequestActivityPhase::Waiting,
+            2,
+        )));
+        assert_eq!(refresh.phase(), LogicalRequestActivityPhase::Live);
+        assert!(refresh.animation_is_current(live.generation));
+        assert!(refresh.monitor_is_current(3, live_monitor));
+
+        assert!(refresh.apply_activity_transition(activity_transition(
+            LogicalRequestActivityPhase::Waiting,
+            4,
+        )));
+        assert_eq!(refresh.phase(), LogicalRequestActivityPhase::Waiting);
+        assert!(!refresh.animation_is_current(live.generation));
+        assert!(!refresh.monitor_is_current(3, live_monitor));
+        let waiting = refresh.transition_projection(TrayVisualState::Waiting);
+        assert!(waiting.changed);
+        assert!(!waiting.animated);
+        assert!(!refresh.animation_is_current(waiting.generation));
 
         assert!(
-            refresh.apply_activity_transition(LogicalRequestActivityTransition {
-                active: false,
-                count: 0,
-                revision: 4,
-            })
+            refresh.apply_activity_transition(activity_transition(
+                LogicalRequestActivityPhase::Idle,
+                5,
+            ))
         );
-        assert!(!refresh.activity_is_current(3));
+        assert_eq!(refresh.phase(), LogicalRequestActivityPhase::Idle);
+        assert!(!refresh.live_activity_is_current(5));
 
         assert!(
-            refresh.apply_activity_transition(LogicalRequestActivityTransition {
-                active: true,
-                count: 1,
-                revision: 5,
-            })
+            refresh.apply_activity_transition(activity_transition(
+                LogicalRequestActivityPhase::Live,
+                6,
+            ))
         );
-        assert!(refresh.activity_is_current(5));
+        assert!(refresh.live_activity_is_current(6));
         refresh.shutdown();
-        assert!(!refresh.activity_is_current(5));
+        assert!(!refresh.live_activity_is_current(6));
     }
 
     #[test]
@@ -887,6 +1048,7 @@ mod tests {
             TrayIconAssets::decode().expect("tray assets"),
             Some(false),
         );
+        refresh.set_activity_animation_enabled(true);
         let active = refresh.transition_projection(TrayVisualState::Active);
         assert!(active.changed);
         assert!(active.animated);
@@ -896,10 +1058,13 @@ mod tests {
         assert!(idle.changed);
         assert!(!refresh.animation_is_current(active.generation));
 
+        let waiting = refresh.transition_projection(TrayVisualState::Waiting);
+        assert!(waiting.changed);
+        assert!(!waiting.animated);
+        assert!(!refresh.animation_is_current(waiting.generation));
+
         let restarted = refresh.transition_projection(TrayVisualState::Active);
         assert!(refresh.animation_is_current(restarted.generation));
-        refresh.invalidate_animation();
-        assert!(!refresh.animation_is_current(restarted.generation));
 
         assert_eq!(
             refresh.observe_reduce_motion(Some(true)),
@@ -915,6 +1080,103 @@ mod tests {
         assert!(refresh.animation_is_current(before_shutdown.generation));
         refresh.shutdown();
         assert!(!refresh.animation_is_current(before_shutdown.generation));
+    }
+
+    #[test]
+    fn tray_activity_animation_setting_is_fail_closed_and_invalidates_active_generation() {
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
+        let unloaded = refresh.transition_projection(TrayVisualState::Active);
+        assert!(!unloaded.animated);
+
+        assert!(refresh.set_activity_animation_enabled(true));
+        let enabled = refresh.transition_projection(TrayVisualState::Active);
+        assert!(enabled.animated);
+        assert!(refresh.animation_is_current(enabled.generation));
+
+        assert!(refresh.set_activity_animation_enabled(false));
+        assert!(!refresh.animation_is_current(enabled.generation));
+        let disabled = refresh.transition_projection(TrayVisualState::Active);
+        assert!(!disabled.animated);
+    }
+
+    #[test]
+    fn tray_monitor_generation_deduplicates_setting_toggles_and_stale_observations() {
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
+        assert!(refresh.set_activity_animation_enabled(true));
+        assert!(
+            refresh.apply_activity_transition(activity_transition(
+                LogicalRequestActivityPhase::Live,
+                1,
+            ))
+        );
+        let first = refresh
+            .begin_reduce_motion_monitor(1)
+            .expect("first live monitor");
+
+        assert!(refresh.set_activity_animation_enabled(false));
+        assert!(!refresh.monitor_is_current(1, first));
+        assert!(refresh.set_activity_animation_enabled(true));
+        let second = refresh
+            .begin_reduce_motion_monitor(1)
+            .expect("replacement live monitor");
+        assert_ne!(first, second);
+        assert!(refresh.monitor_is_current(1, second));
+        assert_eq!(
+            refresh.observe_reduce_motion_if_current(1, first, Some(true)),
+            None
+        );
+        assert!(!refresh.reduce_motion());
+
+        assert!(refresh.apply_activity_transition(activity_transition(
+            LogicalRequestActivityPhase::Waiting,
+            2,
+        )));
+        assert!(!refresh.monitor_is_current(1, second));
+        assert!(refresh.begin_reduce_motion_monitor(2).is_none());
+    }
+
+    #[test]
+    fn tray_title_setting_preserves_only_qa_identity_when_unloaded_or_disabled() {
+        use router_core::app_api::MenuBarSettingsDto;
+
+        let enabled = Some(MenuBarSettingsDto {
+            status_text_enabled: true,
+            activity_animation_enabled: true,
+        });
+        let disabled = Some(MenuBarSettingsDto {
+            status_text_enabled: false,
+            activity_animation_enabled: true,
+        });
+        assert_eq!(
+            project_tray_title("Route($1)".to_owned(), None, false),
+            None
+        );
+        assert_eq!(
+            project_tray_title("Route($1)".to_owned(), None, true),
+            Some("QA".to_owned())
+        );
+        assert_eq!(
+            project_tray_title("Route($1)".to_owned(), enabled, false),
+            Some("Route($1)".to_owned())
+        );
+        assert_eq!(
+            project_tray_title("QA · Route($1)".to_owned(), enabled, true),
+            Some("QA · Route($1)".to_owned())
+        );
+        assert_eq!(
+            project_tray_title("Route($1)".to_owned(), disabled, false),
+            None
+        );
+        assert_eq!(
+            project_tray_title("QA · Route($1)".to_owned(), disabled, true),
+            Some("QA".to_owned())
+        );
     }
 
     #[test]

@@ -16,7 +16,10 @@ use uuid::Uuid;
 
 use crate::{
     balance::BalanceQueryMode,
-    domain::{BalanceQueryPolicy, BalanceScriptSource, CodexModel, ImagesGenerationTimeout},
+    domain::{
+        BalanceQueryPolicy, BalanceScriptSource, CodexModel, ImagesGenerationTimeout,
+        McpImageCapacityWarningThreshold,
+    },
     storage::{DatabaseExecutor, SCHEMA_VERSION, StorageError},
 };
 
@@ -999,7 +1002,7 @@ fn sanitize_point(
     let transaction = connection.transaction()?;
     transaction.execute("DELETE FROM proxy_requests", [])?;
     transaction.execute(
-        "UPDATE app_settings SET last_automatic_update_check_at_ms = NULL WHERE singleton = 1",
+        "UPDATE app_settings SET last_automatic_update_check_at_ms = NULL, mcp_image_capacity_warning_mib = 1024, mcp_image_capacity_active_episode = NULL, mcp_image_capacity_dismissed_episode = NULL WHERE singleton = 1",
         [],
     )?;
     let critical_revision: i64 = transaction.query_row(
@@ -1158,10 +1161,10 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         [],
         |row| row.get(0),
     )?;
-    let settings: (i64, i64, i64, i64, Option<String>, i64, Option<i64>) = connection.query_row(
-        "SELECT proxy_port, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, last_automatic_update_check_at_ms FROM app_settings WHERE singleton = 1",
+    let settings: (i64, i64, i64, i64, Option<String>, i64, Option<i64>, i64, i64) = connection.query_row(
+        "SELECT proxy_port, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled FROM app_settings WHERE singleton = 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
     )?;
     let policy_valid = u16::try_from(settings.1)
         .ok()
@@ -1179,6 +1182,22 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         })
         && u16::try_from(settings.5)
             .is_ok_and(|timeout| ImagesGenerationTimeout::parse(timeout).is_ok());
+    let capacity_settings: (i64, Option<String>, Option<String>) = connection.query_row(
+        "SELECT mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode FROM app_settings WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let episode_is_valid = |value: &str| {
+        Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
+    };
+    let capacity_settings_valid = u32::try_from(capacity_settings.0)
+        .is_ok_and(|threshold| McpImageCapacityWarningThreshold::parse(threshold).is_ok())
+        && capacity_settings.1.as_deref().is_none_or(episode_is_valid)
+        && capacity_settings.2.as_deref().is_none_or(episode_is_valid)
+        && capacity_settings
+            .2
+            .as_deref()
+            .is_none_or(|dismissed| capacity_settings.1.as_deref() == Some(dismissed));
     let balance_queries_valid = {
         let mut statement =
             connection.prepare("SELECT mode, enabled, custom_source FROM balance_queries")?;
@@ -1300,7 +1319,10 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         || !(1..=65_535).contains(&settings.0)
         || !policy_valid
         || !images_settings_valid
+        || !capacity_settings_valid
         || settings.6.is_some_and(|timestamp| timestamp < 0)
+        || !matches!(settings.7, 0 | 1)
+        || !matches!(settings.8, 0 | 1)
         || !balance_queries_valid
         || !codex_models_valid
         || !fallback_excluded_models_valid
@@ -1533,8 +1555,8 @@ mod tests {
     use crate::{
         balance::BalanceQueryMode,
         domain::{
-            ApiKey, CompletionState, DeliveryState, ImagesGenerationTimeout, ServiceTierPolicy,
-            UpstreamAttemptId,
+            ApiKey, CompletionState, DeliveryState, ImagesGenerationTimeout,
+            McpImageCapacityWarningThreshold, ServiceTierPolicy, UpstreamAttemptId,
         },
         storage::{
             AttemptHistoryRecord, BalanceQueryInput, CodexModelRecord, CreateRouteInput,
@@ -1879,6 +1901,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_validation_rejects_invalid_menu_bar_preferences() {
+        for corrupt in [
+            "UPDATE app_settings SET menu_bar_status_text_enabled = 2",
+            "UPDATE app_settings SET menu_bar_activity_animation_enabled = 2",
+        ] {
+            let (_root, primary, database, manager) = setup();
+            let point = manager.create_point(&database).await.expect("point");
+            drop(database);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+
+            for path in [&primary, &point.path] {
+                let connection = Connection::open(path).expect("database to corrupt");
+                connection
+                    .pragma_update(None, "ignore_check_constraints", true)
+                    .expect("bypass CHECK for corruption fixture");
+                connection
+                    .execute(corrupt, [])
+                    .expect("invalidate menu bar preference");
+            }
+
+            let inventory = manager.scan().expect("scan corrupt point");
+            assert!(inventory.valid_points.is_empty());
+            assert_eq!(inventory.invalid_point_count, 1);
+            assert!(matches!(
+                manager
+                    .classify_startup()
+                    .expect("classify corrupt primary"),
+                DatabaseStartupClassification::RecoveryRequired(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_validation_rejects_invalid_capacity_settings() {
+        for corrupt in [
+            "UPDATE app_settings SET mcp_image_capacity_warning_mib = 127",
+            "UPDATE app_settings SET mcp_image_capacity_active_episode = 'not-a-uuid'",
+            "UPDATE app_settings SET mcp_image_capacity_dismissed_episode = '00000000-0000-0000-0000-000000000000'",
+        ] {
+            let (_root, primary, database, manager) = setup();
+            let point = manager.create_point(&database).await.expect("point");
+            drop(database);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+
+            for path in [&primary, &point.path] {
+                let connection = Connection::open(path).expect("database to corrupt");
+                connection
+                    .pragma_update(None, "ignore_check_constraints", true)
+                    .expect("bypass CHECK for corruption fixture");
+                connection
+                    .execute(corrupt, [])
+                    .expect("invalidate capacity setting");
+            }
+
+            let inventory = manager.scan().expect("scan corrupt point");
+            assert!(inventory.valid_points.is_empty());
+            assert_eq!(inventory.invalid_point_count, 1);
+            assert!(matches!(
+                manager
+                    .classify_startup()
+                    .expect("classify corrupt primary"),
+                DatabaseStartupClassification::RecoveryRequired(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn recovery_validation_rejects_invalid_fallback_participant_boundaries() {
         for corrupt in [
             "UPDATE fallback_config SET participant_count = -1",
@@ -2117,6 +2206,10 @@ mod tests {
             .set_fallback_enabled(true)
             .await
             .expect("enable fallback");
+        database
+            .set_menu_bar_settings(false, false)
+            .await
+            .expect("menu bar settings");
         let point = manager.create_point(&database).await.expect("point");
         let point_before = fs::read(&point.path).expect("point bytes");
         let codex = root.path().join("synthetic-codex-config.toml");
@@ -2162,6 +2255,8 @@ mod tests {
         assert!(restored_settings.images_generation_enabled);
         assert!(restored_settings.images_generation_route_id.is_some());
         assert_eq!(restored_settings.images_generation_timeout.seconds(), 900);
+        assert!(!restored_settings.menu_bar.status_text_enabled);
+        assert!(!restored_settings.menu_bar.activity_animation_enabled);
         let restored_routing = restored.routing_state().await.expect("routing state");
         assert!(restored_routing.fallback.enabled);
         assert_eq!(restored_routing.fallback.participant_count, 2);
@@ -2435,6 +2530,20 @@ mod tests {
             .set_last_automatic_update_check_at_ms(1_725_000_000_000)
             .await
             .expect("update cadence");
+        let threshold = McpImageCapacityWarningThreshold::parse(512).expect("threshold");
+        let capacity = database
+            .set_mcp_image_capacity_threshold(threshold, Some(threshold.bytes()))
+            .await
+            .expect("capacity episode");
+        database
+            .dismiss_mcp_image_capacity_warning(
+                capacity
+                    .active_episode_id
+                    .as_deref()
+                    .expect("active episode"),
+            )
+            .await
+            .expect("dismiss capacity episode");
 
         let point = manager.create_point(&database).await.expect("point");
         let bytes = fs::read(&point.path).expect("point bytes");
@@ -2452,6 +2561,14 @@ mod tests {
             )
             .expect("sanitized update cadence");
         assert_eq!(update_cadence, None);
+        let capacity: (i64, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode FROM app_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("sanitized capacity settings");
+        assert_eq!(capacity, (1_024, None, None));
         let counts: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = connection
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM routes), (SELECT COUNT(*) FROM secrets), (SELECT COUNT(*) FROM codex_baseline), (SELECT COUNT(*) FROM codex_recovery_config), (SELECT COUNT(*) FROM codex_models), (SELECT COUNT(*) FROM route_fallback_excluded_models), (SELECT COUNT(*) FROM proxy_requests), (SELECT COUNT(*) FROM upstream_attempts), (SELECT COUNT(*) FROM upstream_attempt_routing_skips)",

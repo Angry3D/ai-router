@@ -60,8 +60,9 @@ pub(crate) mod upstream;
 mod activity;
 
 pub use activity::{
-    LogicalRequestActivityReporter, LogicalRequestActivitySink, LogicalRequestActivityTracker,
-    LogicalRequestActivityTransition, NoopLogicalRequestActivitySink, RequestActivityDisposition,
+    LogicalRequestActivityPhase, LogicalRequestActivityReporter, LogicalRequestActivitySink,
+    LogicalRequestActivityTracker, LogicalRequestActivityTransition,
+    NoopLogicalRequestActivitySink, RequestActivityDisposition,
 };
 pub use health::{
     ACTIVATION_WRITE_RETRY_DELAY, ActivatedSkipHealth, ActivatedSkipKind, CandidateHealth,
@@ -76,7 +77,11 @@ pub use history::{
     InferenceStatusService, MetadataFailureSnapshot, RuntimeDiagnosticCode,
     RuntimeDiagnosticComponent, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
 };
-pub use images::ImagesGenerationService;
+pub use images::{
+    ImageAssetChangeSink, ImagesGenerationService, McpImageAssetCleanupResult,
+    McpImageAssetMaintenanceError, McpImageAssetManager, McpImageAssetSummary,
+    NoopImageAssetChangeSink,
+};
 pub use upstream::{ResponsesForwarder, UpstreamForwarderConfig};
 
 pub const MAX_REQUEST_WIRE_BYTES: usize = 200 * 1024 * 1024;
@@ -274,8 +279,8 @@ pub struct ProxyIngressState {
     wire_limit: usize,
     decoded_limit: usize,
     images: ImagesGenerationService,
-    mcp_image_asset_root: Option<PathBuf>,
-    mcp_image_permit: Arc<Semaphore>,
+    mcp_image_assets: Option<McpImageAssetManager>,
+    image_asset_change_sink: Arc<dyn ImageAssetChangeSink>,
 }
 
 impl ProxyIngressState {
@@ -292,8 +297,8 @@ impl ProxyIngressState {
             activity: LogicalRequestActivityTracker::default(),
             wire_limit: MAX_REQUEST_WIRE_BYTES,
             decoded_limit: MAX_REQUEST_DECODED_BYTES,
-            mcp_image_asset_root: None,
-            mcp_image_permit: Arc::new(Semaphore::new(1)),
+            mcp_image_assets: None,
+            image_asset_change_sink: Arc::new(NoopImageAssetChangeSink),
         }
     }
 
@@ -321,7 +326,19 @@ impl ProxyIngressState {
 
     #[must_use]
     pub fn with_mcp_image_asset_root(mut self, root: PathBuf) -> Self {
-        self.mcp_image_asset_root = Some(root);
+        self.mcp_image_assets = Some(McpImageAssetManager::new(root, Arc::new(Semaphore::new(1))));
+        self
+    }
+
+    #[must_use]
+    pub fn with_mcp_image_assets(mut self, assets: McpImageAssetManager) -> Self {
+        self.mcp_image_assets = Some(assets);
+        self
+    }
+
+    #[must_use]
+    pub fn with_image_asset_change_sink(mut self, sink: Arc<dyn ImageAssetChangeSink>) -> Self {
+        self.image_asset_change_sink = sink;
         self
     }
 
@@ -373,14 +390,14 @@ pub struct LocalErrorBodyDto {
 
 pub fn build_proxy_router(state: ProxyIngressState) -> Router {
     let images = state.images.clone();
-    let asset_root = state.mcp_image_asset_root.clone();
-    let image_permit = Arc::clone(&state.mcp_image_permit);
+    let image_assets = state.mcp_image_assets.clone();
+    let image_asset_change_sink = Arc::clone(&state.image_asset_change_sink);
     let mcp_service = StreamableHttpService::new(
         move || {
             Ok(images::ImageMcpServer::new(
                 images.clone(),
-                asset_root.clone(),
-                Arc::clone(&image_permit),
+                image_assets.clone(),
+                Arc::clone(&image_asset_change_sink),
             ))
         },
         Arc::new(LocalSessionManager::default()),
@@ -1062,6 +1079,26 @@ pub async fn transition_proxy_port(
     router: Router,
     store: &dyn ProxyPortStore,
 ) -> Result<(), ProxyPortError> {
+    transition_proxy_port_with_listener_replaced(current, new_port, router, store, || {}).await
+}
+
+/// Pre-binds and persists a new port, invokes `on_listener_replaced` after the
+/// replacement becomes authoritative, then gracefully drains the old listener.
+///
+/// # Errors
+///
+/// Returns validation, bind, or persistence errors while leaving the current
+/// handle untouched and without invoking `on_listener_replaced`.
+pub async fn transition_proxy_port_with_listener_replaced<F>(
+    current: &mut ProxyServerHandle,
+    new_port: u16,
+    router: Router,
+    store: &dyn ProxyPortStore,
+    on_listener_replaced: F,
+) -> Result<(), ProxyPortError>
+where
+    F: FnOnce(),
+{
     if new_port == 0 || new_port == current.address().port() {
         return Err(ProxyPortError::InvalidPort);
     }
@@ -1071,6 +1108,7 @@ pub async fn transition_proxy_port(
     store.persist_port(new_port).await?;
     let replacement = ProxyServerHandle::from_listener(listener, router);
     let old = std::mem::replace(current, replacement);
+    on_listener_replaced();
     old.shutdown().await;
     Ok(())
 }
@@ -1576,11 +1614,13 @@ mod tests {
             activity.0.lock().expect("activity mutex").as_slice(),
             [
                 LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Live,
                     active: true,
                     count: 1,
                     revision: 1,
                 },
                 LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Idle,
                     active: false,
                     count: 0,
                     revision: 2,
@@ -1680,14 +1720,44 @@ mod tests {
             .await
             .expect("tool response body");
         assert_eq!(tracker.snapshot().0, 1);
-        assert_eq!(activity.0.lock().expect("activity mutex").len(), 1);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Waiting);
+        assert_eq!(activity.0.lock().expect("activity mutex").len(), 2);
 
         let final_response = router.oneshot(request()).await.expect("final response");
         let _ = to_bytes(final_response.into_body(), 1024)
             .await
             .expect("final response body");
         assert_eq!(tracker.snapshot().0, 0);
-        assert_eq!(activity.0.lock().expect("activity mutex").len(), 2);
+        assert_eq!(tracker.phase(), LogicalRequestActivityPhase::Idle);
+        assert_eq!(
+            activity.0.lock().expect("activity mutex").as_slice(),
+            [
+                LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Live,
+                    active: true,
+                    count: 1,
+                    revision: 1,
+                },
+                LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Waiting,
+                    active: true,
+                    count: 1,
+                    revision: 2,
+                },
+                LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Live,
+                    active: true,
+                    count: 1,
+                    revision: 3,
+                },
+                LogicalRequestActivityTransition {
+                    phase: LogicalRequestActivityPhase::Idle,
+                    active: false,
+                    count: 0,
+                    revision: 4,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1922,7 +1992,158 @@ mod tests {
             call_json["error"]["data"]["code"],
             "images_generation_disabled"
         );
+        assert_eq!(call_json["error"]["data"]["stage"], "request_construction");
+        assert_eq!(
+            call_json["error"]["data"]["upstreamStatus"],
+            serde_json::Value::Null
+        );
+        assert_eq!(call_json["error"]["data"]["category"], "unknown_upstream");
+        assert_eq!(call_json["error"]["data"]["retryable"], false);
+        Uuid::parse_str(
+            call_json["error"]["data"]["requestId"]
+                .as_str()
+                .expect("local request ID"),
+        )
+        .expect("UUID request ID");
         assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn images_mcp_wire_exposes_content_policy_stage_and_safe_fields_once() {
+        const PROVIDER_CODE: &str = "content_policy_violation";
+        const PROVIDER_MESSAGE: &str = "PROVIDER_MESSAGE_SENTINEL_32aa";
+        const PROVIDER_REQUEST_ID: &str = "PROVIDER_REQUEST_ID_SENTINEL_f10d";
+        const PROVIDER_HEADER: &str = "PROVIDER_HEADER_SENTINEL_908c";
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let image_upstream = ProxyServerHandle::start(
+            0,
+            Router::new().route(
+                "/openai/v1/images/generations",
+                post(move || {
+                    let calls = Arc::clone(&handler_calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .header("x-provider-request-id", PROVIDER_HEADER)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(
+                                serde_json::json!({
+                                    "error": {
+                                        "code": PROVIDER_CODE,
+                                        "message": PROVIDER_MESSAGE,
+                                        "request_id": PROVIDER_REQUEST_ID
+                                    }
+                                })
+                                .to_string(),
+                            ))
+                            .expect("content policy response")
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("loopback image upstream");
+        let image_route = Arc::new(RouteSnapshot {
+            route_id: RouteId::new(),
+            name: "Image route".to_owned(),
+            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
+                .expect("image base URL"),
+            api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
+            service_tier_policy: ServiceTierPolicy::Passthrough,
+            fallback_excluded_models: Arc::new(HashSet::new()),
+        });
+        let routing = RoutingSnapshotStore::new(RoutingSnapshot {
+            active: None,
+            participants: Vec::new(),
+            enabled: false,
+            selection_generation: 0,
+            health_generation: 0,
+            config_revision: 0,
+            images_generation_enabled: true,
+            images_route: Some(image_route),
+            images_generation_timeout: Duration::from_mins(10),
+        });
+        let temporary = TempDir::new().expect("temporary app data");
+        let router = build_proxy_router(
+            ProxyIngressState::new(TOKEN, Arc::new(RecordingUpstream::default()))
+                .with_routing_store(routing)
+                .with_mcp_image_asset_root(temporary.path().join("mcp-images")),
+        );
+
+        let initialize = router
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+                    ))
+                    .expect("initialize request"),
+            )
+            .await
+            .expect("initialize response");
+        let session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("MCP session ID")
+            .to_owned();
+        let _ = mcp_sse_json(initialize).await;
+        let call = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header("mcp-session-id", session_id)
+                    .header("mcp-protocol-version", "2025-06-18")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"private prompt"}}}"#,
+                    ))
+                    .expect("call request"),
+            )
+            .await
+            .expect("call response");
+        assert_eq!(call.status(), StatusCode::OK);
+        let call_json = mcp_sse_json(call).await;
+        assert_eq!(call_json["error"]["code"], -32603);
+        assert_eq!(
+            call_json["error"]["message"],
+            "The image provider rejected the request under its content policy."
+        );
+        let data = &call_json["error"]["data"];
+        assert_eq!(data.as_object().map(serde_json::Map::len), Some(6));
+        assert_eq!(data["code"], "images_upstream_http_status");
+        assert_eq!(data["stage"], "upstream_http_status");
+        assert_eq!(data["upstreamStatus"], 400);
+        assert_eq!(data["category"], "content_policy");
+        assert_eq!(data["retryable"], false);
+        Uuid::parse_str(data["requestId"].as_str().expect("local request ID"))
+            .expect("UUID request ID");
+        let serialized = serde_json::to_string(&call_json).expect("serialized MCP frame");
+        for forbidden in [
+            PROVIDER_CODE,
+            PROVIDER_MESSAGE,
+            PROVIDER_REQUEST_ID,
+            PROVIDER_HEADER,
+            "image-route-key",
+            "private prompt",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        image_upstream.shutdown().await;
     }
 
     #[tokio::test]
@@ -2343,12 +2564,22 @@ mod tests {
             fail: false,
             persisted: Mutex::new(Vec::new()),
         };
+        let replacement_callbacks = AtomicUsize::new(0);
 
-        let conflict =
-            transition_proxy_port(&mut current, occupied_port, Router::new(), &store).await;
+        let conflict = transition_proxy_port_with_listener_replaced(
+            &mut current,
+            occupied_port,
+            Router::new(),
+            &store,
+            || {
+                replacement_callbacks.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
         assert!(matches!(conflict, Err(ProxyPortError::PortUnavailable)));
         assert_eq!(current.address(), current_address);
         assert_eq!(store.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(replacement_callbacks.load(Ordering::SeqCst), 0);
 
         let candidate_port = unused_listener_port().await;
         let failing_store = TestPortStore {
@@ -2356,15 +2587,23 @@ mod tests {
             fail: true,
             persisted: Mutex::new(Vec::new()),
         };
-        let persistence_failure =
-            transition_proxy_port(&mut current, candidate_port, Router::new(), &failing_store)
-                .await;
+        let persistence_failure = transition_proxy_port_with_listener_replaced(
+            &mut current,
+            candidate_port,
+            Router::new(),
+            &failing_store,
+            || {
+                replacement_callbacks.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
         assert!(matches!(
             persistence_failure,
             Err(ProxyPortError::PersistenceFailed)
         ));
         assert_eq!(current.address(), current_address);
         assert_eq!(failing_store.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replacement_callbacks.load(Ordering::SeqCst), 0);
         let rebound = TcpListener::bind((Ipv4Addr::LOCALHOST, candidate_port))
             .await
             .expect("failed candidate listener was closed");
@@ -2376,16 +2615,20 @@ mod tests {
             fail: false,
             persisted: Mutex::new(Vec::new()),
         };
-        transition_proxy_port(
+        transition_proxy_port_with_listener_replaced(
             &mut current,
             replacement_port,
             Router::new(),
             &successful_store,
+            || {
+                replacement_callbacks.fetch_add(1, Ordering::SeqCst);
+            },
         )
         .await
         .expect("successful port transition");
         assert_eq!(current.address().port(), replacement_port);
         assert_eq!(successful_store.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replacement_callbacks.load(Ordering::SeqCst), 1);
         assert_eq!(
             successful_store
                 .persisted
@@ -2400,6 +2643,82 @@ mod tests {
         drop(old_port_rebound);
 
         current.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn proxy_port_replacement_callback_runs_before_old_listener_drains() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let router = Router::new().route(
+            "/hold",
+            get({
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                move || {
+                    let entered = Arc::clone(&entered);
+                    let release = Arc::clone(&release);
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        "done"
+                    }
+                }
+            }),
+        );
+        let current = ProxyServerHandle::start(0, router)
+            .await
+            .expect("current listener");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("local client");
+        let request = tokio::spawn({
+            let url = format!("http://{}/hold", current.address());
+            async move { client.get(url).send().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("old listener request entered");
+
+        let replacement_port = unused_listener_port().await;
+        let store = TestPortStore {
+            calls: AtomicUsize::new(0),
+            fail: false,
+            persisted: Mutex::new(Vec::new()),
+        };
+        let (replaced, replaced_rx) = oneshot::channel();
+        let transition = tokio::spawn(async move {
+            let mut current = current;
+            let result = transition_proxy_port_with_listener_replaced(
+                &mut current,
+                replacement_port,
+                Router::new(),
+                &store,
+                || {
+                    let _ = replaced.send(());
+                },
+            )
+            .await;
+            (current, result)
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), replaced_rx)
+            .await
+            .expect("replacement callback ran")
+            .expect("replacement callback sender");
+        assert!(
+            !transition.is_finished(),
+            "old listener must still be draining when the callback runs"
+        );
+
+        release.notify_waiters();
+        request
+            .await
+            .expect("request task")
+            .expect("old listener response");
+        let (replacement, result) = transition.await.expect("transition task");
+        result.expect("port transition");
+        replacement.shutdown().await;
     }
 
     type CapturedProbeRequest = (Method, Uri, HeaderMap, usize);

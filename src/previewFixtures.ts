@@ -112,6 +112,15 @@ const personalRouteId = "preview-personal" as RouteId;
 const ciiiRouteId = "preview-ciii" as RouteId;
 const testRouteId = "preview-test" as RouteId;
 const previewNow = new Date(2026, 6, 30, 1, 9, 2, 337).getTime();
+const previewMcpImageCapacity = {
+  available: true,
+  imageCount: 166,
+  bytes: 1_267_015_352,
+  thresholdMib: 1024,
+  overThreshold: true,
+  warningEpisodeId: "preview-image-capacity-episode",
+  warningVisible: true,
+} as const;
 const matchedUsageStartedAtMs = previewNow - 4 * 60_000;
 const automaticRefreshIntervalMs = 30 * 60 * 1_000;
 
@@ -187,6 +196,7 @@ export const previewMenuSnapshot: MenuSnapshotDto = {
     noticeId: "preview-restart-notice",
     routeName: "AI INPUT 工作账号",
   },
+  mcpImageCapacity: { ...previewMcpImageCapacity },
   balanceEnabledRouteIds: routes.map((route) => route.routeId),
   balanceBatch: null,
   balances: [
@@ -276,7 +286,9 @@ export const previewSettingsSnapshot: SettingsSnapshotDto = {
     hasNext: true,
   },
   proxyPort: 32189,
+  menuBar: { statusTextEnabled: true, activityAnimationEnabled: true },
   imagesGeneration: { enabled: true, routeId: workRouteId, timeoutSecs: 600 },
+  mcpImageCapacity: { ...previewMcpImageCapacity },
   codexStatus: "changed",
   baseline: {
     exists: true,

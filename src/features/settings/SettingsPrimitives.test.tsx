@@ -32,7 +32,7 @@ describe("Settings visual primitives", () => {
             id: "system",
             label: "系统",
             icon: <Settings aria-hidden="true" />,
-            hasIndicator: true,
+            indicatorLabel: "有可用更新",
           },
         ]}
       />,
@@ -47,7 +47,7 @@ describe("Settings visual primitives", () => {
     );
     expect(
       screen.getByRole("button", { name: "系统，有可用更新" }),
-    ).toContainElement(document.querySelector(".application-update-indicator"));
+    ).toContainElement(document.querySelector(".settings-navigation-indicator"));
     fireEvent.click(screen.getByRole("button", { name: "Codex" }));
     expect(onSelect).toHaveBeenCalledWith("codex");
     expect(screen.getByText("版本 0.1.1")).toBeInTheDocument();
