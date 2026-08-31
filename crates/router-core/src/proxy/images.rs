@@ -818,8 +818,8 @@ enum WireCollectError {
 #[derive(Clone)]
 pub struct ImageMcpServer {
     service: ImagesGenerationService,
-    asset_root: Option<std::path::PathBuf>,
-    image_permit: Arc<tokio::sync::Semaphore>,
+    asset_manager: Option<McpImageAssetManager>,
+    change_sink: Arc<dyn ImageAssetChangeSink>,
     publication_fault: PublicationFault,
     tool: Arc<Tool>,
 }
@@ -827,14 +827,14 @@ pub struct ImageMcpServer {
 impl ImageMcpServer {
     pub(super) fn new(
         service: ImagesGenerationService,
-        asset_root: Option<std::path::PathBuf>,
-        image_permit: Arc<tokio::sync::Semaphore>,
+        asset_manager: Option<McpImageAssetManager>,
+        change_sink: Arc<dyn ImageAssetChangeSink>,
     ) -> Self {
         Self {
             service: service
                 .with_mcp_response_limits(MCP_JSON_RESPONSE_LIMIT, MCP_JSON_RESPONSE_LIMIT),
-            asset_root,
-            image_permit,
+            asset_manager,
+            change_sink,
             publication_fault: PublicationFault::default(),
             tool: Arc::new(generate_image_tool()),
         }
@@ -875,23 +875,18 @@ impl ImageMcpServer {
                 request_id.clone(),
             ))
         })?;
-        let permit = Arc::clone(&self.image_permit)
-            .acquire_owned()
-            .await
-            .map_err(|_| {
-                image_asset_error(
-                    ImageAssetErrorKind::StorageUnavailable,
-                    request_id.clone(),
-                    None,
-                )
-            })?;
-        let asset_root = self.asset_root.clone().ok_or_else(|| {
+        let asset_manager = self.asset_manager.clone().ok_or_else(|| {
             image_asset_error(
                 ImageAssetErrorKind::StorageUnavailable,
                 request_id.clone(),
                 None,
             )
         })?;
+        let permit = asset_manager
+            .acquire_publication_permit()
+            .await
+            .map_err(|kind| image_asset_error(kind, request_id.clone(), None))?;
+        let asset_root = asset_manager.configured_path();
         let admitted_root =
             tokio::task::spawn_blocking(move || AdmittedAssetRoot::admit(asset_root))
                 .await
@@ -932,6 +927,7 @@ impl ImageMcpServer {
                 upstream_status,
             )
         })?;
+        self.change_sink.image_assets_changed();
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 }
@@ -1218,7 +1214,18 @@ mod tests {
         service: ImagesGenerationService,
         asset_root: Option<PathBuf>,
     ) -> ImageMcpServer {
-        ImageMcpServer::new(service, asset_root, Arc::new(Semaphore::new(1)))
+        let manager =
+            asset_root.map(|root| McpImageAssetManager::new(root, Arc::new(Semaphore::new(1))));
+        ImageMcpServer::new(service, manager, Arc::new(NoopImageAssetChangeSink))
+    }
+
+    #[derive(Default)]
+    struct RecordingImageAssetChangeSink(AtomicUsize);
+
+    impl ImageAssetChangeSink for RecordingImageAssetChangeSink {
+        fn image_assets_changed(&self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     fn default_generate_args() -> GenerateImageArgs {
@@ -2174,6 +2181,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the success contract test keeps payload, publication, and sink assertions together"
+    )]
     async fn mcp_adapter_fixes_payload_and_returns_one_local_png_text_result() {
         let png = valid_png_fixture();
         let image_data = STANDARD.encode(&png);
@@ -2186,9 +2197,14 @@ mod tests {
         );
         let temporary = TempDir::new().expect("temporary app data");
         let asset_root = temporary.path().join("mcp-images");
-        let adapter = mcp_adapter(
+        let change_sink = Arc::new(RecordingImageAssetChangeSink::default());
+        let adapter = ImageMcpServer::new(
             ImagesGenerationService::new(routing(true, Some(selected))),
-            Some(asset_root.clone()),
+            Some(McpImageAssetManager::new(
+                asset_root.clone(),
+                Arc::new(Semaphore::new(1)),
+            )),
+            change_sink.clone(),
         );
         let result = adapter
             .generate_image(GenerateImageArgs {
@@ -2250,6 +2266,7 @@ mod tests {
         );
         assert_eq!(text, expected_text);
         assert!(result.get("structuredContent").is_none());
+        assert_eq!(change_sink.0.load(Ordering::Acquire), 1);
         let serialized = serde_json::to_string(&result).expect("serialized MCP result");
         for forbidden in [
             "\"type\":\"image\"",
@@ -2528,12 +2545,14 @@ mod tests {
         let temporary = TempDir::new().expect("temporary app data");
         let asset_root = temporary.path().join("mcp-images");
         let permit = Arc::new(Semaphore::new(1));
+        let manager = McpImageAssetManager::new(asset_root.clone(), permit);
         let first = ImageMcpServer::new(
             service.clone(),
-            Some(asset_root.clone()),
-            Arc::clone(&permit),
+            Some(manager.clone()),
+            Arc::new(NoopImageAssetChangeSink),
         );
-        let second = ImageMcpServer::new(service, Some(asset_root), permit);
+        let second =
+            ImageMcpServer::new(service, Some(manager), Arc::new(NoopImageAssetChangeSink));
 
         let (first_result, second_result) = tokio::join!(
             first.generate_image(default_generate_args()),
@@ -2563,16 +2582,18 @@ mod tests {
         let temporary = TempDir::new().expect("temporary app data");
         let asset_root = temporary.path().join("mcp-images");
         let permit = Arc::new(Semaphore::new(1));
+        let manager = McpImageAssetManager::new(asset_root.clone(), permit);
         let first = ImageMcpServer::new(
             service.clone(),
-            Some(asset_root.clone()),
-            Arc::clone(&permit),
+            Some(manager.clone()),
+            Arc::new(NoopImageAssetChangeSink),
         )
         .with_publication_fault(PublicationFault::with_delay(
             asset::PublicationStage::AfterCreate,
             Duration::from_millis(250),
         ));
-        let second = ImageMcpServer::new(service, Some(asset_root.clone()), permit);
+        let second =
+            ImageMcpServer::new(service, Some(manager), Arc::new(NoopImageAssetChangeSink));
 
         let first_call =
             tokio::spawn(async move { first.generate_image(default_generate_args()).await });

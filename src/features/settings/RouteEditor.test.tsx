@@ -349,7 +349,7 @@ describe("RouteEditor interactions", () => {
     );
     for (const label of ["路由名称", "Base URL", "API Key"]) {
       const marker = screen
-        .getByLabelText(label)
+        .getByLabelText<HTMLInputElement>(label)
         .labels?.[0]?.querySelector(".settings-required-marker");
       expect(marker).toHaveAttribute("aria-hidden", "true");
     }
@@ -379,7 +379,7 @@ describe("RouteEditor interactions", () => {
     );
     for (const label of ["路由名称", "Base URL", "API Key"]) {
       const marker = screen
-        .getByLabelText(label)
+        .getByLabelText<HTMLInputElement>(label)
         .labels?.[0]?.querySelector(".settings-required-marker");
       expect(marker).toHaveAttribute("aria-hidden", "true");
     }
