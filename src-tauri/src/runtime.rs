@@ -77,6 +77,8 @@ use router_core::{
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, plugin::TauriPlugin};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
+use crate::application_update::ApplicationUpdateCoordinator;
+
 #[cfg(test)]
 struct ReplaceCodexModelsInput {
     models: Vec<CodexModelDto>,
@@ -3440,6 +3442,7 @@ pub async fn create_recovery_point(
 pub async fn restore_recovery_point(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     coordinator: State<'_, Arc<AppCoordinator>>,
+    update_coordinator: State<'_, Arc<ApplicationUpdateCoordinator>>,
     point_id: String,
 ) -> Result<AppLifecycleSnapshot, IpcErrorDto> {
     require_lifecycle_phase(
@@ -3451,16 +3454,19 @@ pub async fn restore_recovery_point(
     let point_id = RecoveryPointId::parse(&point_id)
         .map_err(|error| map_recovery_error(&error, RecoveryOperation::Restore))?;
     services.require_recovery_candidate(&point_id).await?;
-    map_recovery_lifecycle_result(
+    let snapshot = map_recovery_lifecycle_result(
         coordinator.restore_database(&point_id).await,
         RecoveryOperation::Restore,
-    )
+    )?;
+    resume_automatic_update_checks(&snapshot, &update_coordinator, &services);
+    Ok(snapshot)
 }
 
 #[tauri::command]
 pub async fn start_over_database(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     coordinator: State<'_, Arc<AppCoordinator>>,
+    update_coordinator: State<'_, Arc<ApplicationUpdateCoordinator>>,
 ) -> Result<AppLifecycleSnapshot, IpcErrorDto> {
     require_lifecycle_phase(
         &coordinator.snapshot(),
@@ -3469,15 +3475,19 @@ pub async fn start_over_database(
         "数据库当前不需要恢复。",
     )?;
     services.require_start_over_available().await?;
-    map_recovery_lifecycle_result(
+    let snapshot = map_recovery_lifecycle_result(
         coordinator.start_over_database().await,
         RecoveryOperation::StartOver,
-    )
+    )?;
+    resume_automatic_update_checks(&snapshot, &update_coordinator, &services);
+    Ok(snapshot)
 }
 
 #[tauri::command]
 pub async fn retry_database_startup(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
     coordinator: State<'_, Arc<AppCoordinator>>,
+    update_coordinator: State<'_, Arc<ApplicationUpdateCoordinator>>,
 ) -> Result<AppLifecycleSnapshot, IpcErrorDto> {
     require_lifecycle_phase(
         &coordinator.snapshot(),
@@ -3485,7 +3495,12 @@ pub async fn retry_database_startup(
         "database_retry_not_available",
         "当前数据库状态不支持重试。",
     )?;
-    map_recovery_lifecycle_result(coordinator.retry_database().await, RecoveryOperation::Retry)
+    let snapshot = map_recovery_lifecycle_result(
+        coordinator.retry_database().await,
+        RecoveryOperation::Retry,
+    )?;
+    resume_automatic_update_checks(&snapshot, &update_coordinator, &services);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -4127,6 +4142,20 @@ fn require_lifecycle_phase(
         Ok(())
     } else {
         Err(ipc_error(code, message, false))
+    }
+}
+
+/// Recovery reaches `Running` without the startup path that normally starts the
+/// updater scheduler, so a recovered process would otherwise never check for
+/// updates again. The scheduler claims itself once, so calling this on every
+/// recovery result is safe.
+fn resume_automatic_update_checks(
+    snapshot: &AppLifecycleSnapshot,
+    update_coordinator: &Arc<ApplicationUpdateCoordinator>,
+    services: &Arc<DesktopLifecycleServices>,
+) {
+    if snapshot.phase == AppLifecyclePhase::Running {
+        update_coordinator.start_automatic_scheduler(Arc::clone(services));
     }
 }
 
