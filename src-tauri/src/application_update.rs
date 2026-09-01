@@ -3,7 +3,7 @@ use std::{
     env,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -22,8 +22,10 @@ use url::Url;
 
 use crate::runtime::DesktopLifecycleServices;
 
-const AUTOMATIC_CHECK_DELAY: Duration = Duration::from_mins(1);
-const AUTOMATIC_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1_000;
+const AUTOMATIC_CHECK_SUCCESS_INTERVAL: Duration = Duration::from_hours(24);
+const AUTOMATIC_CHECK_FAILURE_INTERVAL: Duration = Duration::from_hours(6);
+const AUTOMATIC_CHECK_BUSY_RETRY: Duration = Duration::from_mins(5);
+const AUTOMATIC_CHECK_SLEEP_STEP: Duration = Duration::from_mins(15);
 const CANONICAL_RELEASE_ORIGIN: &str = "https://github.com";
 const CANONICAL_REPOSITORY_PATH: &str = "/Angry3D/ai-router";
 const QA_ENDPOINT_ENV: &str = "AI_ROUTER_QA_UPDATER_ENDPOINT";
@@ -44,6 +46,32 @@ enum NormalizedRelease {
     Available(ApplicationUpdateReleaseDto),
 }
 
+/// Internal classification of one automatic check. It never reaches IPC: the
+/// user-visible snapshot and the manual failure DTO are unchanged, and this
+/// only selects how long the scheduler waits before the next attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutomaticCheckOutcome {
+    /// The update service proved the app is current, or offered a release that
+    /// passed full metadata validation.
+    Succeeded,
+    /// Network, update-service, or metadata validation failure.
+    Failed,
+}
+
+/// Why one automatic attempt ended, which is the only input that decides the
+/// next wait and whether the process-long loop continues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutomaticAttemptOutcome {
+    /// An installed update owns the next launch; this process stops checking.
+    Stopped,
+    /// Another update operation held the gate, so no attempt was recorded.
+    GateBusy,
+    /// The attempt timestamp could not be recorded, so no network work ran.
+    NotRecorded,
+    /// The update service was reached and the result was classified.
+    Checked(AutomaticCheckOutcome),
+}
+
 struct CoordinatorState {
     snapshot: ApplicationUpdateSnapshotDto,
     pending: Option<Update>,
@@ -56,6 +84,7 @@ pub struct ApplicationUpdateCoordinator {
     official_updates_enabled: bool,
     operation_gate: tokio::sync::Mutex<()>,
     generation: AtomicU64,
+    scheduler_started: AtomicBool,
     state: Mutex<CoordinatorState>,
 }
 
@@ -93,6 +122,7 @@ impl ApplicationUpdateCoordinator {
             official_updates_enabled,
             operation_gate: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
+            scheduler_started: AtomicBool::new(false),
         })
     }
 
@@ -109,36 +139,71 @@ impl ApplicationUpdateCoordinator {
         if services.is_isolated() || !self.official_updates_enabled {
             return;
         }
+        // The scheduler now owns a process-long loop, so a second task would
+        // permanently double this app's request rate against the update service.
+        if !claim_scheduler_start(&self.scheduler_started) {
+            return;
+        }
         let coordinator = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(AUTOMATIC_CHECK_DELAY).await;
-            let Some(database) = services.application_update_database().await else {
-                return;
-            };
-            let Ok(settings) = database.app_settings().await else {
-                return;
-            };
-            let now = now_millis();
-            if !automatic_check_is_due(settings.last_automatic_update_check_at_ms, now) {
-                return;
-            }
-            if database
-                .set_last_automatic_update_check_at_ms(now)
-                .await
-                .is_err()
-            {
-                return;
-            }
-            let _ = coordinator.check(false).await;
+            coordinator.run_automatic_scheduler(&services).await;
         });
     }
 
-    pub async fn check_manual(&self) -> Result<ApplicationUpdateSnapshotDto, IpcErrorDto> {
-        self.check(true).await
+    /// Checks immediately on entry and keeps checking for the life of the
+    /// process. The persisted attempt timestamp records the last automatic
+    /// network attempt for diagnostics; it never suppresses the first check of
+    /// a launch, so every restart deliberately resets this cadence.
+    async fn run_automatic_scheduler(&self, services: &DesktopLifecycleServices) {
+        loop {
+            let attempt_started_ms = now_millis();
+            let Some(interval) = self.run_automatic_attempt(services).await else {
+                return;
+            };
+            wait_for_next_attempt(attempt_started_ms, interval).await;
+        }
     }
 
-    async fn check(&self, manual: bool) -> Result<ApplicationUpdateSnapshotDto, IpcErrorDto> {
+    /// Runs one automatic attempt and returns how long to wait, measured from
+    /// the attempt start, or `None` when this process should stop checking.
+    async fn run_automatic_attempt(&self, services: &DesktopLifecycleServices) -> Option<Duration> {
+        automatic_attempt_wait(self.classify_automatic_attempt(services).await)
+    }
+
+    async fn classify_automatic_attempt(
+        &self,
+        services: &DesktopLifecycleServices,
+    ) -> AutomaticAttemptOutcome {
+        if automatic_scheduler_should_stop(self.snapshot().operation) {
+            return AutomaticAttemptOutcome::Stopped;
+        }
+        let Ok(_operation) = try_operation_gate(&self.operation_gate) else {
+            // A manual check or an install owns the single operation gate.
+            // Retry soon without recording a network attempt that never ran.
+            return AutomaticAttemptOutcome::GateBusy;
+        };
+        let Some(database) = services.application_update_database().await else {
+            return AutomaticAttemptOutcome::NotRecorded;
+        };
+        if database
+            .set_last_automatic_update_check_at_ms(now_millis())
+            .await
+            .is_err()
+        {
+            // Never reach the update service without first recording the attempt.
+            return AutomaticAttemptOutcome::NotRecorded;
+        }
+        AutomaticAttemptOutcome::Checked(self.run_check(false).await)
+    }
+
+    pub async fn check_manual(&self) -> Result<ApplicationUpdateSnapshotDto, IpcErrorDto> {
         let _operation = try_operation_gate(&self.operation_gate)?;
+        self.run_check(true).await;
+        Ok(self.snapshot())
+    }
+
+    /// Runs one metadata check. The caller must already hold the operation gate.
+    async fn run_check(&self, manual: bool) -> AutomaticCheckOutcome {
         let generation = self.next_generation();
         self.update_snapshot(|snapshot| {
             snapshot.operation = ApplicationUpdateOperationDto::Checking;
@@ -153,10 +218,12 @@ impl ApplicationUpdateCoordinator {
             Err(error) => Err(error),
         };
         if !self.is_current(generation) {
-            return Ok(self.snapshot());
+            // A newer operation owns the snapshot. Discard this result and let
+            // the scheduler retry on the bounded failure cadence.
+            return AutomaticCheckOutcome::Failed;
         }
 
-        match result {
+        let outcome = match result {
             Ok(Some(update)) => match normalize_release(&update, self.allow_qa_override) {
                 Ok(NormalizedRelease::Available(release)) => {
                     let now = now_millis();
@@ -171,15 +238,28 @@ impl ApplicationUpdateCoordinator {
                     state.snapshot.downloaded_bytes = None;
                     state.snapshot.total_bytes = None;
                     state.snapshot.manual_failure = None;
+                    AutomaticCheckOutcome::Succeeded
                 }
-                Ok(NormalizedRelease::Current) => self.finish_current_check(),
-                Err(failure) => self.finish_failed_check(manual, failure),
+                Ok(NormalizedRelease::Current) => {
+                    self.finish_current_check();
+                    AutomaticCheckOutcome::Succeeded
+                }
+                Err(failure) => {
+                    self.finish_failed_check(manual, failure);
+                    AutomaticCheckOutcome::Failed
+                }
             },
-            Ok(None) => self.finish_current_check(),
-            Err(error) => self.finish_failed_check(manual, map_check_error(&error)),
-        }
+            Ok(None) => {
+                self.finish_current_check();
+                AutomaticCheckOutcome::Succeeded
+            }
+            Err(error) => {
+                self.finish_failed_check(manual, map_check_error(&error));
+                AutomaticCheckOutcome::Failed
+            }
+        };
         self.publish_boundary();
-        Ok(self.snapshot())
+        outcome
     }
 
     pub async fn download_and_install(
@@ -613,10 +693,59 @@ fn parse_structured_notes(
     Ok(result)
 }
 
-fn automatic_check_is_due(last_attempt_ms: Option<i64>, now_ms: i64) -> bool {
-    last_attempt_ms.is_none_or(|last_attempt| {
-        last_attempt > now_ms || now_ms.saturating_sub(last_attempt) >= AUTOMATIC_CHECK_INTERVAL_MS
-    })
+/// Returns how long to wait from the attempt start, or `None` only when this
+/// process must stop checking. Every failure keeps the loop alive on a bounded
+/// retry so a long-running app never silently stops looking for updates.
+fn automatic_attempt_wait(outcome: AutomaticAttemptOutcome) -> Option<Duration> {
+    match outcome {
+        AutomaticAttemptOutcome::Stopped => None,
+        AutomaticAttemptOutcome::GateBusy => Some(AUTOMATIC_CHECK_BUSY_RETRY),
+        AutomaticAttemptOutcome::NotRecorded
+        | AutomaticAttemptOutcome::Checked(AutomaticCheckOutcome::Failed) => {
+            Some(AUTOMATIC_CHECK_FAILURE_INTERVAL)
+        }
+        AutomaticAttemptOutcome::Checked(AutomaticCheckOutcome::Succeeded) => {
+            Some(AUTOMATIC_CHECK_SUCCESS_INTERVAL)
+        }
+    }
+}
+
+fn automatic_scheduler_should_stop(operation: ApplicationUpdateOperationDto) -> bool {
+    // An installed update owns the next launch, so this process stops checking
+    // and the new process starts a fresh loop.
+    operation == ApplicationUpdateOperationDto::RestartReady
+}
+
+fn claim_scheduler_start(started: &AtomicBool) -> bool {
+    !started.swap(true, Ordering::AcqRel)
+}
+
+/// Waits for the next automatic attempt on wall-clock time. macOS suspends the
+/// monotonic clock while the machine sleeps, so one long timer would silently
+/// stretch a 24-hour cadence across a laptop's sleep cycles.
+async fn wait_for_next_attempt(attempt_started_ms: i64, interval: Duration) {
+    let due_at_ms = attempt_started_ms.saturating_add(duration_millis(interval));
+    while let Some(step) = next_wait_step(due_at_ms, now_millis(), interval) {
+        tokio::time::sleep(step).await;
+    }
+}
+
+/// Returns the next bounded sleep step, or `None` once the attempt is due. A
+/// remaining wait longer than the interval means the wall clock moved backward,
+/// which is treated as due for the same reason a future attempt timestamp was.
+fn next_wait_step(due_at_ms: i64, now_ms: i64, interval: Duration) -> Option<Duration> {
+    let remaining_ms = due_at_ms.saturating_sub(now_ms);
+    if remaining_ms <= 0 || remaining_ms > duration_millis(interval) {
+        return None;
+    }
+    Some(
+        Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX))
+            .min(AUTOMATIC_CHECK_SLEEP_STEP),
+    )
+}
+
+fn duration_millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 fn try_operation_gate(
@@ -759,14 +888,100 @@ mod tests {
     }
 
     #[test]
-    fn automatic_cadence_treats_future_clock_as_due() {
-        assert!(automatic_check_is_due(None, 100));
-        assert!(automatic_check_is_due(Some(101), 100));
-        assert!(!automatic_check_is_due(Some(100), 100));
-        assert!(automatic_check_is_due(
-            Some(100),
-            100 + AUTOMATIC_CHECK_INTERVAL_MS
+    fn only_restart_ready_stops_the_loop_and_failures_keep_a_bounded_wait() {
+        assert_eq!(
+            automatic_attempt_wait(AutomaticAttemptOutcome::Stopped),
+            None
+        );
+        // Every non-stopping outcome keeps the process-long loop alive inside
+        // the busy-retry / success-interval band, so no failure ends checking
+        // and no failure collapses into dense update-service requests.
+        for outcome in [
+            AutomaticAttemptOutcome::GateBusy,
+            AutomaticAttemptOutcome::NotRecorded,
+            AutomaticAttemptOutcome::Checked(AutomaticCheckOutcome::Failed),
+            AutomaticAttemptOutcome::Checked(AutomaticCheckOutcome::Succeeded),
+        ] {
+            let wait = automatic_attempt_wait(outcome).expect("a failure must not end the loop");
+            assert!(wait >= AUTOMATIC_CHECK_BUSY_RETRY);
+            assert!(wait <= AUTOMATIC_CHECK_SUCCESS_INTERVAL);
+        }
+    }
+
+    #[test]
+    fn automatic_cadence_separates_success_failure_and_busy_intervals() {
+        assert_eq!(
+            automatic_attempt_wait(AutomaticAttemptOutcome::Checked(
+                AutomaticCheckOutcome::Succeeded
+            )),
+            Some(Duration::from_hours(24))
+        );
+        assert_eq!(
+            automatic_attempt_wait(AutomaticAttemptOutcome::Checked(
+                AutomaticCheckOutcome::Failed
+            )),
+            Some(Duration::from_hours(6))
+        );
+        // A timestamp that could not be recorded never reaches the network, so
+        // it retries on the same bounded failure cadence.
+        assert_eq!(
+            automatic_attempt_wait(AutomaticAttemptOutcome::NotRecorded),
+            Some(AUTOMATIC_CHECK_FAILURE_INTERVAL)
+        );
+        assert_eq!(
+            automatic_attempt_wait(AutomaticAttemptOutcome::GateBusy),
+            Some(AUTOMATIC_CHECK_BUSY_RETRY)
+        );
+        assert!(AUTOMATIC_CHECK_BUSY_RETRY < AUTOMATIC_CHECK_FAILURE_INTERVAL);
+        assert!(AUTOMATIC_CHECK_FAILURE_INTERVAL < AUTOMATIC_CHECK_SUCCESS_INTERVAL);
+    }
+
+    #[test]
+    fn automatic_waiting_uses_bounded_steps_and_ends_when_due() {
+        let interval = AUTOMATIC_CHECK_SUCCESS_INTERVAL;
+        let started = 1_000_000_i64;
+        let due = started + duration_millis(interval);
+
+        // A full interval ahead waits in bounded steps, never one long timer,
+        // so a machine that slept through the due point notices on the next step.
+        assert_eq!(
+            next_wait_step(due, started, interval),
+            Some(AUTOMATIC_CHECK_SLEEP_STEP)
+        );
+        // The final step shrinks to exactly the remaining time.
+        assert_eq!(
+            next_wait_step(due, due - 1_000, interval),
+            Some(Duration::from_secs(1))
+        );
+        // Due now, and a wall clock that jumped past the due point.
+        assert_eq!(next_wait_step(due, due, interval), None);
+        assert_eq!(next_wait_step(due, due + 1, interval), None);
+        // A wall clock that moved backward beyond the interval is treated as
+        // due, matching the existing future-timestamp rule.
+        assert_eq!(next_wait_step(due, 0, interval), None);
+    }
+
+    #[test]
+    fn restart_ready_stops_the_automatic_scheduler() {
+        assert!(automatic_scheduler_should_stop(
+            ApplicationUpdateOperationDto::RestartReady
         ));
+        for operation in [
+            ApplicationUpdateOperationDto::Idle,
+            ApplicationUpdateOperationDto::Checking,
+            ApplicationUpdateOperationDto::Downloading,
+            ApplicationUpdateOperationDto::Installing,
+        ] {
+            assert!(!automatic_scheduler_should_stop(operation));
+        }
+    }
+
+    #[test]
+    fn only_the_first_start_claims_the_process_long_scheduler() {
+        let started = AtomicBool::new(false);
+        assert!(claim_scheduler_start(&started));
+        assert!(!claim_scheduler_start(&started));
+        assert!(!claim_scheduler_start(&started));
     }
 
     #[test]
