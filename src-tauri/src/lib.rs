@@ -221,13 +221,16 @@ impl TrayRefreshCoordinator {
     }
 
     fn transition_projection(&self, visual_state: TrayVisualState) -> TrayProjectionDecision {
-        let animated = visual_state == TrayVisualState::Active
-            && self.activity_animation_enabled.load(Ordering::Acquire)
-            && !self.reduce_motion();
+        let projected = if self.activity_animation_enabled.load(Ordering::Acquire) {
+            visual_state
+        } else {
+            TrayVisualState::Ready
+        };
+        let animated = projected == TrayVisualState::Active && !self.reduce_motion();
         let desired = if animated {
             TrayProjectionMode::Animated
         } else {
-            TrayProjectionMode::Static(visual_state)
+            TrayProjectionMode::Static(projected)
         };
         let mut animation = self
             .animation
@@ -238,6 +241,7 @@ impl TrayRefreshCoordinator {
                 changed: false,
                 animated,
                 generation: animation.generation,
+                visual_state: projected,
             };
         }
         animation.generation = animation.generation.saturating_add(1);
@@ -246,6 +250,7 @@ impl TrayRefreshCoordinator {
             changed: true,
             animated,
             generation: animation.generation,
+            visual_state: projected,
         }
     }
 
@@ -360,6 +365,7 @@ struct TrayProjectionDecision {
     changed: bool,
     animated: bool,
     generation: u64,
+    visual_state: TrayVisualState,
 }
 
 struct TrayIconAssets {
@@ -502,7 +508,7 @@ fn apply_tray_projection(
         let image = if decision.animated {
             refresh.assets.active_frames[0].clone()
         } else {
-            refresh.assets.static_image(presentation.visual_state)
+            refresh.assets.static_image(decision.visual_state)
         };
         let _ = tray.set_icon_with_as_template(Some(image), true);
     }
@@ -511,7 +517,7 @@ fn apply_tray_projection(
         menu_bar,
         app_handle.config().identifier != router_core::qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     );
-    let _ = tray.set_title(title);
+    let _ = tray.set_title(Some(title));
     let _ = tray.set_tooltip(Some(presentation.tooltip));
 
     if decision.changed && decision.animated {
@@ -519,15 +525,20 @@ fn apply_tray_projection(
     }
 }
 
+/// Projects the status item title, where an empty string clears it.
+///
+/// This must not return `Option`: `TrayIcon::set_title(None)` is a silent no-op
+/// on macOS, so the status item keeps whatever title it was last given. Clearing
+/// only works by setting an empty title.
 fn project_tray_title(
     enabled_title: String,
     menu_bar: Option<router_core::app_api::MenuBarSettingsDto>,
     isolated: bool,
-) -> Option<String> {
+) -> String {
     match menu_bar {
-        Some(settings) if settings.status_text_enabled => Some(enabled_title),
-        _ if isolated => Some("QA".to_owned()),
-        _ => None,
+        Some(settings) if settings.status_text_enabled => enabled_title,
+        _ if isolated => "QA".to_owned(),
+        _ => String::new(),
     }
 }
 
@@ -1090,6 +1101,7 @@ mod tests {
         );
         let unloaded = refresh.transition_projection(TrayVisualState::Active);
         assert!(!unloaded.animated);
+        assert_eq!(unloaded.visual_state, TrayVisualState::Ready);
 
         assert!(refresh.set_activity_animation_enabled(true));
         let enabled = refresh.transition_projection(TrayVisualState::Active);
@@ -1100,6 +1112,74 @@ mod tests {
         assert!(!refresh.animation_is_current(enabled.generation));
         let disabled = refresh.transition_projection(TrayVisualState::Active);
         assert!(!disabled.animated);
+        assert_eq!(disabled.visual_state, TrayVisualState::Ready);
+    }
+
+    #[test]
+    fn tray_activity_animation_disabled_hides_every_activity_indicator() {
+        for reduce_motion in [Some(false), Some(true), None] {
+            let refresh = TrayRefreshCoordinator::new(
+                TrayIconAssets::decode().expect("tray assets"),
+                reduce_motion,
+            );
+            refresh.set_activity_animation_enabled(true);
+            assert!(refresh.set_activity_animation_enabled(false));
+
+            for visual_state in [
+                TrayVisualState::Ready,
+                TrayVisualState::Active,
+                TrayVisualState::Waiting,
+            ] {
+                let decision = refresh.transition_projection(visual_state);
+                assert_eq!(decision.visual_state, TrayVisualState::Ready);
+                assert!(!decision.animated);
+            }
+        }
+    }
+
+    #[test]
+    fn tray_activity_animation_enabled_matches_the_approved_truth_table() {
+        for (reduce_motion, live_animates) in
+            [(Some(false), true), (Some(true), false), (None, false)]
+        {
+            let refresh = TrayRefreshCoordinator::new(
+                TrayIconAssets::decode().expect("tray assets"),
+                reduce_motion,
+            );
+            assert!(refresh.set_activity_animation_enabled(true));
+
+            let ready = refresh.transition_projection(TrayVisualState::Ready);
+            assert_eq!(ready.visual_state, TrayVisualState::Ready);
+            assert!(!ready.animated);
+
+            let live = refresh.transition_projection(TrayVisualState::Active);
+            assert_eq!(live.visual_state, TrayVisualState::Active);
+            assert_eq!(live.animated, live_animates);
+
+            let waiting = refresh.transition_projection(TrayVisualState::Waiting);
+            assert_eq!(waiting.visual_state, TrayVisualState::Waiting);
+            assert!(!waiting.animated);
+        }
+    }
+
+    #[test]
+    fn tray_static_image_maps_projected_states_to_the_approved_assets() {
+        let assets = TrayIconAssets::decode().expect("tray assets");
+
+        assert_eq!(
+            assets.static_image(TrayVisualState::Ready).rgba(),
+            assets.ready.rgba()
+        );
+        assert_eq!(
+            assets.static_image(TrayVisualState::Active).rgba(),
+            assets.active_static.rgba()
+        );
+        assert_eq!(
+            assets.static_image(TrayVisualState::Waiting).rgba(),
+            assets.active_static.rgba()
+        );
+        // Folding activity states to Ready only hides the bead because these differ.
+        assert_ne!(assets.ready.rgba(), assets.active_static.rgba());
     }
 
     #[test]
@@ -1153,29 +1233,25 @@ mod tests {
             status_text_enabled: false,
             activity_animation_enabled: true,
         });
-        assert_eq!(
-            project_tray_title("Route($1)".to_owned(), None, false),
-            None
-        );
-        assert_eq!(
-            project_tray_title("Route($1)".to_owned(), None, true),
-            Some("QA".to_owned())
-        );
+        // An empty title is what actually clears the status item: `set_title(None)`
+        // is a no-op on macOS, so this must never go back to returning `Option`.
+        assert_eq!(project_tray_title("Route($1)".to_owned(), None, false), "");
+        assert_eq!(project_tray_title("Route($1)".to_owned(), None, true), "QA");
         assert_eq!(
             project_tray_title("Route($1)".to_owned(), enabled, false),
-            Some("Route($1)".to_owned())
+            "Route($1)"
         );
         assert_eq!(
             project_tray_title("QA · Route($1)".to_owned(), enabled, true),
-            Some("QA · Route($1)".to_owned())
+            "QA · Route($1)"
         );
         assert_eq!(
             project_tray_title("Route($1)".to_owned(), disabled, false),
-            None
+            ""
         );
         assert_eq!(
             project_tray_title("QA · Route($1)".to_owned(), disabled, true),
-            Some("QA".to_owned())
+            "QA"
         );
     }
 
