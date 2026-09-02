@@ -83,6 +83,32 @@ describe("GitHub CI policy", () => {
     ).toThrow("reviewed SHA/version pair");
   });
 
+  it("accepts only the reviewed CodeQL v4.37.8 SHA/version pair", () => {
+    const reviewedSha = "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28";
+    expect(() =>
+      validateActionPins(
+        "fixture.yml",
+        [
+          `- uses: github/codeql-action/init@${reviewedSha} # v4.37.8`,
+          `- uses: github/codeql-action/analyze@${reviewedSha} # v4.37.8`,
+          "",
+        ].join("\n"),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateActionPins(
+        "fixture.yml",
+        `- uses: github/codeql-action/init@${reviewedSha} # v4.37.7\n`,
+      ),
+    ).toThrow("reviewed SHA/version pair");
+    expect(() =>
+      validateActionPins(
+        "fixture.yml",
+        "- uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.8\n",
+      ),
+    ).toThrow("reviewed SHA/version pair");
+  });
+
   it("rejects expanded permissions, secrets, artifacts, and lifecycle commands", () => {
     const checkoutStep = {
       uses: "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
