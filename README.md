@@ -41,7 +41,7 @@ Codex App 与多个兼容 OpenAI Responses API 的上游之间切换路由。它
 | -------- | ---------------------------------------------------------------------------------------- |
 | 操作系统 | macOS 13 或更高版本                                                                      |
 | 硬件     | Apple Silicon (`aarch64`)                                                                |
-| Codex    | 需要已安装并可运行的 Codex CLI 或 Codex App；自动兼容性检查固定为 `codex-cli 0.147.0`    |
+| Codex    | 需要已安装并可运行的 Codex CLI 或 Codex App；自动兼容性检查固定为 `codex-cli 0.150.1`    |
 | 界面语言 | 简体中文                                                                                 |
 | 分发     | 官方 DMG 使用 ad-hoc 签名，不做 Developer ID 签名或 Apple 公证；支持显式确认的应用内更新 |
 | 网络边界 | 本地代理仅监听 loopback；上游请求按用户配置的 Responses API 地址发出                     |

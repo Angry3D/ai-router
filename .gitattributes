@@ -8,5 +8,5 @@
 # .trellis/spec/cli/backend/directory-structure.md for details.
 .trellis/workspace/*/journal-*.md merge=union
 
-# This fixture is kept byte-identical to the official rust-v0.147.0 source.
-fixtures/codex-base-instructions-v0.147.0.md whitespace=-blank-at-eol
+# This fixture is kept byte-identical to the official rust-v0.150.1 source.
+fixtures/codex-base-instructions-v0.150.1.md whitespace=-blank-at-eol

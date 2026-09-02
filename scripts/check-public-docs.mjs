@@ -308,7 +308,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
     "22.22.3",
     "10.33.2",
     "1.97.1",
-    "codex-cli 0.147.0",
+    "codex-cli 0.150.1",
     "官方 DMG",
     "ad-hoc",
     "Apple 公证",
