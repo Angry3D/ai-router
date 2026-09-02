@@ -82,7 +82,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
-    "@openai/codex": "0.150.1",
+    "@openai/codex": "0.151.0",
     "@tauri-apps/cli": "^2.8.0",
     "@testing-library/jest-dom": "^6.9.0",
     "@testing-library/react": "^16.3.3",
