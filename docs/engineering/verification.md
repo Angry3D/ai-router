@@ -72,7 +72,7 @@ CI 原生源码验证使用 `pnpm tauri:source:build` 显式关闭签名；本�
 `release:build`、`release:prepare` 与 `release:publish`。本地只运行合成 fixture 的 release 脚本测试；
 不得为了验证流程读取真实 updater secret、创建 tag 或操作 GitHub Release。
 
-最后一个命令只启动临时 loopback fixture，使用 lockfile 固定的 `codex-cli 0.147.0` 和临时
+最后一个命令只启动临时 loopback fixture，使用 lockfile 固定的 `codex-cli 0.150.1` 和临时
 `CODEX_HOME`，不读取用户 Codex 配置或真实上游。
 
 ## 避免重复

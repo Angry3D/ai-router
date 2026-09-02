@@ -7,9 +7,9 @@ AI Router 的根 `LICENSE` 只授权项目自有内容。本文件列出的第�
 
 ## OpenAI Codex base instructions
 
-- 本地文件：`fixtures/codex-base-instructions-v0.147.0.md`
+- 本地文件：`fixtures/codex-base-instructions-v0.150.1.md`
 - 上游项目：`openai/codex`
-- 上游版本：`rust-v0.147.0`
+- 上游版本：`rust-v0.150.1`
 - 上游路径：`codex-rs/protocol/src/prompts/base_instructions/default.md`
 - 上游地址：<https://github.com/openai/codex>
 - 许可证：Apache License 2.0
