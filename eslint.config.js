@@ -5,7 +5,9 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "node_modules", "src/generated", "**/target/**"] },
+  // `.trellis` is a local-only workspace excluded from git, so its archived
+  // task references are not repository source and must not gate `pnpm lint`.
+  { ignores: ["dist", "node_modules", "src/generated", "**/target/**", ".trellis"] },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
