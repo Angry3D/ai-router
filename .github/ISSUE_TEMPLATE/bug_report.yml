@@ -35,7 +35,7 @@ body:
     id: codex
     attributes:
       label: Codex 版本
-      placeholder: 例如 codex-cli 0.150.1
+      placeholder: 例如 codex-cli 0.153.4
     validations:
       required: true
   - type: dropdown
