@@ -10,8 +10,7 @@ use std::{
 use router_core::{
     balance::BalanceQueryMode,
     domain::{
-        ApiKey, BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, ServiceTierPolicy,
-        UpstreamAttemptId,
+        ApiKey, BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, UpstreamAttemptId,
     },
     qa_acceptance::{QA_APP_IDENTIFIER, QA_RUNTIME_MARKER_FILE, QaAcceptanceRoot, QaRuntimeMarker},
     recovery::{DatabaseStartupClassification, MAX_VALID_POINTS, RecoveryManager, RecoveryPointId},
@@ -271,7 +270,7 @@ async fn seed(root: &QaAcceptanceRoot) -> Result<RecoverySummary, Box<dyn Error>
             name: "Synthetic Recovery A".to_owned(),
             base_url: "http://127.0.0.1:39001/v1".to_owned(),
             api_key: ApiKey::parse("qa-recovery-key-a")?,
-            service_tier_policy: ServiceTierPolicy::Passthrough,
+            menu_visible: None,
             balance_query: Some(BalanceQueryInput {
                 mode: BalanceQueryMode::CustomJs,
                 enabled: false,
@@ -285,7 +284,7 @@ async fn seed(root: &QaAcceptanceRoot) -> Result<RecoverySummary, Box<dyn Error>
             name: "Synthetic Recovery B".to_owned(),
             base_url: "http://127.0.0.1:39002/v1".to_owned(),
             api_key: ApiKey::parse("qa-recovery-key-b")?,
-            service_tier_policy: ServiceTierPolicy::Omit,
+            menu_visible: None,
             balance_query: None,
             accept_script_risk: false,
         })

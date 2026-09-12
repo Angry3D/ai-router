@@ -28,12 +28,12 @@ use crate::domain::{
     CodexModelValidationError, CompletionState, DeliveryState,
     FallbackExcludedModelValidationError, ImagesGenerationTimeout,
     McpImageCapacityWarningThreshold, RouteId, RouteMoveDirection, RouteName, SecretId,
-    ServiceTierPolicy, UpstreamAttemptId, ValidationError,
+    UpstreamAttemptId, ValidationError,
 };
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 24;
 
 const GENERAL_BALANCE_SOURCE_HASHES: [&str; 3] = [
     "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507",
@@ -77,7 +77,7 @@ pub struct RouteRecord {
     pub name: String,
     pub base_url: String,
     pub secret_id: SecretId,
-    pub service_tier_policy: ServiceTierPolicy,
+    pub menu_visible: bool,
     pub sort_order: i64,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -107,7 +107,7 @@ pub struct CreateRouteInput {
     pub name: String,
     pub base_url: String,
     pub api_key: ApiKey,
-    pub service_tier_policy: ServiceTierPolicy,
+    pub menu_visible: Option<bool>,
     pub balance_query: Option<BalanceQueryInput>,
     pub accept_script_risk: bool,
 }
@@ -117,7 +117,7 @@ pub struct UpdateRouteInput {
     pub name: String,
     pub base_url: String,
     pub api_key: ApiKey,
-    pub service_tier_policy: ServiceTierPolicy,
+    pub menu_visible: Option<bool>,
     pub balance_query: Option<BalanceQueryInput>,
     pub accept_script_risk: bool,
 }
@@ -1207,8 +1207,8 @@ impl DatabaseExecutor {
                 params![secret_id.as_str(), key, timestamp],
             )?;
             transaction.execute(
-                "INSERT INTO routes (route_id, display_name, display_name_key, base_url, secret_id, service_tier_policy, sort_order, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-                params![route_id.as_str(), name.as_str(), name.comparison_key(), base_url.as_str(), secret_id.as_str(), input.service_tier_policy.as_str(), sort_order, timestamp],
+                "INSERT INTO routes (route_id, display_name, display_name_key, base_url, secret_id, menu_visible, sort_order, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                params![route_id.as_str(), name.as_str(), name.comparison_key(), base_url.as_str(), secret_id.as_str(), input.menu_visible.unwrap_or(true), sort_order, timestamp],
             )?;
             write_balance_query(&transaction, &route_id, script.as_ref(), timestamp)?;
             write_codex_models(&transaction, &route_id, &models)?;
@@ -1236,7 +1236,7 @@ impl DatabaseExecutor {
                     name: name.as_str().to_owned(),
                     base_url: base_url.as_str().to_owned(),
                     secret_id,
-                    service_tier_policy: input.service_tier_policy,
+                    menu_visible: input.menu_visible.unwrap_or(true),
                     sort_order,
                     created_at_ms: timestamp,
                     updated_at_ms: timestamp,
@@ -1311,23 +1311,23 @@ impl DatabaseExecutor {
                 script.as_ref(),
                 input.accept_script_risk,
             )?;
-            let stored: Option<(String, String, String, String, Vec<u8>)> = transaction
+            let stored: Option<(String, String, String, bool, Vec<u8>)> = transaction
                 .query_row(
-                    "SELECT r.display_name, r.base_url, r.secret_id, r.service_tier_policy, s.value FROM routes r JOIN secrets s ON s.secret_id = r.secret_id WHERE r.route_id = ?1",
+                    "SELECT r.display_name, r.base_url, r.secret_id, r.menu_visible, s.value FROM routes r JOIN secrets s ON s.secret_id = r.secret_id WHERE r.route_id = ?1",
                     [input.route_id.as_str()],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
                 )
                 .optional()?;
-            let (stored_name, stored_base_url, secret_id, stored_policy, stored_key) =
+            let (stored_name, stored_base_url, secret_id, stored_menu_visible, stored_key) =
                 stored.ok_or(StorageError::NotFound)?;
-            let stored_policy = ServiceTierPolicy::parse_persisted(&stored_policy)?;
+            let menu_visible = input.menu_visible.unwrap_or(stored_menu_visible);
             let stored_query = read_balance_query(&transaction, &input.route_id)?;
             let stored_models = read_codex_models(&transaction, &input.route_id)?;
             let stored_fallback_excluded_models =
                 read_fallback_excluded_models(&transaction, &input.route_id)?;
             if stored_name == name.as_str()
                 && stored_base_url == base_url.as_str()
-                && stored_policy == input.service_tier_policy
+                && stored_menu_visible == menu_visible
                 && stored_key == key
                 && stored_query == script
                 && stored_models == models
@@ -1339,14 +1339,29 @@ impl DatabaseExecutor {
                 transaction.commit()?;
                 return Ok((false, revision));
             }
+            let fallback = read_fallback_config(&transaction)?;
             transaction.execute(
                 "UPDATE secrets SET value = ?1, updated_at_ms = ?2 WHERE secret_id = ?3",
                 params![key, timestamp, secret_id],
             )?;
             transaction.execute(
-                "UPDATE routes SET display_name = ?1, display_name_key = ?2, base_url = ?3, service_tier_policy = ?4, updated_at_ms = ?5 WHERE route_id = ?6",
-                params![name.as_str(), name.comparison_key(), base_url.as_str(), input.service_tier_policy.as_str(), timestamp, input.route_id.as_str()],
+                "UPDATE routes SET display_name = ?1, display_name_key = ?2, base_url = ?3, menu_visible = ?4, updated_at_ms = ?5 WHERE route_id = ?6",
+                params![name.as_str(), name.comparison_key(), base_url.as_str(), menu_visible, timestamp, input.route_id.as_str()],
             )?;
+            if stored_menu_visible != menu_visible {
+                let effective_participant_count = effective_fallback_participant_count(
+                    &transaction,
+                    fallback.record.participant_count,
+                )?;
+                transaction.execute(
+                    "UPDATE fallback_config
+                     SET enabled = CASE WHEN ?2 < 2 THEN 0 ELSE enabled END,
+                         config_revision = config_revision + 1,
+                         updated_at_ms = ?1
+                     WHERE singleton = 1",
+                    params![timestamp, effective_participant_count],
+                )?;
+            }
             write_balance_query(&transaction, &input.route_id, script.as_ref(), timestamp)?;
             write_codex_models(&transaction, &input.route_id, &models)?;
             write_fallback_excluded_models(
@@ -1413,14 +1428,16 @@ impl DatabaseExecutor {
             )? == 1;
             transaction.execute("DELETE FROM routes WHERE route_id = ?1", [route_id.as_str()])?;
             transaction.execute("DELETE FROM secrets WHERE secret_id = ?1", [secret_id])?;
+            let effective_participant_count =
+                effective_fallback_participant_count(&transaction, participant_count)?;
             transaction.execute(
                 "UPDATE fallback_config
                  SET participant_count = ?1,
-                     enabled = CASE WHEN ?1 < 2 THEN 0 ELSE enabled END,
+                     enabled = CASE WHEN ?3 < 2 THEN 0 ELSE enabled END,
                      config_revision = config_revision + 1,
                      updated_at_ms = ?2
                  WHERE singleton = 1",
-                params![participant_count, timestamp],
+                params![participant_count, timestamp, effective_participant_count],
             )?;
             let revision = mark_critical_change(&transaction)?;
             transaction.commit()?;
@@ -1444,7 +1461,7 @@ impl DatabaseExecutor {
         self.call_critical(move |connection| {
             let transaction = connection.transaction()?;
             let exists: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM routes WHERE route_id = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM routes WHERE route_id = ?1 AND menu_visible = 1)",
                 [route_id.as_str()],
                 |row| row.get(0),
             )?;
@@ -1520,7 +1537,11 @@ impl DatabaseExecutor {
         self.call_critical(move |connection| {
             let transaction = connection.transaction()?;
             let current = read_fallback_config(&transaction)?.record;
-            let effective = enabled && current.participant_count >= 2;
+            let effective = enabled
+                && effective_fallback_participant_count(
+                    &transaction,
+                    current.participant_count,
+                )? >= 2;
             if current.enabled != effective {
                 transaction.execute(
                     "UPDATE fallback_config SET enabled = ?1, config_revision = config_revision + 1, updated_at_ms = ?2 WHERE singleton = 1",
@@ -1558,14 +1579,16 @@ impl DatabaseExecutor {
                 return Ok((false, None));
             }
             let timestamp = now_millis();
+            let effective_participant_count =
+                effective_fallback_participant_count(&transaction, participant_count)?;
             transaction.execute(
                 "UPDATE fallback_config
                  SET participant_count = ?1,
-                     enabled = CASE WHEN ?1 < 2 THEN 0 ELSE enabled END,
+                     enabled = CASE WHEN ?3 < 2 THEN 0 ELSE enabled END,
                      config_revision = config_revision + 1,
                      updated_at_ms = ?2
                  WHERE singleton = 1",
-                params![participant_count, timestamp],
+                params![participant_count, timestamp, effective_participant_count],
             )?;
             let revision = mark_critical_change(&transaction)?;
             transaction.commit()?;
@@ -1586,7 +1609,7 @@ impl DatabaseExecutor {
     ) -> Result<bool, StorageError> {
         self.call_critical(move |connection| {
             let transaction = connection.transaction()?;
-            let _fallback = read_fallback_config(&transaction)?;
+            let fallback = read_fallback_config(&transaction)?;
             let current_order: Option<i64> = transaction
                 .query_row(
                     "SELECT sort_order FROM routes WHERE route_id = ?1",
@@ -1625,8 +1648,18 @@ impl DatabaseExecutor {
                 params![current_order, timestamp, neighbor_id],
             )?;
             transaction.execute(
-                "UPDATE fallback_config SET config_revision = config_revision + 1, updated_at_ms = ?1 WHERE singleton = 1",
-                [timestamp],
+                "UPDATE fallback_config
+                 SET enabled = CASE WHEN ?2 < 2 THEN 0 ELSE enabled END,
+                     config_revision = config_revision + 1,
+                     updated_at_ms = ?1
+                 WHERE singleton = 1",
+                params![
+                    timestamp,
+                    effective_fallback_participant_count(
+                        &transaction,
+                        fallback.record.participant_count,
+                    )?
+                ],
             )?;
             let revision = mark_critical_change(&transaction)?;
             transaction.commit()?;
@@ -1703,14 +1736,16 @@ impl DatabaseExecutor {
                     return Err(StorageError::InvalidRoutePermutation);
                 }
             }
+            let effective_participant_count =
+                effective_fallback_participant_count(&transaction, participant_count)?;
             transaction.execute(
                 "UPDATE fallback_config
                  SET participant_count = ?1,
-                     enabled = CASE WHEN ?1 < 2 THEN 0 ELSE enabled END,
+                     enabled = CASE WHEN ?3 < 2 THEN 0 ELSE enabled END,
                      config_revision = config_revision + 1,
                      updated_at_ms = ?2
                  WHERE singleton = 1",
-                params![participant_count, timestamp],
+                params![participant_count, timestamp, effective_participant_count],
             )?;
             let revision = mark_critical_change(&transaction)?;
             transaction.commit()?;
@@ -1786,7 +1821,11 @@ impl DatabaseExecutor {
                 return Ok((false, None));
             }
             let mut statement = transaction.prepare(
-                "SELECT route_id FROM routes ORDER BY sort_order, created_at_ms LIMIT ?1",
+                "SELECT route_id FROM (
+                    SELECT route_id, menu_visible FROM routes
+                    ORDER BY sort_order, created_at_ms LIMIT ?1
+                 ) AS configured_participants
+                 WHERE menu_visible = 1",
             )?;
             let participants = statement
                 .query_map([fallback.participant_count], |row| row.get::<_, String>(0))?
@@ -1866,7 +1905,7 @@ impl DatabaseExecutor {
     pub async fn list_routes(&self) -> Result<Vec<RouteRecord>, StorageError> {
         self.call(|connection| {
             let mut statement = connection.prepare(
-                "SELECT route_id, display_name, base_url, secret_id, service_tier_policy, sort_order, created_at_ms, updated_at_ms FROM routes ORDER BY sort_order, created_at_ms",
+                "SELECT route_id, display_name, base_url, secret_id, menu_visible, sort_order, created_at_ms, updated_at_ms FROM routes ORDER BY sort_order, created_at_ms",
             )?;
             let stored = statement
                 .query_map([], |row| {
@@ -1875,7 +1914,7 @@ impl DatabaseExecutor {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
+                        row.get::<_, bool>(4)?,
                         row.get::<_, i64>(5)?,
                         row.get::<_, i64>(6)?,
                         row.get::<_, i64>(7)?,
@@ -1890,7 +1929,7 @@ impl DatabaseExecutor {
                         name,
                         base_url,
                         secret_id,
-                        service_tier_policy,
+                        menu_visible,
                         sort_order,
                         created_at_ms,
                         updated_at_ms,
@@ -1900,9 +1939,7 @@ impl DatabaseExecutor {
                             name,
                             base_url,
                             secret_id: SecretId::from_string(secret_id),
-                            service_tier_policy: ServiceTierPolicy::parse_persisted(
-                                &service_tier_policy,
-                            )?,
+                            menu_visible,
                             sort_order,
                             created_at_ms,
                             updated_at_ms,
@@ -1925,14 +1962,14 @@ impl DatabaseExecutor {
         self.call(move |connection| {
             let stored = connection
                 .query_row(
-                    "SELECT r.display_name, r.base_url, r.secret_id, r.service_tier_policy, r.sort_order, r.created_at_ms, r.updated_at_ms, s.value, b.mode, b.enabled, b.custom_source FROM routes r JOIN secrets s ON s.secret_id = r.secret_id LEFT JOIN balance_queries b ON b.route_id = r.route_id WHERE r.route_id = ?1",
+                    "SELECT r.display_name, r.base_url, r.secret_id, r.menu_visible, r.sort_order, r.created_at_ms, r.updated_at_ms, s.value, b.mode, b.enabled, b.custom_source FROM routes r JOIN secrets s ON s.secret_id = r.secret_id LEFT JOIN balance_queries b ON b.route_id = r.route_id WHERE r.route_id = ?1",
                     [route_id.as_str()],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
+                            row.get::<_, bool>(3)?,
                             row.get::<_, i64>(4)?,
                             row.get::<_, i64>(5)?,
                             row.get::<_, i64>(6)?,
@@ -1949,7 +1986,7 @@ impl DatabaseExecutor {
                 name,
                 base_url,
                 secret_id,
-                service_tier_policy,
+                menu_visible,
                 sort_order,
                 created_at_ms,
                 updated_at_ms,
@@ -1977,9 +2014,7 @@ impl DatabaseExecutor {
                     name,
                     base_url,
                     secret_id: SecretId::from_string(secret_id),
-                    service_tier_policy: ServiceTierPolicy::parse_persisted(
-                        &service_tier_policy,
-                    )?,
+                    menu_visible,
                     sort_order,
                     created_at_ms,
                     updated_at_ms,
@@ -3916,6 +3951,12 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     if version < 22 {
         migrate_v22(connection)?;
     }
+    if version < 23 {
+        migrate_v23(connection)?;
+    }
+    if version < 24 {
+        migrate_v24(connection)?;
+    }
     Ok(())
 }
 
@@ -4502,6 +4543,24 @@ fn migrate_v22(connection: &mut Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn migrate_v23(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "ALTER TABLE routes DROP COLUMN service_tier_policy; PRAGMA user_version = 23;",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v24(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "ALTER TABLE routes ADD COLUMN menu_visible INTEGER NOT NULL DEFAULT 1 CHECK (menu_visible IN (0, 1)); PRAGMA user_version = 24;",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn parse_persisted_bool(value: i64) -> Result<bool, StorageError> {
     match value {
         0 => Ok(false),
@@ -4620,7 +4679,9 @@ fn read_fallback_config(connection: &Connection) -> Result<ValidatedFallbackConf
     let config_revision =
         u64::try_from(config_revision).map_err(|_| StorageError::Initialization)?;
     let route_count = u64::try_from(route_count).map_err(|_| StorageError::Initialization)?;
-    if u64::from(participant_count) > route_count || (enabled && participant_count < 2) {
+    if u64::from(participant_count) > route_count
+        || (enabled && effective_fallback_participant_count(connection, participant_count)? < 2)
+    {
         return Err(StorageError::Initialization);
     }
     Ok(ValidatedFallbackConfig {
@@ -4632,6 +4693,22 @@ fn read_fallback_config(connection: &Connection) -> Result<ValidatedFallbackConf
         },
         route_count,
     })
+}
+
+fn effective_fallback_participant_count(
+    connection: &Connection,
+    participant_count: u32,
+) -> Result<u32, StorageError> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM (
+            SELECT menu_visible FROM routes
+            ORDER BY sort_order, created_at_ms LIMIT ?1
+         ) AS configured_participants
+         WHERE menu_visible = 1",
+        [participant_count],
+        |row| row.get(0),
+    )?;
+    u32::try_from(count).map_err(|_| StorageError::Initialization)
 }
 
 fn mark_critical_change(transaction: &Transaction<'_>) -> Result<u64, StorageError> {
@@ -5210,14 +5287,14 @@ mod tests {
         is_general_balance_source_hash, materialize_routing_decisions, migrate_v1, migrate_v2,
         migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7, migrate_v8, migrate_v9,
         migrate_v10, migrate_v11, migrate_v12, migrate_v13, migrate_v14, migrate_v15, migrate_v16,
-        migrate_v17, migrate_v18, migrate_v19, migrate_v20, migrate_v21, migrate_v22,
-        statistics_attribution, statistics_bucket_windows, validate_balance_query,
+        migrate_v17, migrate_v18, migrate_v19, migrate_v20, migrate_v21, migrate_v22, migrate_v23,
+        migrate_v24, statistics_attribution, statistics_bucket_windows, validate_balance_query,
     };
     use crate::{
         balance::{BalanceQueryMode, BalanceRouteSource, LEGACY_GENERAL_V1_SOURCE},
         domain::{
             ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationTimeout,
-            McpImageCapacityWarningThreshold, RouteId, RouteMoveDirection, ServiceTierPolicy,
+            McpImageCapacityWarningThreshold, RouteId, RouteMoveDirection,
         },
         recovery::{
             NoopRecoveryEventSink, RecoveryCoordinator, RecoveryFailureCode, RecoveryHealthKind,
@@ -5344,6 +5421,136 @@ mod tests {
     fn migrate_test_database_to_v21(connection: &mut Connection) {
         migrate_test_database_to_v20(connection);
         migrate_v21(connection).expect("v21");
+    }
+
+    fn migrate_test_database_to_v22(connection: &mut Connection) {
+        migrate_test_database_to_v21(connection);
+        migrate_v22(connection).expect("v22");
+    }
+
+    fn route_columns(connection: &Connection) -> BTreeSet<String> {
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_table_info('routes')")
+            .expect("route columns");
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("route column rows")
+            .collect::<Result<_, _>>()
+            .expect("route column values")
+    }
+
+    #[test]
+    fn migrations_v23_and_v24_drop_policy_and_default_existing_routes_visible() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v22(&mut connection);
+        connection
+            .execute(
+                "INSERT INTO secrets (secret_id, kind, value, created_at_ms, updated_at_ms) VALUES ('secret', 'route_api_key', X'01', 1, 1)",
+                [],
+            )
+            .expect("legacy secret");
+        connection
+            .execute(
+                "INSERT INTO routes (route_id, display_name, display_name_key, base_url, secret_id, sort_order, created_at_ms, updated_at_ms, service_tier_policy) VALUES ('route', 'Route', 'route', 'https://example.test/v1', 'secret', 0, 1, 1, 'omit')",
+                [],
+            )
+            .expect("legacy route");
+
+        migrate_v23(&mut connection).expect("v23");
+        migrate_v24(&mut connection).expect("v24");
+
+        let columns = route_columns(&connection);
+        assert!(!columns.contains("service_tier_policy"));
+        assert!(columns.contains("menu_visible"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT menu_visible FROM routes WHERE route_id = 'route'",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .expect("migrated visibility"),
+            1
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            24
+        );
+    }
+
+    #[test]
+    fn migration_v23_rolls_back_column_data_and_version_when_drop_is_blocked() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v22(&mut connection);
+        connection
+            .execute_batch(
+                "CREATE INDEX routes_service_tier_policy_idx ON routes(service_tier_policy);",
+            )
+            .expect("dependent index");
+
+        assert!(migrate_v23(&mut connection).is_err());
+        assert!(route_columns(&connection).contains("service_tier_policy"));
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            22
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = 'routes_service_tier_policy_idx'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("dependent index"),
+            1
+        );
+    }
+
+    #[test]
+    fn migration_v24_keeps_version_and_route_data_when_the_column_already_exists() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v22(&mut connection);
+        connection
+            .execute_batch(
+                "
+                INSERT INTO secrets (secret_id, kind, value, created_at_ms, updated_at_ms)
+                VALUES ('secret', 'route_api_key', X'01', 1, 1);
+                INSERT INTO routes (
+                    route_id, display_name, display_name_key, base_url, secret_id,
+                    sort_order, created_at_ms, updated_at_ms
+                ) VALUES (
+                    'route', 'Route', 'route', 'https://example.test/v1',
+                    'secret', 0, 1, 1
+                );
+                ",
+            )
+            .expect("legacy route");
+        migrate_v23(&mut connection).expect("v23");
+        connection
+            .execute("ALTER TABLE routes ADD COLUMN menu_visible INTEGER", [])
+            .expect("collision column");
+
+        assert!(migrate_v24(&mut connection).is_err());
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            23
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT display_name FROM routes WHERE route_id = 'route'",
+                    [],
+                    |row| { row.get::<_, String>(0) }
+                )
+                .expect("route data"),
+            "Route"
+        );
     }
 
     #[test]
@@ -6245,7 +6452,7 @@ mod tests {
             name: name.to_owned(),
             base_url: "https://example.com/v1".to_owned(),
             api_key: ApiKey::parse(key).expect("valid key"),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
+            menu_visible: None,
             balance_query: Some(BalanceQueryInput {
                 mode: BalanceQueryMode::CustomJs,
                 enabled: true,
@@ -6269,6 +6476,30 @@ mod tests {
             )
             .await
             .expect("route reorder")
+    }
+
+    async fn update_route_visibility(
+        database: &DatabaseExecutor,
+        route: &super::RouteRecord,
+        key: &str,
+        menu_visible: bool,
+    ) {
+        database
+            .update_route(UpdateRouteInput {
+                route_id: route.route_id.clone(),
+                name: route.name.clone(),
+                base_url: route.base_url.clone(),
+                api_key: ApiKey::parse(key).expect("valid key"),
+                menu_visible: Some(menu_visible),
+                balance_query: Some(BalanceQueryInput {
+                    mode: BalanceQueryMode::CustomJs,
+                    enabled: true,
+                    custom_source: "({ request: {}, extractor: () => ({}) })".to_owned(),
+                }),
+                accept_script_risk: true,
+            })
+            .await
+            .expect("visibility update");
     }
 
     #[tokio::test]
@@ -6460,7 +6691,7 @@ mod tests {
                     name: "Fallback renamed".to_owned(),
                     base_url: "https://changed.example/v1".to_owned(),
                     api_key: ApiKey::parse("changed-key").expect("key"),
-                    service_tier_policy: ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: None,
                     accept_script_risk: false,
                 },
@@ -6502,7 +6733,7 @@ mod tests {
                     name: "Fallback".to_owned(),
                     base_url: "https://example.com/v1".to_owned(),
                     api_key: ApiKey::parse("fallback-key").expect("key"),
-                    service_tier_policy: ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: Some(BalanceQueryInput {
                         mode: BalanceQueryMode::CustomJs,
                         enabled: true,
@@ -6576,7 +6807,7 @@ mod tests {
             name: "Renamed".to_owned(),
             base_url: "https://changed.example/v1".to_owned(),
             api_key: ApiKey::parse("changed-key").expect("key"),
-            service_tier_policy: ServiceTierPolicy::Omit,
+            menu_visible: None,
             balance_query: None,
             accept_script_risk: false,
         };
@@ -6785,7 +7016,7 @@ mod tests {
                 name: "Work".to_owned(),
                 base_url: "https://example.com/v1".to_owned(),
                 api_key: ApiKey::parse("second-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
                     mode: BalanceQueryMode::CustomJs,
                     enabled: true,
@@ -6815,7 +7046,7 @@ mod tests {
                 name: "Work".to_owned(),
                 base_url: "https://example.com/v1".to_owned(),
                 api_key: ApiKey::parse("second-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
                     mode: BalanceQueryMode::GeneralV1,
                     enabled: true,
@@ -6839,7 +7070,7 @@ mod tests {
                 name: "Work".to_owned(),
                 base_url: "https://example.com/v1".to_owned(),
                 api_key: ApiKey::parse("second-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
                     mode: BalanceQueryMode::GeneralV1,
                     enabled: true,
@@ -6868,7 +7099,7 @@ mod tests {
                 name: "Work".to_owned(),
                 base_url: "https://example.com/v1".to_owned(),
                 api_key: ApiKey::parse("second-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
                     mode: BalanceQueryMode::GeneralV1,
                     enabled: false,
@@ -7481,7 +7712,7 @@ mod tests {
                 name: legacy.route.name,
                 base_url: legacy.route.base_url,
                 api_key: legacy.api_key,
-                service_tier_policy: legacy.route.service_tier_policy,
+                menu_visible: None,
                 balance_query: legacy.balance_query,
                 accept_script_risk: true,
             })
@@ -7519,6 +7750,185 @@ mod tests {
             .await
             .expect_err("duplicate name must fail");
         assert!(matches!(error, StorageError::Database(_)));
+    }
+
+    #[tokio::test]
+    async fn route_visibility_round_trips_and_disables_fallback_below_two_effective_routes() {
+        let (_directory, database) = database();
+        let first = database
+            .create_route(route("First", "first-key"))
+            .await
+            .expect("first route");
+        let second = database
+            .create_route(route("Second", "second-key"))
+            .await
+            .expect("second route");
+        database.set_fallback_enabled(true).await.expect("enable");
+        let before_visibility = database.routing_state().await.expect("before visibility");
+
+        update_route_visibility(&database, &second, "second-key", false).await;
+        let after_visibility = database.routing_state().await.expect("after visibility");
+        assert_eq!(
+            after_visibility.fallback.config_revision,
+            before_visibility.fallback.config_revision + 1
+        );
+        assert!(matches!(
+            database
+                .reorder_routes_and_fallback(
+                    vec![first.route_id.clone(), second.route_id.clone()],
+                    2,
+                    before_visibility.fallback.config_revision,
+                )
+                .await,
+            Err(StorageError::StaleRoutingConfiguration)
+        ));
+        database
+            .update_route(UpdateRouteInput {
+                route_id: second.route_id.clone(),
+                name: second.name.clone(),
+                base_url: second.base_url.clone(),
+                api_key: ApiKey::parse("second-key").expect("key"),
+                menu_visible: None,
+                balance_query: Some(BalanceQueryInput {
+                    mode: BalanceQueryMode::CustomJs,
+                    enabled: true,
+                    custom_source: "({ request: {}, extractor: () => ({}) })".to_owned(),
+                }),
+                accept_script_risk: true,
+            })
+            .await
+            .expect("legacy update without visibility");
+
+        let routes = database.list_routes().await.expect("routes");
+        assert_eq!(routes.len(), 2);
+        assert!(routes[0].menu_visible);
+        assert!(!routes[1].menu_visible);
+        assert!(
+            !database
+                .route_edit(second.route_id.clone())
+                .await
+                .expect("route edit")
+                .route
+                .menu_visible
+        );
+        let fallback = database.routing_state().await.expect("routing").fallback;
+        assert_eq!(fallback.participant_count, 2);
+        assert!(!fallback.enabled);
+        assert!(
+            !database
+                .set_fallback_enabled(true)
+                .await
+                .expect("effective enablement")
+                .enabled
+        );
+        assert!(matches!(
+            database.activate_route(second.route_id).await,
+            Err(StorageError::NotFound)
+        ));
+        assert_eq!(
+            database.active_route_id().await.expect("active"),
+            Some(first.route_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_order_mutations_use_visible_routes_inside_the_configured_prefix() {
+        let (_directory, database) = database();
+        let first = database
+            .create_route(route("First", "first-key"))
+            .await
+            .expect("first route");
+        let second = database
+            .create_route(route("Second", "second-key"))
+            .await
+            .expect("second route");
+        let hidden = database
+            .create_route(route("Hidden", "hidden-key"))
+            .await
+            .expect("hidden route");
+        update_route_visibility(&database, &hidden, "hidden-key", false).await;
+        database
+            .set_fallback_participant_count(2)
+            .await
+            .expect("boundary");
+        database.set_fallback_enabled(true).await.expect("enable");
+
+        let before = database.routing_state().await.expect("before reorder");
+        database
+            .reorder_routes_and_fallback(
+                vec![
+                    first.route_id.clone(),
+                    hidden.route_id.clone(),
+                    second.route_id.clone(),
+                ],
+                2,
+                before.fallback.config_revision,
+            )
+            .await
+            .expect("reorder");
+        assert!(
+            !database
+                .routing_state()
+                .await
+                .expect("after reorder")
+                .fallback
+                .enabled
+        );
+
+        let before = database.routing_state().await.expect("restore order");
+        database
+            .reorder_routes_and_fallback(
+                vec![
+                    first.route_id.clone(),
+                    second.route_id.clone(),
+                    hidden.route_id.clone(),
+                ],
+                2,
+                before.fallback.config_revision,
+            )
+            .await
+            .expect("restore order");
+        database.set_fallback_enabled(true).await.expect("reenable");
+        database
+            .move_route(hidden.route_id.clone(), RouteMoveDirection::Up)
+            .await
+            .expect("move hidden into prefix");
+        assert!(
+            !database
+                .routing_state()
+                .await
+                .expect("after move")
+                .fallback
+                .enabled
+        );
+
+        database
+            .set_fallback_participant_count(3)
+            .await
+            .expect("include full prefix");
+        database
+            .set_fallback_enabled(true)
+            .await
+            .expect("enable full prefix");
+        let captured = database.routing_state().await.expect("captured routing");
+        assert!(
+            database
+                .conditional_activate_next(
+                    first.route_id,
+                    captured.selection_generation,
+                    captured.fallback.config_revision,
+                    second.route_id.clone(),
+                )
+                .await
+                .expect("skip hidden participant")
+        );
+        assert_eq!(
+            database
+                .active_route_id()
+                .await
+                .expect("active after fallback"),
+            Some(second.route_id)
+        );
     }
 
     #[tokio::test]
@@ -8496,7 +8906,7 @@ mod tests {
             name: "Changed".to_owned(),
             base_url: "https://example.com/v1".to_owned(),
             api_key: ApiKey::parse("replacement").expect("key"),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
+            menu_visible: None,
             balance_query: None,
             accept_script_risk: false,
         };
@@ -9119,14 +9529,6 @@ mod tests {
             .expect("exact legacy detail");
         assert_eq!(hidden.request.finished_at_ms, None);
         assert_eq!(hidden.request.first_output_latency_ms, Some(40));
-        assert_eq!(
-            database
-                .list_routes()
-                .await
-                .expect("route survives migration")[0]
-                .service_tier_policy,
-            ServiceTierPolicy::Omit
-        );
         let (version, columns, indexes): (i64, Vec<String>, Vec<String>) = database
             .test_execute(|connection| {
                 let version =
@@ -9210,10 +9612,6 @@ mod tests {
         let database = DatabaseExecutor::open(path.clone()).expect("migrate v11");
         let routes = database.list_routes().await.expect("migrated routes");
         assert_eq!(routes.len(), 1);
-        assert_eq!(
-            routes[0].service_tier_policy,
-            ServiceTierPolicy::Passthrough
-        );
         let (version, forwarded): (i64, Vec<Option<String>>) = database
             .test_execute(|connection| {
                 let version =
@@ -9259,72 +9657,6 @@ mod tests {
             .expect("usable current-schema version");
         assert_eq!(version, SCHEMA_VERSION);
         assert!(coordinator.shutdown(Duration::from_secs(1)).await);
-    }
-
-    #[tokio::test]
-    async fn service_tier_policy_is_critical_and_unknown_storage_fails_closed() {
-        let (_directory, database) = database();
-        let created = database
-            .create_route(route("Policy", "policy-key"))
-            .await
-            .expect("route");
-        let created_revision = database
-            .critical_revision()
-            .await
-            .expect("created revision");
-        let update = || UpdateRouteInput {
-            route_id: created.route_id.clone(),
-            name: "Policy".to_owned(),
-            base_url: "https://example.com/v1".to_owned(),
-            api_key: ApiKey::parse("policy-key").expect("key"),
-            service_tier_policy: ServiceTierPolicy::Omit,
-            balance_query: Some(BalanceQueryInput {
-                mode: BalanceQueryMode::CustomJs,
-                enabled: true,
-                custom_source: "({ request: {}, extractor: () => ({}) })".to_owned(),
-            }),
-            accept_script_risk: true,
-        };
-        database
-            .update_route(update())
-            .await
-            .expect("policy update");
-        assert_eq!(
-            database.critical_revision().await.expect("policy revision"),
-            created_revision + 1
-        );
-        assert_eq!(
-            database
-                .route_edit(created.route_id.clone())
-                .await
-                .expect("route edit")
-                .route
-                .service_tier_policy,
-            ServiceTierPolicy::Omit
-        );
-
-        database.update_route(update()).await.expect("policy no-op");
-        assert_eq!(
-            database.critical_revision().await.expect("no-op revision"),
-            created_revision + 1
-        );
-
-        database
-            .test_execute(move |connection| {
-                connection.pragma_update(None, "ignore_check_constraints", true)?;
-                connection.execute(
-                    "UPDATE routes SET service_tier_policy = 'unknown' WHERE route_id = ?1",
-                    [created.route_id.as_str()],
-                )?;
-                Ok(())
-            })
-            .await
-            .expect("inject corrupt policy");
-        assert!(matches!(
-            database.list_routes().await,
-            Err(StorageError::Validation(error))
-                if error.code == "service_tier_policy_invalid"
-        ));
     }
 
     #[tokio::test]
@@ -9511,7 +9843,7 @@ mod tests {
             page.rows[0].cost_status,
             Some(crate::pricing::CostStatus::Exact)
         );
-        assert_eq!(page.rows[0].upstream_cost_pico_usd, Some(70_316_000_000));
+        assert_eq!(page.rows[0].upstream_cost_pico_usd, Some(55_932_800_000));
 
         let detail = database
             .usage_request_detail("priority-request".to_owned())
@@ -9524,7 +9856,7 @@ mod tests {
             detail.attempts[0].pricing_catalog_version.as_deref(),
             Some(crate::pricing::PRIORITY_CATALOG_VERSION)
         );
-        assert_eq!(detail.attempts[0].cost_pico_usd, Some(70_316_000_000));
+        assert_eq!(detail.attempts[0].cost_pico_usd, Some(55_932_800_000));
     }
 
     #[tokio::test]

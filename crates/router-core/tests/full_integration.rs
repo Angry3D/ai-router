@@ -17,8 +17,7 @@ use router_core::{
     balance::BalanceQueryMode,
     domain::{
         ApiKey, BalanceQueryPolicy, BaseUrl, CompletionState, DeliveryState,
-        ImagesGenerationTimeout, InferenceStatus, InferenceStatusKind, ServiceTierPolicy,
-        UpstreamAttemptId,
+        ImagesGenerationTimeout, InferenceStatus, InferenceStatusKind, UpstreamAttemptId,
     },
     proxy::{
         AsyncHistoryRecorder, HistorySummaryChangeSink, InferenceStatusChangeSink,
@@ -308,6 +307,7 @@ async fn assert_persistence_and_privacy(
         route_id: route.route_id.clone(),
         name: route.name.clone(),
         base_url_host: "127.0.0.1".to_owned(),
+        menu_visible: Some(true),
         inference_status: InferenceStatus {
             kind: InferenceStatusKind::Unverified,
             last_outcome: None,
@@ -376,7 +376,7 @@ async fn responses_flow_preserves_transport_and_enforces_privacy_allowlist() {
             name: "P9 integration route".to_owned(),
             base_url: format!("http://{}/v1", upstream.address()),
             api_key: ApiKey::parse(API_KEY_SENTINEL).expect("API Key"),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
+            menu_visible: None,
             balance_query: Some(BalanceQueryInput {
                 mode: BalanceQueryMode::CustomJs,
                 enabled: true,
@@ -418,7 +418,6 @@ async fn responses_flow_preserves_transport_and_enforces_privacy_allowlist() {
         name: route.name.clone(),
         base_url: BaseUrl::parse(&route.base_url).expect("base URL"),
         api_key: Arc::new(ApiKey::parse(API_KEY_SENTINEL).expect("API Key")),
-        service_tier_policy: ServiceTierPolicy::Passthrough,
         fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
     })));
     let proxy = ProxyServerHandle::start(0, build_proxy_router(proxy_state))
@@ -477,7 +476,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
             name: "Image privacy route".to_owned(),
             base_url: format!("http://{}/v1", image_upstream.address()),
             api_key: ApiKey::parse(IMAGE_ROUTE_KEY_SENTINEL).expect("image route key"),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
+            menu_visible: None,
             balance_query: None,
             accept_script_risk: false,
         })
@@ -514,12 +513,12 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         name: route.name.clone(),
         base_url: BaseUrl::parse(&route.base_url).expect("base URL"),
         api_key: Arc::new(ApiKey::parse(IMAGE_ROUTE_KEY_SENTINEL).expect("image route key")),
-        service_tier_policy: ServiceTierPolicy::Passthrough,
         fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
     });
     let routing = RoutingSnapshotStore::new(RoutingSnapshot {
         active: None,
         participants: Vec::new(),
+        configured_participant_count: 0,
         enabled: false,
         selection_generation: 0,
         health_generation: 0,
@@ -740,6 +739,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         route_id: route.route_id,
         name: route.name,
         base_url_host: "127.0.0.1".to_owned(),
+        menu_visible: Some(true),
         inference_status: InferenceStatus {
             kind: InferenceStatusKind::Unverified,
             last_outcome: None,
@@ -858,7 +858,7 @@ async fn seed_recovery_critical_state(database: &DatabaseExecutor) -> RecoveryCr
             name: "Recovery first".to_owned(),
             base_url: "https://first.example.invalid/v1".to_owned(),
             api_key: ApiKey::parse(API_KEY_SENTINEL).expect("first Key"),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
+            menu_visible: None,
             balance_query: Some(BalanceQueryInput {
                 mode: BalanceQueryMode::CustomJs,
                 enabled: true,
@@ -873,7 +873,7 @@ async fn seed_recovery_critical_state(database: &DatabaseExecutor) -> RecoveryCr
             name: "Recovery second".to_owned(),
             base_url: "https://second.example.invalid/v1".to_owned(),
             api_key: ApiKey::parse(RECOVERY_SECOND_KEY).expect("second Key"),
-            service_tier_policy: ServiceTierPolicy::Omit,
+            menu_visible: None,
             balance_query: None,
             accept_script_risk: false,
         })
@@ -1026,10 +1026,6 @@ async fn assert_restored_critical_state(
         .await
         .expect("second route edit");
     assert_eq!(second_edit.api_key.expose(), RECOVERY_SECOND_KEY.as_bytes());
-    assert_eq!(
-        second_edit.route.service_tier_policy,
-        ServiceTierPolicy::Omit
-    );
     assert!(second_edit.balance_query.is_none());
     assert_eq!(
         restored

@@ -11,6 +11,11 @@ copy upstream code or explanatory prose.
 integer unit `micro_usd_per_million_tokens`; runtime totals are persisted as
 pico-USD to avoid floating-point money arithmetic.
 
+`openai-standard-2026-09-12.json` and `openai-priority-2026-09-12.json` were
+captured on 2026-09-12. The latter retains the internal `priority` name for
+compatibility while recording the official Fast mode rates; both `fast` and
+`priority` request values select it.
+
 These snapshots are local estimates, not an OpenAI bill, quote, or promise
 that the rates remain current. Review the linked official documentation and
 the actual provider bill before relying on the values. A catalog update must

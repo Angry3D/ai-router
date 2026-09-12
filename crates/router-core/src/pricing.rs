@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-pub const CATALOG_VERSION: &str = "openai-standard-2026-07-27";
-pub const PRIORITY_CATALOG_VERSION: &str = "openai-priority-2026-07-28";
+pub const CATALOG_VERSION: &str = "openai-standard-2026-09-12";
+pub const PRIORITY_CATALOG_VERSION: &str = "openai-priority-2026-09-12";
 const STANDARD_CATALOG_JSON: &str =
-    include_str!("../pricing/catalogs/openai-standard-2026-07-27.json");
+    include_str!("../pricing/catalogs/openai-standard-2026-09-12.json");
 const PRIORITY_CATALOG_JSON: &str =
-    include_str!("../pricing/catalogs/openai-priority-2026-07-28.json");
+    include_str!("../pricing/catalogs/openai-priority-2026-09-12.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogTier {
@@ -32,14 +32,13 @@ impl CatalogTier {
 
     const fn captured_at(self) -> &'static str {
         match self {
-            Self::Standard => "2026-07-27",
-            Self::Priority => "2026-07-28",
+            Self::Standard | Self::Priority => "2026-09-12",
         }
     }
 
     const fn effective_at(self) -> Option<&'static str> {
         match self {
-            Self::Standard => Some("2026-07-27"),
+            Self::Standard => Some("2026-09-12"),
             Self::Priority => None,
         }
     }
@@ -61,6 +60,7 @@ impl CatalogTier {
     const fn model_ids(self) -> &'static [&'static str] {
         match self {
             Self::Standard => &[
+                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -85,7 +85,24 @@ impl CatalogTier {
                 "gpt-5.1-codex-mini",
                 "gpt-5.2-codex",
             ],
-            Self::Priority => &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            Self::Priority => &[
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.2",
+                "gpt-5.1",
+                "gpt-5",
+                "gpt-5-mini",
+                "gpt-4.1",
+                "gpt-4.1-mini",
+                "gpt-4.1-nano",
+                "o3",
+                "o4-mini",
+            ],
         }
     }
 }
@@ -239,8 +256,10 @@ fn validate_catalog(catalog: Catalog, tier: CatalogTier) -> Result<(), &'static 
         model_bands.sort_by_key(|(minimum, _)| minimum.unwrap_or(0));
         let expected = if matches!(
             model_id.as_str(),
-            "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5" | "gpt-5.4"
-        ) {
+            "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+        ) || (tier == CatalogTier::Standard
+            && matches!(model_id.as_str(), "gpt-5.5" | "gpt-5.4"))
+        {
             &[(None, Some(272_000)), (Some(272_001), None)][..]
         } else {
             &[(None, None)][..]
@@ -446,8 +465,10 @@ fn resolve_catalog_tier(observation: &UsageObservation<'_>) -> Option<CatalogTie
         observation.forwarded_service_tier,
         observation.actual_service_tier,
     ) {
-        (Some("priority"), None | Some("default" | "priority"))
-        | (None | Some("auto" | "default"), Some("priority")) => Some(CatalogTier::Priority),
+        (Some("priority" | "fast"), None | Some("default" | "priority" | "fast"))
+        | (None | Some("auto" | "default"), Some("priority" | "fast")) => {
+            Some(CatalogTier::Priority)
+        }
         (None | Some("default"), None | Some("default")) | (Some("auto"), Some("default")) => {
             Some(CatalogTier::Standard)
         }
@@ -489,37 +510,84 @@ mod tests {
     }
 
     #[test]
-    fn priority_rates_explicitly_double_every_supported_standard_dimension() {
+    fn current_catalog_rates_match_the_official_standard_and_fast_tables() {
         let standard = catalog(CatalogTier::Standard);
         let priority = catalog(CatalogTier::Priority);
-        for priority_rate in &priority.models {
-            let standard_rate = standard
+        let rate = |catalog: &Catalog, model_id: &str, minimum_input_tokens: Option<i64>| {
+            let row = catalog
                 .models
                 .iter()
-                .find(|rate| {
-                    rate.model_id == priority_rate.model_id
-                        && rate.minimum_input_tokens == priority_rate.minimum_input_tokens
-                        && rate.maximum_input_tokens == priority_rate.maximum_input_tokens
+                .find(|row| {
+                    row.model_id == model_id && row.minimum_input_tokens == minimum_input_tokens
                 })
-                .expect("Priority row must have a matching Standard band");
-            assert_eq!(
-                priority_rate.input,
-                standard_rate.input.checked_mul(2).unwrap()
-            );
-            assert_eq!(
-                priority_rate.cached_input,
-                standard_rate.cached_input.checked_mul(2).unwrap()
-            );
-            assert_eq!(
-                priority_rate.cache_write,
-                standard_rate
-                    .cache_write
-                    .and_then(|value| value.checked_mul(2))
-            );
-            assert_eq!(
-                priority_rate.output,
-                standard_rate.output.checked_mul(2).unwrap()
-            );
+                .expect("official catalog row");
+            (row.input, row.cached_input, row.cache_write, row.output)
+        };
+
+        for (model, short, long) in [
+            (
+                "gpt-6-astra",
+                (10_000_000, 1_000_000, Some(12_500_000), 50_000_000),
+                (20_000_000, 2_000_000, Some(25_000_000), 75_000_000),
+            ),
+            (
+                "gpt-5.6-sol",
+                (4_000_000, 400_000, Some(5_000_000), 20_000_000),
+                (8_000_000, 800_000, Some(10_000_000), 30_000_000),
+            ),
+            (
+                "gpt-5.6-terra",
+                (2_000_000, 200_000, Some(2_500_000), 12_000_000),
+                (4_000_000, 400_000, Some(5_000_000), 18_000_000),
+            ),
+            (
+                "gpt-5.6-luna",
+                (200_000, 20_000, Some(250_000), 1_200_000),
+                (400_000, 40_000, Some(500_000), 1_800_000),
+            ),
+        ] {
+            assert_eq!(rate(&standard, model, None), short);
+            assert_eq!(rate(&standard, model, Some(272_001)), long);
+        }
+
+        for (model, short, long) in [
+            (
+                "gpt-6-astra",
+                (20_000_000, 2_000_000, Some(25_000_000), 100_000_000),
+                Some((40_000_000, 4_000_000, Some(50_000_000), 150_000_000)),
+            ),
+            (
+                "gpt-5.6-sol",
+                (8_000_000, 800_000, Some(10_000_000), 40_000_000),
+                Some((16_000_000, 1_600_000, Some(20_000_000), 60_000_000)),
+            ),
+            (
+                "gpt-5.6-terra",
+                (4_000_000, 400_000, Some(5_000_000), 24_000_000),
+                Some((8_000_000, 800_000, Some(10_000_000), 36_000_000)),
+            ),
+            (
+                "gpt-5.6-luna",
+                (400_000, 40_000, Some(500_000), 2_400_000),
+                Some((800_000, 80_000, Some(1_000_000), 3_600_000)),
+            ),
+            ("gpt-5.5", (12_500_000, 1_250_000, None, 75_000_000), None),
+            ("gpt-5.4", (5_000_000, 500_000, None, 30_000_000), None),
+            ("gpt-5.4-mini", (1_500_000, 150_000, None, 9_000_000), None),
+            ("gpt-5.2", (3_500_000, 350_000, None, 28_000_000), None),
+            ("gpt-5.1", (2_500_000, 250_000, None, 20_000_000), None),
+            ("gpt-5", (2_500_000, 250_000, None, 20_000_000), None),
+            ("gpt-5-mini", (450_000, 45_000, None, 3_600_000), None),
+            ("gpt-4.1", (3_500_000, 875_000, None, 14_000_000), None),
+            ("gpt-4.1-mini", (700_000, 175_000, None, 2_800_000), None),
+            ("gpt-4.1-nano", (200_000, 50_000, None, 800_000), None),
+            ("o3", (3_500_000, 875_000, None, 14_000_000), None),
+            ("o4-mini", (2_000_000, 500_000, None, 8_000_000), None),
+        ] {
+            assert_eq!(rate(&priority, model, None), short);
+            if let Some(long) = long {
+                assert_eq!(rate(&priority, model, Some(272_001)), long);
+            }
         }
     }
 
@@ -597,6 +665,7 @@ mod tests {
         unknown.actual_model = Some("relay-alias");
         assert_eq!(price_usage(&unknown).status, CostStatus::Unavailable);
         let mut unsupported_priority_model = observation();
+        unsupported_priority_model.requested_model = Some("gpt-5-nano");
         unsupported_priority_model.forwarded_service_tier = Some("priority");
         unsupported_priority_model.actual_service_tier = None;
         assert_eq!(
@@ -621,12 +690,12 @@ mod tests {
         short.total_tokens = Some(272_001);
         short.cached_input_tokens = Some(0);
         short.cache_write_input_tokens = Some(0);
-        assert_eq!(price_usage(&short).amount_pico_usd, Some(680_015_000_000));
+        assert_eq!(price_usage(&short).amount_pico_usd, Some(544_012_000_000));
 
         let mut long = short;
         long.input_tokens = Some(272_001);
         long.total_tokens = Some(272_002);
-        assert_eq!(price_usage(&long).amount_pico_usd, Some(1_360_027_500_000));
+        assert_eq!(price_usage(&long).amount_pico_usd, Some(1_088_022_000_000));
     }
 
     #[test]
@@ -699,12 +768,12 @@ mod tests {
 
         let result = price_usage(&value);
         assert_eq!(result.status, CostStatus::Exact);
-        assert_eq!(result.amount_pico_usd, Some(70_316_000_000));
+        assert_eq!(result.amount_pico_usd, Some(55_932_800_000));
         assert_eq!(result.catalog_version, Some(PRIORITY_CATALOG_VERSION));
 
         value.forwarded_service_tier = Some("default");
         let standard = price_usage(&value);
-        assert_eq!(standard.amount_pico_usd, Some(35_158_000_000));
+        assert_eq!(standard.amount_pico_usd, Some(27_966_400_000));
         assert_eq!(standard.catalog_version, Some(CATALOG_VERSION));
     }
 
@@ -743,7 +812,12 @@ mod tests {
             (Some("auto"), Some("default"), Some(CATALOG_VERSION)),
             (Some("auto"), None, None),
             (Some("auto"), Some("auto"), None),
-            (Some("fast"), Some("default"), None),
+            (
+                Some("fast"),
+                Some("default"),
+                Some(PRIORITY_CATALOG_VERSION),
+            ),
+            (None, Some("fast"), Some(PRIORITY_CATALOG_VERSION)),
             (Some("Priority"), None, None),
             (Some(" priority"), None, None),
             (Some("default"), Some("flex"), None),

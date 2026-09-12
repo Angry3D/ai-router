@@ -3,4 +3,4 @@ import type { InferenceStatus } from "./InferenceStatus";
 import type { RouteHealthDto } from "./RouteHealthDto";
 import type { RouteId } from "./RouteId";
 
-export type RouteSummaryDto = { routeId: RouteId, name: string, baseUrlHost: string, inferenceStatus: InferenceStatus, health: RouteHealthDto | null, };
+export type RouteSummaryDto = { routeId: RouteId, name: string, baseUrlHost: string, menuVisible?: boolean, inferenceStatus: InferenceStatus, health: RouteHealthDto | null, };

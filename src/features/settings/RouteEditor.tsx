@@ -29,7 +29,6 @@ import type {
   RouteEditDto,
   RouteId,
   RouteSaveInputDto,
-  ServiceTierPolicy,
 } from "../../generated";
 import { AppScrollArea } from "../shared/AppScrollArea";
 import { previewBaseUrl } from "./baseUrlPreview";
@@ -42,6 +41,7 @@ import {
   SettingsDivider,
   SettingsFieldRow,
   SettingsFooter,
+  SettingsHelpTooltip,
   SettingsIconButton,
   SettingsPageTitle,
   SettingsReadonlyRow,
@@ -130,7 +130,7 @@ interface RouteFormState {
   name: string;
   baseUrl: string;
   apiKey: string;
-  serviceTierPolicy: ServiceTierPolicy;
+  menuVisible: boolean;
   queryMode: BalanceQueryMode;
   queryEnabled: boolean;
   customSource: string;
@@ -151,7 +151,7 @@ const emptyRouteForm: RouteFormState = {
   name: "",
   baseUrl: "",
   apiKey: "",
-  serviceTierPolicy: "passthrough",
+  menuVisible: true,
   queryMode: "general_v1",
   queryEnabled: false,
   customSource: "",
@@ -164,7 +164,7 @@ function formFromEdit(edit: RouteEditDto): RouteFormState {
     name: edit.name,
     baseUrl: edit.baseUrl,
     apiKey: edit.apiKey,
-    serviceTierPolicy: edit.serviceTierPolicy,
+    menuVisible: edit.menuVisible !== false,
     queryMode: edit.balanceQuery?.mode ?? "general_v1",
     queryEnabled: edit.balanceQuery?.enabled ?? false,
     customSource: edit.balanceQuery?.customSource ?? "",
@@ -442,7 +442,7 @@ function RouteForm(props: {
         name: form.name,
         baseUrl: form.baseUrl,
         apiKey: form.apiKey,
-        serviceTierPolicy: form.serviceTierPolicy,
+        menuVisible: form.menuVisible,
         balanceQuery,
         acceptScriptRisk,
         fallbackExcludedModels,
@@ -680,33 +680,19 @@ function RouteForm(props: {
               </SettingsIconButton>
             </span>
           </SettingsFieldRow>
-          <SettingsFieldRow label="Service Tier">
-            <div
-              className="settings-segments"
-              role="radiogroup"
-              aria-label="Service Tier"
-            >
-              <label className="settings-segment-option">
-                <input
-                  id="route-service-tier-passthrough"
-                  type="radio"
-                  name="route-service-tier-policy"
-                  value="passthrough"
-                  checked={form.serviceTierPolicy === "passthrough"}
-                  onChange={() => patchForm("serviceTierPolicy", "passthrough")}
-                />
-                <span>跟随 Codex</span>
-              </label>
-              <label className="settings-segment-option">
-                <input
-                  type="radio"
-                  name="route-service-tier-policy"
-                  value="omit"
-                  checked={form.serviceTierPolicy === "omit"}
-                  onChange={() => patchForm("serviceTierPolicy", "omit")}
-                />
-                <span>移除参数</span>
-              </label>
+          <SettingsFieldRow label="在顶部菜单中显示">
+            <div className="route-fallback-switch-help">
+              <SettingsSwitch
+                label="在顶部菜单中显示"
+                checked={form.menuVisible}
+                disabled={
+                  props.routeId !== null && props.activeRouteId === props.routeId
+                }
+                onChange={(event) => patchForm("menuVisible", event.target.checked)}
+              />
+              <SettingsHelpTooltip label="说明菜单显示与自动 Fallback 资格">
+                关闭后不会显示在顶部菜单，也不会参与自动 Fallback。
+              </SettingsHelpTooltip>
             </div>
           </SettingsFieldRow>
           <SettingsActionGroup className="route-probe-actions">
@@ -848,7 +834,9 @@ function RouteForm(props: {
             ) : (
               <div className="codex-model-grid" aria-label="自定义模型列表">
                 <div className="codex-model-grid-header" aria-hidden="true">
-                  <span>模型 ID</span>
+                  <span>
+                    模型 ID <span className="settings-required-marker" aria-hidden="true" />
+                  </span>
                   <span>显示名称</span>
                   <span>上下文窗口（Token）</span>
                   <span />
@@ -905,7 +893,7 @@ function RouteForm(props: {
                           type="number"
                           min={1}
                           step={1}
-                          placeholder="128000"
+                          placeholder="256000"
                           value={row.contextWindow}
                           disabled={busy}
                           onChange={(event) =>

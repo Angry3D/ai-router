@@ -1107,8 +1107,8 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         [],
         |row| row.get(0),
     )?;
-    let invalid_service_tier_policy: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM routes WHERE service_tier_policy NOT IN ('passthrough', 'omit'))",
+    let invalid_menu_visibility: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM routes WHERE menu_visible NOT IN (0, 1))",
         [],
         |row| row.get(0),
     )?;
@@ -1309,7 +1309,7 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
     )?;
     if invalid_route_secret
         || orphan_secret
-        || invalid_service_tier_policy
+        || invalid_menu_visibility
         || gateway_count > 1
         || !fallback_valid
         || !active_is_valid
@@ -1556,7 +1556,7 @@ mod tests {
         balance::BalanceQueryMode,
         domain::{
             ApiKey, CompletionState, DeliveryState, ImagesGenerationTimeout,
-            McpImageCapacityWarningThreshold, ServiceTierPolicy, UpstreamAttemptId,
+            McpImageCapacityWarningThreshold, UpstreamAttemptId,
         },
         storage::{
             AttemptHistoryRecord, BalanceQueryInput, CodexModelRecord, CreateRouteInput,
@@ -1609,7 +1609,7 @@ mod tests {
                     name: "Synthetic".to_owned(),
                     base_url: "https://example.invalid/v1".to_owned(),
                     api_key: ApiKey::parse("synthetic-route-key").expect("key"),
-                    service_tier_policy: ServiceTierPolicy::Omit,
+                    menu_visible: None,
                     balance_query: Some(BalanceQueryInput {
                         mode: BalanceQueryMode::CustomJs,
                         enabled: true,
@@ -1745,7 +1745,7 @@ mod tests {
                     name: format!("Route {index}"),
                     base_url: "https://example.invalid/v1".to_owned(),
                     api_key: ApiKey::parse(&format!("synthetic-key-{index}")).expect("key"),
-                    service_tier_policy: ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: None,
                     accept_script_risk: false,
                 })
@@ -1805,14 +1805,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_validation_rejects_unknown_service_tier_policy() {
+    async fn recovery_validation_rejects_invalid_menu_visibility() {
         let (_root, primary, database, manager) = setup();
         database
             .create_route(CreateRouteInput {
-                name: "Policy".to_owned(),
+                name: "Visibility".to_owned(),
                 base_url: "https://example.invalid/v1".to_owned(),
-                api_key: ApiKey::parse("policy-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Omit,
+                api_key: ApiKey::parse("visibility-key").expect("key"),
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
@@ -1828,8 +1828,8 @@ mod tests {
                 .pragma_update(None, "ignore_check_constraints", true)
                 .expect("bypass CHECK for corruption fixture");
             connection
-                .execute("UPDATE routes SET service_tier_policy = 'unsupported'", [])
-                .expect("inject invalid policy");
+                .execute("UPDATE routes SET menu_visible = 2", [])
+                .expect("inject invalid visibility");
         }
 
         let inventory = manager.scan().expect("scan corrupt point");
@@ -1839,7 +1839,7 @@ mod tests {
             .classify_startup()
             .expect("classify corrupt primary")
         else {
-            panic!("an unknown persisted route policy must require recovery");
+            panic!("an invalid persisted visibility must require recovery");
         };
         assert_eq!(inventory.invalid_point_count, 1);
     }
@@ -1852,7 +1852,7 @@ mod tests {
                 name: "Images".to_owned(),
                 base_url: "https://example.invalid/v1".to_owned(),
                 api_key: ApiKey::parse("images-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
@@ -1980,7 +1980,7 @@ mod tests {
                     name: "Only".to_owned(),
                     base_url: "https://example.invalid/v1".to_owned(),
                     api_key: ApiKey::parse("only-key").expect("key"),
-                    service_tier_policy: ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: None,
                     accept_script_risk: false,
                 })
@@ -2029,7 +2029,7 @@ mod tests {
                     name: "Balance".to_owned(),
                     base_url: "https://example.invalid/v1".to_owned(),
                     api_key: ApiKey::parse("balance-key").expect("key"),
-                    service_tier_policy: ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: Some(BalanceQueryInput {
                         mode: BalanceQueryMode::GeneralV1,
                         enabled: true,
@@ -2065,7 +2065,7 @@ mod tests {
                 name: "First".to_owned(),
                 base_url: "https://example.invalid/v1".to_owned(),
                 api_key: ApiKey::parse("first-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
@@ -2076,7 +2076,7 @@ mod tests {
                 name: "Second".to_owned(),
                 base_url: "https://example.invalid/v1".to_owned(),
                 api_key: ApiKey::parse("second-key").expect("key"),
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
@@ -2191,7 +2191,7 @@ mod tests {
                     name: format!("Fallback {index}"),
                     base_url: "https://example.invalid/v1".to_owned(),
                     api_key: ApiKey::parse(&format!("fallback-key-{index}")).expect("key"),
-                    service_tier_policy: ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: None,
                     accept_script_risk: false,
                 })

@@ -41,7 +41,7 @@ use uuid::Uuid;
 use crate::{
     domain::{
         ApiKey, BaseUrl, CompletionState, ImagesGenerationTimeout, ReachabilityResult,
-        ReachabilityStatus, RouteId, ServiceTierPolicy,
+        ReachabilityStatus, RouteId,
     },
     storage::RequestHistoryRecord,
 };
@@ -92,13 +92,13 @@ pub struct RouteSnapshot {
     pub name: String,
     pub base_url: BaseUrl,
     pub api_key: Arc<ApiKey>,
-    pub service_tier_policy: ServiceTierPolicy,
     pub fallback_excluded_models: Arc<HashSet<String>>,
 }
 
 pub struct RoutingSnapshot {
     pub active: Option<Arc<RouteSnapshot>>,
     pub participants: Vec<Arc<RouteSnapshot>>,
+    pub configured_participant_count: u32,
     pub enabled: bool,
     pub selection_generation: u64,
     pub health_generation: u64,
@@ -143,6 +143,7 @@ impl Default for RoutingSnapshotStore {
         Self::new(RoutingSnapshot {
             active: None,
             participants: Vec::new(),
+            configured_participant_count: 0,
             enabled: false,
             selection_generation: 0,
             health_generation: 0,
@@ -253,7 +254,6 @@ pub struct ValidatedProxyRequest {
     pub activity_reporter: Option<LogicalRequestActivityReporter>,
     pub request_declares_local_shell: bool,
     pub body: Bytes,
-    pub body_without_service_tier: Option<Bytes>,
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
@@ -308,9 +308,11 @@ impl ProxyIngressState {
 
     pub fn set_active_route(&self, route: Option<Arc<RouteSnapshot>>) {
         let participants = route.iter().cloned().collect();
+        let configured_participant_count = u32::from(route.is_some());
         self.routing.store(Arc::new(RoutingSnapshot {
             active: route,
             participants,
+            configured_participant_count,
             enabled: false,
             selection_generation: 0,
             health_generation: 0,
@@ -639,10 +641,6 @@ async fn responses_handler(State(state): State<ProxyIngressState>, request: Requ
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one ingress decoder keeps bounded body and metadata validation ordered"
-)]
 async fn validate_request(
     state: &ProxyIngressState,
     request: Request,
@@ -734,8 +732,6 @@ async fn validate_request(
             reasoning_effort.clone(),
         )
     })?;
-    let body_without_service_tier = service_tier_omitted_body(&decoded, &routing)?;
-
     Ok(ValidatedProxyRequest {
         request_id,
         started_at_ms,
@@ -744,7 +740,6 @@ async fn validate_request(
         activity_reporter: None,
         request_declares_local_shell,
         body: Bytes::from(decoded),
-        body_without_service_tier,
         model: metadata.model,
         reasoning_effort,
         service_tier: metadata.service_tier.map(|value| bounded_string(value, 64)),
@@ -753,52 +748,6 @@ async fn validate_request(
         routing,
         headers,
     })
-}
-
-fn service_tier_omitted_body(
-    decoded: &[u8],
-    routing: &RoutingSnapshot,
-) -> Result<Option<Bytes>, IngressFailure> {
-    if routing
-        .active
-        .iter()
-        .chain(routing.participants.iter())
-        .any(|route| route.service_tier_policy == ServiceTierPolicy::Omit)
-    {
-        remove_top_level_service_tier(decoded)
-    } else {
-        Ok(None)
-    }
-}
-
-fn remove_top_level_service_tier(decoded: &[u8]) -> Result<Option<Bytes>, IngressFailure> {
-    let mut value: serde_json::Value = serde_json::from_slice(decoded).map_err(|_| {
-        ingress_failure(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Request body must be valid Responses JSON.",
-        )
-    })?;
-    let object = value.as_object_mut().ok_or_else(|| {
-        ingress_failure(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Request body must be valid Responses JSON.",
-        )
-    })?;
-    if object.remove("service_tier").is_none() {
-        return Ok(None);
-    }
-    serde_json::to_vec(&value)
-        .map(Bytes::from)
-        .map(Some)
-        .map_err(|_| {
-            ingress_failure(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "Request body must be valid Responses JSON.",
-            )
-        })
 }
 
 fn validate_request_model(model: &str) -> Result<(), IngressFailure> {
@@ -1332,51 +1281,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn service_tier_omit_resolves_an_escaped_top_level_key() {
-        let body = remove_top_level_service_tier(
-            br#"{"model":"gpt-5","\u0073ervice_tier":"priority","keep":1}"#,
-        )
-        .unwrap_or_else(|_| panic!("valid JSON"))
-        .expect("omitted body");
-        let value: serde_json::Value = serde_json::from_slice(&body).expect("rewritten JSON");
-        assert!(value.get("service_tier").is_none());
-        assert_eq!(
-            value.get("keep").and_then(serde_json::Value::as_i64),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn service_tier_omit_preserves_nested_keys() {
-        let body = remove_top_level_service_tier(
-            br#"{"model":"gpt-5","service_tier":"priority","nested":{"service_tier":"keep"}}"#,
-        )
-        .unwrap_or_else(|_| panic!("valid JSON"))
-        .expect("omitted body");
-        let value: serde_json::Value = serde_json::from_slice(&body).expect("rewritten JSON");
-        assert!(value.get("service_tier").is_none());
-        assert_eq!(value["nested"]["service_tier"], "keep");
-    }
-
-    #[test]
-    fn service_tier_omit_returns_no_alternate_when_absent() {
-        assert!(
-            remove_top_level_service_tier(br#"{"model":"gpt-5"}"#)
-                .unwrap_or_else(|_| panic!("valid JSON"))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn service_tier_omit_removes_a_null_top_level_value() {
-        let body = remove_top_level_service_tier(br#"{"model":"gpt-5","service_tier":null}"#)
-            .unwrap_or_else(|_| panic!("valid JSON"))
-            .expect("omitted body");
-        let value: serde_json::Value = serde_json::from_slice(&body).expect("rewritten JSON");
-        assert!(value.get("service_tier").is_none());
-    }
-
     #[derive(Default)]
     struct RecordingUpstream {
         calls: AtomicUsize,
@@ -1474,7 +1378,6 @@ mod tests {
             name: name.to_owned(),
             base_url: BaseUrl::parse("https://api.example.test/v1").expect("valid base URL"),
             api_key: Arc::new(ApiKey::parse("upstream-key").expect("valid API key")),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
             fallback_excluded_models: Arc::new(HashSet::new()),
         })
     }
@@ -1551,12 +1454,12 @@ mod tests {
             base_url: BaseUrl::parse(&format!("http://{}/openai/v1", server.address()))
                 .expect("image base URL"),
             api_key: Arc::new(ApiKey::parse("image-route-key").expect("image key")),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
             fallback_excluded_models: Arc::new(HashSet::new()),
         });
         let routing = RoutingSnapshotStore::new(RoutingSnapshot {
             active: None,
             participants: Vec::new(),
+            configured_participant_count: 0,
             enabled: false,
             selection_generation: 0,
             health_generation: 0,
@@ -2295,12 +2198,12 @@ mod tests {
             base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
                 .expect("image base URL"),
             api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
             fallback_excluded_models: Arc::new(HashSet::new()),
         });
         let routing = RoutingSnapshotStore::new(RoutingSnapshot {
             active: None,
             participants: Vec::new(),
+            configured_participant_count: 0,
             enabled: false,
             selection_generation: 0,
             health_generation: 0,
@@ -2424,12 +2327,12 @@ mod tests {
             base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
                 .expect("image base URL"),
             api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
             fallback_excluded_models: Arc::new(HashSet::new()),
         });
         let routing = RoutingSnapshotStore::new(RoutingSnapshot {
             active: None,
             participants: Vec::new(),
+            configured_participant_count: 0,
             enabled: false,
             selection_generation: 0,
             health_generation: 0,

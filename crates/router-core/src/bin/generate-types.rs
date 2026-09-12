@@ -32,7 +32,7 @@ use router_core::{
         AppearancePreference, CompletionState, DeliveryState, InferenceFailureReason,
         InferenceOutcome, InferenceStatus, InferenceStatusKind, ProxyRequestMetadata,
         ProxyRuntimeStatus, ReachabilityResult, ReachabilityStatus, RouteMoveDirection,
-        ServiceTierPolicy, UpstreamAttemptMetadata,
+        UpstreamAttemptMetadata,
     },
     lifecycle::{AppLifecycleIssue, AppLifecyclePhase, AppLifecycleSnapshot},
     recovery::{DatabaseStartupIssue, RecoveryHealthKind},
@@ -138,7 +138,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     ReachabilityResult::export_all_to(&output)?;
     ReachabilityStatus::export_all_to(&output)?;
     RouteMoveDirection::export_all_to(&output)?;
-    ServiceTierPolicy::export_all_to(&output)?;
     UpstreamAttemptMetadata::export_all_to(&output)?;
     DatabaseStartupIssue::export_all_to(&output)?;
     RecoveryHealthKind::export_all_to(&output)?;

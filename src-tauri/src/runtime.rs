@@ -452,6 +452,7 @@ impl DesktopLifecycleServices {
                 let base_url = BaseUrl::parse(&route.base_url)
                     .map_err(|error| map_validation_error(&error))?;
                 Ok(RouteSummaryDto {
+                    menu_visible: Some(route.menu_visible),
                     inference_status: inference.as_ref().map_or_else(
                         || router_core::domain::InferenceStatus {
                             kind: router_core::domain::InferenceStatusKind::Unverified,
@@ -559,6 +560,9 @@ impl DesktopLifecycleServices {
         let secrets = SqliteSecretStore::new(database.clone());
         let mut participants = Vec::new();
         for route in routes.iter().take(participant_count) {
+            if !route.menu_visible {
+                continue;
+            }
             let api_key = secrets
                 .get(route.secret_id.clone())
                 .await
@@ -569,7 +573,6 @@ impl DesktopLifecycleServices {
                 base_url: BaseUrl::parse(&route.base_url)
                     .map_err(|error| map_validation_error(&error))?,
                 api_key: Arc::new(api_key),
-                service_tier_policy: route.service_tier_policy,
                 fallback_excluded_models: Arc::new(
                     fallback_exclusions
                         .get(&route.route_id)
@@ -600,7 +603,6 @@ impl DesktopLifecycleServices {
                     base_url: BaseUrl::parse(&route.base_url)
                         .map_err(|error| map_validation_error(&error))?,
                     api_key: Arc::new(api_key),
-                    service_tier_policy: route.service_tier_policy,
                     fallback_excluded_models: Arc::new(
                         fallback_exclusions
                             .get(&route.route_id)
@@ -638,7 +640,6 @@ impl DesktopLifecycleServices {
                         base_url: BaseUrl::parse(&route.base_url)
                             .map_err(|error| map_validation_error(&error))?,
                         api_key: Arc::new(api_key),
-                        service_tier_policy: route.service_tier_policy,
                         fallback_excluded_models: Arc::new(
                             fallback_exclusions
                                 .get(&route.route_id)
@@ -658,6 +659,7 @@ impl DesktopLifecycleServices {
             active,
             enabled: state.fallback.enabled && participants.len() >= 2,
             participants,
+            configured_participant_count: state.fallback.participant_count,
             selection_generation: state.selection_generation,
             health_generation: self.route_health.health_generation(),
             config_revision: state.fallback.config_revision,
@@ -1120,7 +1122,7 @@ impl DesktopLifecycleServices {
             base_url: base_url.as_str().to_owned(),
             inference_url: base_url.inference_url(),
             api_key,
-            service_tier_policy: edit.route.service_tier_policy,
+            menu_visible: edit.route.menu_visible,
             balance_query: edit.balance_query.map(|query| BalanceQueryEditDto {
                 mode: query.mode,
                 enabled: query.enabled,
@@ -1160,6 +1162,18 @@ impl DesktopLifecycleServices {
             .active_route_id()
             .await
             .map_err(map_storage_error)?;
+        let would_be_active = input
+            .route_id
+            .as_ref()
+            .is_some_and(|id| Some(id) == active_before.as_ref())
+            || (input.route_id.is_none() && active_before.is_none());
+        if !input.menu_visible && would_be_active {
+            return Err(ipc_error(
+                "active_route_must_be_visible",
+                "当前激活路由必须显示在顶部菜单中。",
+                false,
+            ));
+        }
         let previous = if input.route_id.as_ref() == active_before.as_ref() {
             database
                 .active_codex_models()
@@ -1176,7 +1190,7 @@ impl DesktopLifecycleServices {
                         name: input.name,
                         base_url: input.base_url,
                         api_key,
-                        service_tier_policy: input.service_tier_policy,
+                        menu_visible: Some(input.menu_visible),
                         balance_query,
                         accept_script_risk: input.accept_script_risk,
                     },
@@ -1193,7 +1207,7 @@ impl DesktopLifecycleServices {
                         name: input.name,
                         base_url: input.base_url,
                         api_key,
-                        service_tier_policy: input.service_tier_policy,
+                        menu_visible: Some(input.menu_visible),
                         balance_query,
                         accept_script_risk: input.accept_script_risk,
                     },
@@ -2837,6 +2851,7 @@ impl DesktopFallbackActivator {
         let snapshot = Arc::new(RoutingSnapshot {
             active: Some(Arc::clone(&request.target_route)),
             participants: request.routing.participants.clone(),
+            configured_participant_count: request.routing.configured_participant_count,
             enabled: request.routing.enabled,
             selection_generation: request.routing.selection_generation.saturating_add(1),
             health_generation: request.routing.health_generation.saturating_add(1),
@@ -2979,15 +2994,13 @@ async fn project_fallback_catalog(
 
 fn fallback_state(snapshot: &RoutingSnapshot) -> Result<FallbackStateDto, IpcErrorDto> {
     let active_index = snapshot.active_participant_index();
-    let participant_count = u32::try_from(snapshot.participants.len())
-        .map_err(|_| map_storage_error(StorageError::Initialization))?;
     let active_position = active_index
         .map(|index| u32::try_from(index + 1))
         .transpose()
         .map_err(|_| map_storage_error(StorageError::Initialization))?;
     Ok(FallbackStateDto {
         enabled: snapshot.enabled,
-        participant_count,
+        participant_count: snapshot.configured_participant_count,
         config_revision: snapshot.config_revision,
         active_position,
         has_next: active_index.is_some() && snapshot.participants.len() > 1,
@@ -3116,6 +3129,7 @@ impl AppLifecycleServices for DesktopLifecycleServices {
                     route_id: route.route_id.clone(),
                     name: route.name.clone(),
                     base_url_host: base_url.host(),
+                    menu_visible: Some(route.menu_visible),
                     inference_status: inference.status(&route.route_id, now_millis()),
                     health: self.route_health.snapshot(&route.route_id).map(Into::into),
                 })
@@ -4486,7 +4500,7 @@ mod tests {
                 name: "Models".to_owned(),
                 base_url: "https://models.example/v1".to_owned(),
                 api_key: ApiKey::parse("models-key").expect("API key"),
-                service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
@@ -4501,7 +4515,7 @@ mod tests {
             name: name.to_owned(),
             base_url: "https://A.example/v1".to_owned(),
             api_key: "A-key".to_owned(),
-            service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+            menu_visible: true,
             balance_query: None,
             accept_script_risk: false,
             fallback_excluded_models: Vec::new(),
@@ -4597,6 +4611,54 @@ mod tests {
         services.close_database().await;
     }
 
+    #[tokio::test]
+    async fn route_save_rejects_hidden_first_and_active_routes_before_writing() {
+        let directory = TempDir::new().expect("app data fixture");
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink))),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let database = services.database().await.expect("database");
+
+        let mut first = route_save_health_input(&RouteId::new(), "First");
+        first.route_id = None;
+        first.menu_visible = false;
+        assert_eq!(
+            services
+                .save_route(first)
+                .await
+                .err()
+                .expect("hidden first route")
+                .code,
+            "active_route_must_be_visible"
+        );
+        assert!(database.list_routes().await.expect("no routes").is_empty());
+
+        let active = create_fallback_test_route(&database, "A").await;
+        let mut update = route_save_health_input(&active, "A changed");
+        update.menu_visible = false;
+        assert_eq!(
+            services
+                .save_route(update)
+                .await
+                .err()
+                .expect("hidden active route")
+                .code,
+            "active_route_must_be_visible"
+        );
+        let stored = database.route_edit(active).await.expect("active route");
+        assert_eq!(stored.route.name, "A");
+        assert!(stored.route.menu_visible);
+        services.close_database().await;
+    }
+
     struct ImageMcpRepairFixture {
         _directory: TempDir,
         services: Arc<DesktopLifecycleServices>,
@@ -4629,7 +4691,7 @@ mod tests {
                 name: "Image repair".to_owned(),
                 base_url: "https://image-repair.example/v1".to_owned(),
                 api_key: ApiKey::parse("image-repair-key").expect("API key"),
-                service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
@@ -4685,13 +4747,92 @@ mod tests {
                 name: name.to_owned(),
                 base_url: format!("https://{name}.example/v1"),
                 api_key: ApiKey::parse(&format!("{name}-key")).expect("API key"),
-                service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
             .await
             .expect("route")
             .route_id
+    }
+
+    #[tokio::test]
+    async fn hidden_prefix_routes_are_not_backfilled_and_keep_the_configured_boundary() {
+        let directory = TempDir::new().expect("app data fixture");
+        let runtime = Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink)));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let database = services.database().await.expect("database");
+        let first = create_fallback_test_route(&database, "A").await;
+        let hidden = create_fallback_test_route(&database, "B").await;
+        let outside = create_fallback_test_route(&database, "C").await;
+        database
+            .update_route(UpdateRouteInput {
+                route_id: hidden.clone(),
+                name: "B".to_owned(),
+                base_url: "https://B.example/v1".to_owned(),
+                api_key: ApiKey::parse("B-key").expect("API key"),
+                menu_visible: Some(false),
+                balance_query: None,
+                accept_script_risk: false,
+            })
+            .await
+            .expect("hide middle route");
+        database
+            .set_fallback_participant_count(2)
+            .await
+            .expect("configured boundary");
+        assert!(
+            !database
+                .set_fallback_enabled(true)
+                .await
+                .expect("fallback stays disabled")
+                .enabled
+        );
+
+        services
+            .refresh_route_projection(&database)
+            .await
+            .expect("routing projection");
+        let routing = services.routing.load();
+        assert_eq!(routing.configured_participant_count, 2);
+        assert!(!routing.enabled);
+        assert_eq!(
+            routing
+                .participants
+                .iter()
+                .map(|route| route.route_id.clone())
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
+        assert!(
+            routing
+                .participants
+                .iter()
+                .all(|route| route.route_id != outside)
+        );
+        let bootstrap = runtime.bootstrap_snapshot();
+        assert_eq!(bootstrap.routes.len(), 3);
+        assert_eq!(bootstrap.fallback.participant_count, 2);
+        assert!(!bootstrap.fallback.enabled);
+        assert_eq!(
+            bootstrap
+                .routes
+                .iter()
+                .find(|route| route.route_id == hidden)
+                .and_then(|route| route.menu_visible),
+            Some(false)
+        );
+        services.close_database().await;
     }
 
     fn fallback_test_activator(
@@ -5130,7 +5271,7 @@ mod tests {
                     name: "First".to_owned(),
                     base_url: "https://first.example/v1".to_owned(),
                     api_key: ApiKey::parse("first-key").expect("key"),
-                    service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: None,
                     accept_script_risk: false,
                 },
@@ -5148,7 +5289,7 @@ mod tests {
                     name: "Second".to_owned(),
                     base_url: "https://second.example/v1".to_owned(),
                     api_key: ApiKey::parse("second-key").expect("key"),
-                    service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: None,
                     accept_script_risk: false,
                 },
@@ -5351,7 +5492,7 @@ mod tests {
                     name: "Fallback target".to_owned(),
                     base_url: "https://fallback.example/v1".to_owned(),
                     api_key: ApiKey::parse("fallback-key").expect("key"),
-                    service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                    menu_visible: None,
                     balance_query: None,
                     accept_script_risk: false,
                 },
@@ -6134,7 +6275,7 @@ mod tests {
                 name: "Image A".to_owned(),
                 base_url: "https://image-a.example/v1".to_owned(),
                 api_key: ApiKey::parse("image-a-key").expect("API key"),
-                service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
@@ -6145,7 +6286,7 @@ mod tests {
                 name: "Image B".to_owned(),
                 base_url: "https://image-b.example/v1".to_owned(),
                 api_key: ApiKey::parse("image-b-key").expect("API key"),
-                service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })
@@ -6527,7 +6668,7 @@ mod tests {
                         base_url: format!("https://{}.example/v1", name.replace(' ', "-")),
                         api_key: ApiKey::parse(&format!("{}-key", name.replace(' ', "-")))
                             .expect("API key"),
-                        service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                        menu_visible: None,
                         balance_query: None,
                         accept_script_risk: false,
                     })
@@ -6681,13 +6822,13 @@ mod tests {
                     name: format!("Route {index}"),
                     base_url: BaseUrl::parse("https://example.test/v1").expect("base URL"),
                     api_key: Arc::new(ApiKey::parse("test-key").expect("API key")),
-                    service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
                     fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
                 })
             })
             .collect::<Vec<_>>();
         let snapshot = RoutingSnapshot {
             active: participants.last().cloned(),
+            configured_participant_count: 300,
             participants,
             enabled: true,
             selection_generation: 1,
@@ -7104,7 +7245,7 @@ mod tests {
                         name: name.to_owned(),
                         base_url: format!("https://{name}.example/v1"),
                         api_key: ApiKey::parse(&format!("{name}-key")).expect("API key"),
-                        service_tier_policy: router_core::domain::ServiceTierPolicy::Passthrough,
+                        menu_visible: None,
                         balance_query: None,
                         accept_script_risk: false,
                     })

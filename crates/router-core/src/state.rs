@@ -118,8 +118,16 @@ pub struct RouteSummaryDto {
     pub route_id: RouteId,
     pub name: String,
     pub base_url_host: String,
+    #[serde(default = "default_menu_visible")]
+    #[ts(optional)]
+    pub menu_visible: Option<bool>,
     pub inference_status: InferenceStatus,
     pub health: Option<RouteHealthDto>,
+}
+
+#[allow(clippy::unnecessary_wraps)]
+const fn default_menu_visible() -> Option<bool> {
+    Some(true)
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -532,6 +540,7 @@ mod tests {
             route_id: route_id.clone(),
             name: "Work".to_owned(),
             base_url_host: "example.com".to_owned(),
+            menu_visible: Some(true),
             inference_status: crate::domain::InferenceStatus {
                 kind: crate::domain::InferenceStatusKind::Unverified,
                 last_outcome: None,
@@ -573,6 +582,7 @@ mod tests {
             route_id: route_id.clone(),
             name: "Work".to_owned(),
             base_url_host: "example.com".to_owned(),
+            menu_visible: Some(true),
             inference_status: crate::domain::InferenceStatus {
                 kind: crate::domain::InferenceStatusKind::Unverified,
                 last_outcome: None,
@@ -632,6 +642,7 @@ mod tests {
                         route_id: route_id.clone(),
                         name: "Work".to_owned(),
                         base_url_host: "example.com".to_owned(),
+                        menu_visible: Some(true),
                         inference_status: crate::domain::InferenceStatus {
                             kind: crate::domain::InferenceStatusKind::Unverified,
                             last_outcome: None,

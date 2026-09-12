@@ -1386,6 +1386,7 @@ mod tests {
                 route_id,
                 name: name.to_owned(),
                 base_url_host: "example.com".to_owned(),
+                menu_visible: Some(true),
                 inference_status: InferenceStatus {
                     kind: InferenceStatusKind::Unverified,
                     last_outcome: None,
