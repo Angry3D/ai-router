@@ -10,7 +10,7 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createRouterQueryClient, queryKeys } from "../../api/query";
-import type { ServiceTierPolicy, SettingsSnapshotDto } from "../../generated";
+import type { SettingsSnapshotDto } from "../../generated";
 import {
   previewMenuSnapshot,
   previewRouteEdits,
@@ -138,7 +138,6 @@ async function renderSettings(
     scriptEnabled?: boolean;
     proxyStatus?: "running" | "port_conflict" | "database_error";
     routeName?: string;
-    serviceTierPolicy?: ServiceTierPolicy;
     settings?: Partial<SettingsSnapshotDto>;
   } = {},
 ) {
@@ -151,7 +150,6 @@ async function renderSettings(
     return {
       ...structuredClone(edit),
       name: options.routeName ?? edit.name,
-      serviceTierPolicy: options.serviceTierPolicy ?? edit.serviceTierPolicy,
       balanceQuery: edit.balanceQuery
         ? {
             ...structuredClone(edit.balanceQuery),

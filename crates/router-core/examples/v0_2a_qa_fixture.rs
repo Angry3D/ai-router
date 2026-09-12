@@ -13,8 +13,7 @@ use router_core::{
     balance::BalanceQueryMode,
     codex_config::load_or_create_gateway_token,
     domain::{
-        ApiKey, BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, ServiceTierPolicy,
-        UpstreamAttemptId,
+        ApiKey, BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, UpstreamAttemptId,
     },
     qa_acceptance::{QA_APP_IDENTIFIER, QaAcceptanceRoot},
     storage::{
@@ -253,7 +252,7 @@ async fn seed(root: &QaAcceptanceRoot, manifest_path: &Path) -> Result<(), Box<d
                 name: format!("Synthetic {label}"),
                 base_url: route.base_url,
                 api_key: ApiKey::parse(&format!("qa-synthetic-route-{label}"))?,
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: (label == "A").then(|| BalanceQueryInput {
                     mode: BalanceQueryMode::CustomJs,
                     enabled: false,
@@ -902,7 +901,7 @@ mod tests {
                 name: "Configured Route Name".to_owned(),
                 base_url: "https://qa-provider.example/v1".to_owned(),
                 api_key: ApiKey::parse("qa-configured-route-key").expect("QA key"),
-                service_tier_policy: ServiceTierPolicy::Passthrough,
+                menu_visible: None,
                 balance_query: None,
                 accept_script_risk: false,
             })

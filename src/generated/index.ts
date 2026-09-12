@@ -75,7 +75,6 @@ export type { RouteSaveResultDto } from "./RouteSaveResultDto";
 export type { RouteSummaryDto } from "./RouteSummaryDto";
 export type { RoutingDecisionDto } from "./RoutingDecisionDto";
 export type { RoutingSkippedRouteDto } from "./RoutingSkippedRouteDto";
-export type { ServiceTierPolicy } from "./ServiceTierPolicy";
 export type { SettingsSnapshotDto } from "./SettingsSnapshotDto";
 export type { StateArea } from "./StateArea";
 export type { StateChangedEventDto } from "./StateChangedEventDto";

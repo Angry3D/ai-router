@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(entries[0]["display_name"], "Relay A");
         assert_eq!(entries[0]["context_window"], 200_000);
         assert_eq!(entries[1]["display_name"], "relay-b");
-        assert_eq!(entries[1]["context_window"], 128_000);
+        assert_eq!(entries[1]["context_window"], 256_000);
         assert_eq!(entries[0]["priority"], 1);
         assert_eq!(entries[1]["priority"], 2);
         assert_eq!(entries[0]["default_reasoning_level"], "high");

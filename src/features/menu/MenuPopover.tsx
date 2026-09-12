@@ -186,8 +186,11 @@ function codexControlPresentation(
   }
 }
 
-function fallbackControlPresentation(fallback: FallbackStateDto) {
-  if (fallback.participantCount < 2) {
+function fallbackControlPresentation(
+  fallback: FallbackStateDto,
+  effectiveParticipantCount: number,
+) {
+  if (effectiveParticipantCount < 2) {
     return {
       state: "Fallback 不可用",
       action: "至少需 2 条路由",
@@ -383,7 +386,11 @@ export function MenuPopover() {
     [query.data?.balances],
   );
   const routeIds = useMemo(
-    () => query.data?.bootstrap.routes.map((route) => route.routeId) ?? [],
+    () => query.data?.bootstrap.routes.filter((route) => route.menuVisible !== false).map((route) => route.routeId) ?? [],
+    [query.data?.bootstrap.routes],
+  );
+  const visibleRoutes = useMemo(
+    () => query.data?.bootstrap.routes.filter((route) => route.menuVisible !== false) ?? [],
     [query.data?.bootstrap.routes],
   );
   const usagePreview = useMenuUsagePreview({ generation, routeIds });
@@ -553,7 +560,7 @@ export function MenuPopover() {
     if (
       !fallback ||
       fallbackOperation !== null ||
-      fallback.participantCount < 2
+      effectiveFallbackParticipantCount < 2
     ) {
       return;
     }
@@ -578,15 +585,40 @@ export function MenuPopover() {
         query.data.bootstrap.activeRouteId !== null,
       )
     : null;
-  const fallbackControl = query.data
-    ? fallbackControlPresentation(query.data.bootstrap.fallback)
-    : null;
   const fallbackBoundaryIndex = query.data
     ? Math.min(
         Math.max(query.data.bootstrap.fallback.participantCount, 0),
         query.data.bootstrap.routes.length,
       )
     : null;
+  const effectiveFallbackParticipantCount =
+    query.data && fallbackBoundaryIndex !== null
+      ? query.data.bootstrap.routes
+          .slice(0, fallbackBoundaryIndex)
+          .filter((route) => route.menuVisible !== false).length
+      : 0;
+  const fallbackControl = query.data
+    ? fallbackControlPresentation(
+        query.data.bootstrap.fallback,
+        effectiveFallbackParticipantCount,
+      )
+    : null;
+  const fallbackBoundaryOwner = (() => {
+    if (fallbackBoundaryIndex === null || visibleRoutes.length === 0) return null;
+    if (fallbackBoundaryIndex === 0) {
+      return { routeId: visibleRoutes[0].routeId, edge: "start" as const };
+    }
+    for (let index = visibleRoutes.length - 1; index >= 0; index -= 1) {
+      const route = visibleRoutes[index];
+      const fullIndex = query.data!.bootstrap.routes.findIndex(
+        (item) => item.routeId === route.routeId,
+      );
+      if (fullIndex < fallbackBoundaryIndex) {
+        return { routeId: route.routeId, edge: "end" as const };
+      }
+    }
+    return { routeId: visibleRoutes[0].routeId, edge: "start" as const };
+  })();
   const fallbackBoundaryEnabled = query.data
     ? query.data.bootstrap.fallback.enabled &&
       query.data.bootstrap.fallback.participantCount >= 2
@@ -840,13 +872,28 @@ export function MenuPopover() {
 
         {!databaseBlocked &&
         query.data &&
-        query.data.bootstrap.routes.length > 0 ? (
+        query.data.bootstrap.routes.length > 0 &&
+        visibleRoutes.length === 0 ? (
+          <section className="menu-empty" aria-labelledby="hidden-routes-title">
+            <Circle aria-hidden="true" size={20} />
+            <h2 id="hidden-routes-title">没有显示在菜单中的路由</h2>
+            <p>可在路由设置中重新显示路由。</p>
+            <button className="primary-button" type="button" onClick={() => void showSettingsWindow("routes")}>
+              <Settings aria-hidden="true" size={16} />
+              打开路由设置
+            </button>
+          </section>
+        ) : null}
+
+        {!databaseBlocked &&
+        query.data &&
+        query.data.bootstrap.routes.length > 0 && visibleRoutes.length > 0 ? (
           <AppScrollArea
             className="menu-routes"
             viewportClassName="menu-routes-viewport"
             viewportProps={{ role: "listbox", "aria-label": "路由" }}
           >
-            {query.data.bootstrap.routes.map((route, index) => {
+            {visibleRoutes.map((route) => {
               const active =
                 route.routeId === query.data.bootstrap.activeRouteId;
               const balance = balances.get(route.routeId);
@@ -856,11 +903,9 @@ export function MenuPopover() {
                 balance?.status === "refreshing";
               const balanceMeta = balanceMetaLabel(balance);
               const fallbackBoundaryEdge =
-                fallbackBoundaryIndex === 0 && index === 0
-                  ? "start"
-                  : fallbackBoundaryIndex === index + 1
-                    ? "end"
-                    : null;
+                fallbackBoundaryOwner?.routeId === route.routeId
+                  ? fallbackBoundaryOwner.edge
+                  : null;
               return (
                 <div
                   className={`menu-route-row${active ? " menu-route-row-active" : ""}${fallbackBoundaryEdge ? ` menu-route-row-fallback-boundary-${fallbackBoundaryEdge}` : ""}`}

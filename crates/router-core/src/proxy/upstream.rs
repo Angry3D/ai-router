@@ -40,8 +40,7 @@ use super::{
 };
 use crate::{
     domain::{
-        CompletionState, DeliveryState, InferenceFailureReason, InferenceOutcome,
-        ServiceTierPolicy, UpstreamAttemptId,
+        CompletionState, DeliveryState, InferenceFailureReason, InferenceOutcome, UpstreamAttemptId,
     },
     storage::{
         AttemptHistoryRecord, AttemptRole, AttemptRoutingTransition,
@@ -2189,13 +2188,10 @@ impl RequestHistoryContext {
                 .service_tier
                 .clone()
                 .map(|value| bounded_string(value, 64)),
-            forwarded_service_tier: match request.route.service_tier_policy {
-                ServiceTierPolicy::Passthrough => request
-                    .service_tier
-                    .clone()
-                    .map(|value| bounded_string(value, 64)),
-                ServiceTierPolicy::Omit => None,
-            },
+            forwarded_service_tier: request
+                .service_tier
+                .clone()
+                .map(|value| bounded_string(value, 64)),
             streaming: request.stream,
             turn_id: request.turn_id.clone(),
             started_at_ms: request.started_at_ms,
@@ -2520,13 +2516,7 @@ impl NonStreamingErrorProjection {
 }
 
 fn upstream_request_body(request: &ValidatedProxyRequest) -> Bytes {
-    match request.route.service_tier_policy {
-        ServiceTierPolicy::Passthrough => request.body.clone(),
-        ServiceTierPolicy::Omit => request
-            .body_without_service_tier
-            .clone()
-            .unwrap_or_else(|| request.body.clone()),
-    }
+    request.body.clone()
 }
 
 fn build_upstream_headers(request: &ValidatedProxyRequest) -> Result<HeaderMap, ()> {
@@ -3175,7 +3165,6 @@ mod tests {
             name: "Primary".to_owned(),
             base_url: BaseUrl::parse(base_url).expect("base URL"),
             api_key: Arc::new(ApiKey::parse("upstream-secret").expect("API key")),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
             fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
         });
         ValidatedProxyRequest {
@@ -3186,7 +3175,6 @@ mod tests {
             activity_reporter: None,
             request_declares_local_shell: false,
             body: Bytes::from_static(br#"{"model":"gpt-test","reasoning":{"effort":"high"}}"#),
-            body_without_service_tier: None,
             model: "gpt-test".to_owned(),
             reasoning_effort: Some("high".to_owned()),
             service_tier: None,
@@ -3195,6 +3183,7 @@ mod tests {
             routing: Arc::new(RoutingSnapshot {
                 active: Some(Arc::clone(&route)),
                 participants: vec![route],
+                configured_participant_count: 1,
                 enabled: false,
                 selection_generation: 0,
                 health_generation: 0,
@@ -3290,7 +3279,6 @@ mod tests {
             name: name.to_owned(),
             base_url: BaseUrl::parse(base_url).expect("base URL"),
             api_key: Arc::new(ApiKey::parse(&format!("{name}-key")).expect("API key")),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
             fallback_excluded_models: Arc::new(
                 excluded_models
                     .iter()
@@ -3362,6 +3350,8 @@ mod tests {
         );
         let routing = RoutingSnapshotStore::new(RoutingSnapshot {
             active: Some(Arc::clone(&active)),
+            configured_participant_count: u32::try_from(participants.len())
+                .expect("test participant count"),
             participants,
             enabled: true,
             selection_generation: 7,
@@ -3487,6 +3477,7 @@ mod tests {
             let snapshot = Arc::new(RoutingSnapshot {
                 active: Some(Arc::clone(&request.target_route)),
                 participants: current.participants.clone(),
+                configured_participant_count: current.configured_participant_count,
                 enabled: true,
                 selection_generation: current.selection_generation.saturating_add(1),
                 health_generation: current.health_generation.saturating_add(1),
@@ -5172,6 +5163,7 @@ mod tests {
         routing.store(Arc::new(RoutingSnapshot {
             active: Some(Arc::clone(&b)),
             participants: current.participants.clone(),
+            configured_participant_count: current.configured_participant_count,
             enabled: true,
             selection_generation: 8,
             health_generation: 8,
@@ -5611,7 +5603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mixed_policy_fallback_selects_body_and_forwarded_tier_per_attempt() {
+    async fn fallback_forwards_identical_body_and_tier_per_attempt() {
         let a_state = mock_upstream(
             StatusCode::INTERNAL_SERVER_ERROR,
             br#"{"error":{"code":"server_error"}}"#.as_slice(),
@@ -5624,25 +5616,13 @@ mod tests {
         );
         let b_bodies = Arc::clone(&b_state.request_bodies);
         let b_server = start_mock_upstream(b_state).await;
-        let mut a = route_snapshot("A", &format!("http://{}/v1", a_server.address()));
-        Arc::get_mut(&mut a)
-            .expect("unshared A route")
-            .service_tier_policy = ServiceTierPolicy::Omit;
+        let a = route_snapshot("A", &format!("http://{}/v1", a_server.address()));
         let b = route_snapshot("B", &format!("http://{}/v1", b_server.address()));
         let (mut request, routing) = fallback_request(false, vec![a, b]);
         let original = Bytes::from_static(
             br#"{ "model":"gpt-test", "service_tier":"priority", "nested":{"service_tier":"keep"}, "values":[true,null,7] }"#,
         );
-        let mut omitted_value: serde_json::Value =
-            serde_json::from_slice(&original).expect("request JSON");
-        omitted_value
-            .as_object_mut()
-            .expect("request object")
-            .remove("service_tier");
         request.body = original.clone();
-        request.body_without_service_tier = Some(Bytes::from(
-            serde_json::to_vec(&omitted_value).expect("omitted request JSON"),
-        ));
         request.service_tier = Some("priority".to_owned());
         let history = Arc::new(HistoryCapture::default());
         let activator = Arc::new(InMemoryFallbackActivator::new(routing.clone()));
@@ -5660,12 +5640,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         {
             let a_bodies = a_bodies.lock().expect("A bodies");
-            assert_eq!(a_bodies.len(), 1);
-            let value: serde_json::Value =
-                serde_json::from_slice(&a_bodies[0]).expect("A request JSON");
-            assert!(value.get("service_tier").is_none());
-            assert_eq!(value["nested"]["service_tier"], "keep");
-            assert_eq!(value["values"], serde_json::json!([true, null, 7]));
+            assert_eq!(a_bodies.as_slice(), std::slice::from_ref(&original));
         }
         {
             let b_bodies = b_bodies.lock().expect("B bodies");
@@ -5679,11 +5654,9 @@ mod tests {
                     .iter()
                     .all(|record| { record.requested_service_tier.as_deref() == Some("priority") })
             );
-            assert!(
-                records[..1]
-                    .iter()
-                    .all(|record| { record.attempts[0].forwarded_service_tier.is_none() })
-            );
+            assert!(records[..1].iter().all(|record| {
+                record.attempts[0].forwarded_service_tier.as_deref() == Some("priority")
+            }));
             assert_eq!(
                 records[1].attempts[0].forwarded_service_tier.as_deref(),
                 Some("priority")
@@ -5820,6 +5793,7 @@ mod tests {
         let routing = RoutingSnapshotStore::new(RoutingSnapshot {
             active: Some(Arc::clone(&outside)),
             participants: vec![a, b],
+            configured_participant_count: 2,
             enabled: true,
             selection_generation: 7,
             health_generation: 7,
@@ -6547,6 +6521,7 @@ mod tests {
         routing.store(Arc::new(RoutingSnapshot {
             active: current.active.clone(),
             participants: current.participants.clone(),
+            configured_participant_count: current.configured_participant_count,
             enabled: false,
             selection_generation: current.selection_generation,
             health_generation: current.health_generation.saturating_add(1),

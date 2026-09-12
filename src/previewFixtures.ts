@@ -478,7 +478,7 @@ export const previewRouteEdits: RouteEditDto[] = routes.map((route, index) => ({
       ? "https://ai.input.im/v1/responses"
       : "https://codex.ciii.club/v1/responses",
   apiKey: "preview-key-not-real",
-  serviceTierPolicy: index === 1 ? "omit" : "passthrough",
+  menuVisible: true,
   balanceQuery: {
     mode: "general_v1",
     enabled: true,

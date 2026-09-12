@@ -1270,7 +1270,7 @@ mod tests {
     use super::download::test_support::{AssetFixture, AssetReply};
     use super::*;
     use crate::{
-        domain::{ApiKey, BaseUrl, RouteId, ServiceTierPolicy},
+        domain::{ApiKey, BaseUrl, RouteId},
         proxy::{ProxyServerHandle, RouteSnapshot, RoutingSnapshot},
     };
 
@@ -1933,7 +1933,6 @@ mod tests {
             name: "Image route".to_owned(),
             base_url: BaseUrl::parse(base_url).expect("base URL"),
             api_key: Arc::new(ApiKey::parse(key).expect("API key")),
-            service_tier_policy: ServiceTierPolicy::Passthrough,
             fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
         })
     }
@@ -1957,6 +1956,7 @@ mod tests {
         RoutingSnapshotStore::new(RoutingSnapshot {
             active: None,
             participants: Vec::new(),
+            configured_participant_count: 0,
             enabled: false,
             selection_generation: 0,
             health_generation: 0,
@@ -2072,6 +2072,7 @@ mod tests {
         let store = RoutingSnapshotStore::new(RoutingSnapshot {
             active: Some(active.clone()),
             participants: vec![active],
+            configured_participant_count: 1,
             enabled: true,
             selection_generation: 9,
             health_generation: 0,
@@ -2146,6 +2147,7 @@ mod tests {
         store.store(Arc::new(RoutingSnapshot {
             active: current.active.clone(),
             participants: current.participants.clone(),
+            configured_participant_count: current.configured_participant_count,
             enabled: current.enabled,
             selection_generation: current.selection_generation,
             health_generation: current.health_generation,

@@ -634,6 +634,7 @@ describe("P8 menu interactions", () => {
     "sets Fallback from %s to %s and renders the refetched value",
     async (enabled, nextEnabled, initialName, refreshedName) => {
       const initial = menuSnapshot();
+      populateRoutes(initial, 3);
       initial.bootstrap.fallback = {
         enabled,
         participantCount: 3,
@@ -642,6 +643,7 @@ describe("P8 menu interactions", () => {
         hasNext: enabled,
       };
       const refreshed = menuSnapshot();
+      populateRoutes(refreshed, 3);
       refreshed.bootstrap.fallback = {
         enabled: nextEnabled,
         participantCount: 3,
@@ -669,6 +671,7 @@ describe("P8 menu interactions", () => {
 
   it("disables a pending Fallback mutation and prevents duplicate writes", async () => {
     const initial = menuSnapshot();
+    populateRoutes(initial, 3);
     initial.bootstrap.fallback = {
       enabled: false,
       participantCount: 3,
@@ -677,6 +680,7 @@ describe("P8 menu interactions", () => {
       hasNext: false,
     };
     const refreshed = menuSnapshot();
+    populateRoutes(refreshed, 3);
     refreshed.bootstrap.fallback = {
       enabled: true,
       participantCount: 3,
@@ -713,6 +717,7 @@ describe("P8 menu interactions", () => {
 
   it("restores confirmed Fallback presentation after a failed mutation", async () => {
     const snapshot = menuSnapshot();
+    populateRoutes(snapshot, 3);
     snapshot.bootstrap.fallback = {
       enabled: false,
       participantCount: 3,
@@ -774,6 +779,7 @@ describe("P8 menu interactions", () => {
 
   it("shows the backend-owned Fallback non-participant and no-next warning", () => {
     const snapshot = menuSnapshot();
+    populateRoutes(snapshot, 3);
     snapshot.bootstrap.fallback = {
       enabled: true,
       participantCount: 3,
@@ -842,6 +848,52 @@ describe("P8 menu interactions", () => {
 
     expect(screen.getByRole("heading", { name: "还没有路由" })).toBeVisible();
     expect(container.querySelector(".menu-fallback-boundary")).toBeNull();
+  });
+
+  it("distinguishes an all-hidden route list and opens route settings", () => {
+    const snapshot = menuSnapshot();
+    populateRoutes(snapshot, 3);
+    snapshot.bootstrap.activeRouteId = null;
+    snapshot.bootstrap.routes = snapshot.bootstrap.routes.map((route) => ({
+      ...route,
+      menuVisible: false,
+    }));
+    renderMenu(snapshot);
+
+    expect(
+      screen.getByRole("heading", { name: "没有显示在菜单中的路由" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "还没有路由" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "打开路由设置" }));
+    expect(ipc.showSettingsWindow).toHaveBeenCalledWith("routes");
+  });
+
+  it("keeps the configured boundary when a hidden prefix route owns its edge", () => {
+    const snapshot = menuSnapshot();
+    const routes = populateRoutes(snapshot, 3);
+    routes[1].menuVisible = false;
+    snapshot.bootstrap.fallback = {
+      enabled: false,
+      participantCount: 2,
+      configRevision: 2,
+      activePosition: 1,
+      hasNext: false,
+    };
+    const { container } = renderMenu(snapshot);
+
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(2);
+    const boundary = container.querySelector(".menu-fallback-boundary");
+    expect(boundary).toHaveClass("menu-fallback-boundary-end");
+    expect(boundary?.closest('[role="option"]')).toBe(options[0]);
+    expect(
+      screen.getByRole("button", {
+        name: "Fallback 不可用，至少需 2 条路由",
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
   });
 
   it.each([

@@ -9,7 +9,7 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createRouterQueryClient, queryKeys } from "../../api/query";
-import type { ServiceTierPolicy, SettingsSnapshotDto } from "../../generated";
+import type { RouteId, SettingsSnapshotDto } from "../../generated";
 import {
   previewMenuSnapshot,
   previewRouteEdits,
@@ -120,7 +120,6 @@ async function renderSettings(
     scriptEnabled?: boolean;
     proxyStatus?: "running" | "port_conflict" | "database_error";
     routeName?: string;
-    serviceTierPolicy?: ServiceTierPolicy;
     settings?: Partial<SettingsSnapshotDto>;
   } = {},
 ) {
@@ -133,7 +132,6 @@ async function renderSettings(
     return {
       ...structuredClone(edit),
       name: options.routeName ?? edit.name,
-      serviceTierPolicy: options.serviceTierPolicy ?? edit.serviceTierPolicy,
       balanceQuery: edit.balanceQuery
         ? {
             ...structuredClone(edit.balanceQuery),
@@ -168,7 +166,10 @@ async function renderSettings(
   };
 }
 
-async function renderRouteEditor(newRoute: boolean) {
+async function renderRouteEditor(
+  newRoute: boolean,
+  activeRouteId: RouteId | null = previewRouteEdits[0].routeId,
+) {
   const client = createRouterQueryClient();
   const routeId = newRoute ? null : previewRouteEdits[0].routeId;
   if (routeId !== null) {
@@ -179,7 +180,7 @@ async function renderRouteEditor(newRoute: boolean) {
       <RouteEditor
         routeId={routeId}
         newRoute={newRoute}
-        activeRouteId={previewRouteEdits[0].routeId}
+        activeRouteId={activeRouteId}
         riskConfirmed={false}
         externalBusy={false}
         onDirtyChange={vi.fn()}
@@ -332,7 +333,7 @@ beforeEach(() => {
 });
 
 describe("RouteEditor interactions", () => {
-  it("marks only the three base route fields as required in edit and new states", async () => {
+  it("marks base route fields and custom model IDs as required", async () => {
     const rendered = await renderRouteEditor(false);
 
     expect(screen.getByLabelText("路由名称")).toHaveAttribute(
@@ -354,7 +355,7 @@ describe("RouteEditor interactions", () => {
       expect(marker).toHaveAttribute("aria-hidden", "true");
     }
     expect(document.querySelectorAll(".settings-required-marker")).toHaveLength(
-      3,
+      4,
     );
     fireEvent.click(screen.getByRole("radio", { name: "自定义脚本" }));
     expect(screen.getByLabelText("JavaScript 表达式")).not.toHaveAttribute(
@@ -413,39 +414,27 @@ describe("RouteEditor interactions", () => {
     expect(screen.getByLabelText("路由名称")).toHaveValue(legacyName);
   });
 
-  it("hydrates and saves the explicit Service Tier policy through native radios", async () => {
+  it("keeps the active route visible and disables its menu switch", async () => {
     await renderSettings();
-    const group = screen.getByRole("radiogroup", { name: "Service Tier" });
-    const passthrough = within(group).getByRole("radio", {
-      name: "跟随 Codex",
+    const visibility = screen.getByRole("switch", {
+      name: "在顶部菜单中显示",
     });
-    const omit = within(group).getByRole("radio", { name: "移除参数" });
-    const save = screen.getByRole("button", { name: "保存" });
 
-    expect(passthrough).toBeChecked();
-    expect(omit).not.toBeChecked();
-    expect(save).toBeDisabled();
-
-    fireEvent.click(omit);
-    expect(omit).toBeChecked();
-    expect(save).toBeEnabled();
-    fireEvent.click(save);
-
-    await waitFor(() =>
-      expect(ipc.saveRoute).toHaveBeenCalledWith(
-        expect.objectContaining({ serviceTierPolicy: "omit" }),
-      ),
-    );
+    expect(visibility).toBeChecked();
+    expect(visibility).toBeDisabled();
+    expect(screen.queryByRole("radiogroup", { name: "Service Tier" })).not.toBeInTheDocument();
   });
 
-  it("defaults new routes to passthrough and hydrates an unchanged omit route", async () => {
-    await renderSettings({ serviceTierPolicy: "omit" });
-    expect(screen.getByRole("radio", { name: "移除参数" })).toBeChecked();
-    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
-
-    fireEvent.click(screen.getByRole("button", { name: "新建路由" }));
-    expect(screen.getByRole("radio", { name: "跟随 Codex" })).toBeChecked();
-    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  it("defaults new routes to visible and exposes the fallback tooltip", async () => {
+    await renderRouteEditor(true, null);
+    const visibility = screen.getByRole("switch", {
+      name: "在顶部菜单中显示",
+    });
+    expect(visibility).toBeChecked();
+    expect(visibility).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "说明菜单显示与自动 Fallback 资格" }),
+    ).toBeVisible();
   });
 
   it("removes the Images API capability without leaving a route field", async () => {
@@ -458,26 +447,27 @@ describe("RouteEditor interactions", () => {
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
   });
 
-  it("keeps a failed Service Tier draft dirty and participates in discard", async () => {
+  it("keeps a failed visibility draft dirty and submits the visibility", async () => {
     ipc.saveRoute.mockRejectedValueOnce(new Error("injected"));
-    await renderSettings();
-    const omit = screen.getByRole("radio", { name: "移除参数" });
+    await renderRouteEditor(true);
+    const visibility = screen.getByRole("switch", { name: "在顶部菜单中显示" });
     const save = screen.getByRole("button", { name: "保存" });
 
-    fireEvent.click(omit);
+    fireEvent.change(screen.getByLabelText("路由名称"), { target: { value: "New" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://example.com/v1" } });
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "test-key" } });
+    fireEvent.click(visibility);
     fireEvent.click(save);
 
     expect(await screen.findByText("测试失败")).toHaveAttribute(
       "role",
       "alert",
     );
-    expect(omit).toBeChecked();
+    expect(ipc.saveRoute).toHaveBeenCalledWith(
+      expect.objectContaining({ menuVisible: false }),
+    );
+    expect(visibility).not.toBeChecked();
     expect(save).toBeEnabled();
-
-    fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
-    expect(
-      screen.getByRole("alertdialog", { name: "放弃未保存的修改？" }),
-    ).toBeInTheDocument();
   });
 
   it("cancels first script-risk confirmation without invoking a save", async () => {
@@ -576,7 +566,7 @@ describe("RouteEditor interactions", () => {
     );
     expect(screen.getByLabelText("上下文窗口（Token） 2")).toHaveAttribute(
       "placeholder",
-      "128000",
+      "256000",
     );
     fireEvent.click(screen.getByRole("button", { name: /^Codex/ }));
     expect(

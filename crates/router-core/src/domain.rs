@@ -23,7 +23,7 @@ pub const MAX_IMAGES_GENERATION_TIMEOUT_SECS: u16 = 3_600;
 pub const MIN_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 128;
 pub const DEFAULT_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 1_024;
 pub const MAX_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 102_400;
-pub const DEFAULT_CODEX_MODEL_CONTEXT_WINDOW: u64 = 128_000;
+pub const DEFAULT_CODEX_MODEL_CONTEXT_WINDOW: u64 = 256_000;
 pub const MAX_CODEX_MODEL_CONTEXT_WINDOW: u64 = 9_007_199_254_740_991;
 
 macro_rules! string_id {
@@ -72,15 +72,6 @@ pub enum RouteMoveDirection {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
-pub enum ServiceTierPolicy {
-    #[default]
-    Passthrough,
-    Omit,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(rename_all = "snake_case")]
 pub enum AppearancePreference {
     #[default]
     System,
@@ -111,32 +102,6 @@ impl AppearancePreference {
             _ => Err(ValidationError::new(
                 "appearance_preference_invalid",
                 "appearancePreference",
-            )),
-        }
-    }
-}
-
-impl ServiceTierPolicy {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Passthrough => "passthrough",
-            Self::Omit => "omit",
-        }
-    }
-
-    /// Parses a persisted policy without silently substituting a default.
-    ///
-    /// # Errors
-    ///
-    /// Returns a field-specific validation error for an unknown value.
-    pub fn parse_persisted(value: &str) -> Result<Self, ValidationError> {
-        match value {
-            "passthrough" => Ok(Self::Passthrough),
-            "omit" => Ok(Self::Omit),
-            _ => Err(ValidationError::new(
-                "service_tier_policy_invalid",
-                "serviceTierPolicy",
             )),
         }
     }
@@ -744,7 +709,7 @@ mod tests {
     use super::{
         ApiKey, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
         ImagesGenerationTimeout, MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW,
-        McpImageCapacityWarningThreshold, RouteName, ServiceTierPolicy,
+        McpImageCapacityWarningThreshold, RouteName,
     };
 
     #[derive(Deserialize)]
@@ -856,23 +821,6 @@ mod tests {
         assert_eq!(key.expose(), b"secret");
         assert!(ApiKey::parse("secret\nvalue").is_err());
         assert!(BalanceScriptSource::parse(&"x".repeat(256 * 1024 + 1)).is_err());
-    }
-
-    #[test]
-    fn service_tier_policy_parsing_is_closed_and_defaults_to_passthrough() {
-        assert_eq!(ServiceTierPolicy::default(), ServiceTierPolicy::Passthrough);
-        assert_eq!(
-            ServiceTierPolicy::parse_persisted("passthrough"),
-            Ok(ServiceTierPolicy::Passthrough)
-        );
-        assert_eq!(
-            ServiceTierPolicy::parse_persisted("omit"),
-            Ok(ServiceTierPolicy::Omit)
-        );
-        let error =
-            ServiceTierPolicy::parse_persisted("default").expect_err("unknown persisted policy");
-        assert_eq!(error.code, "service_tier_policy_invalid");
-        assert_eq!(error.field, "serviceTierPolicy");
     }
 
     #[test]

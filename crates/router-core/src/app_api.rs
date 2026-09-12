@@ -5,10 +5,7 @@ use crate::storage::CodexModelRecord;
 use crate::{
     balance::{BalanceDisplaySnapshot, BalanceQueryMode, BalanceRefreshBatchState},
     codex_config::CodexConfigStatus,
-    domain::{
-        BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, ServiceTierPolicy,
-        ValidationError,
-    },
+    domain::{BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, ValidationError},
     recovery::{DatabaseStartupIssue, RecoveryHealth, RecoveryHealthKind},
     state::{BootstrapSnapshotDto, FallbackStateDto, RouteSummaryDto},
     storage::{
@@ -19,6 +16,10 @@ use crate::{
         UsageStatisticsGranularity, UsageStatisticsQuery, UsageStatisticsTokens,
     },
 };
+
+const fn default_menu_visible() -> bool {
+    true
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -653,7 +654,7 @@ fn usage_cost(
         .and_then(crate::pricing::catalog_service_tier)
         .map(str::to_owned);
     let fast_status = match service_tier.as_deref() {
-        Some("priority") if actual_service_tier == Some("priority") => {
+        Some("priority") if matches!(actual_service_tier, Some("priority" | "fast")) => {
             Some(UsageFastStatusDto::Confirmed)
         }
         Some("priority") => Some(UsageFastStatusDto::Unconfirmed),
@@ -698,7 +699,8 @@ pub struct RouteEditDto {
     pub base_url: String,
     pub inference_url: String,
     pub api_key: String,
-    pub service_tier_policy: ServiceTierPolicy,
+    #[serde(default = "default_menu_visible")]
+    pub menu_visible: bool,
     pub balance_query: Option<BalanceQueryEditDto>,
     pub fallback_excluded_models: Vec<String>,
     pub models: Vec<CodexModelDto>,
@@ -712,7 +714,8 @@ pub struct RouteSaveInputDto {
     pub name: String,
     pub base_url: String,
     pub api_key: String,
-    pub service_tier_policy: ServiceTierPolicy,
+    #[serde(default = "default_menu_visible")]
+    pub menu_visible: bool,
     pub balance_query: Option<BalanceQueryEditDto>,
     pub accept_script_risk: bool,
     pub fallback_excluded_models: Vec<String>,
@@ -1134,14 +1137,14 @@ mod tests {
 
     use super::{
         BalanceQuerySettingsDto, UsageFastStatusDto, UsageHistoryQueryDto, UsageHistoryRowDto,
-        UsageStatisticsDto,
+        UsageRequestDetailDto, UsageStatisticsDto,
     };
     use crate::{
         domain::{BalanceQueryPolicy, CompletionState},
         pricing::{CATALOG_VERSION, CostStatus, PRIORITY_CATALOG_VERSION},
         storage::{
-            UsageHistoryRow, UsageStatistics, UsageStatisticsAttribution, UsageStatisticsBucket,
-            UsageStatisticsGranularity, UsageStatisticsTokens,
+            UsageHistoryRow, UsageRequestDetail, UsageStatistics, UsageStatisticsAttribution,
+            UsageStatisticsBucket, UsageStatisticsGranularity, UsageStatisticsTokens,
         },
     };
 
@@ -1255,6 +1258,25 @@ mod tests {
         assert_eq!(priority.cost.service_tier.as_deref(), Some("priority"));
         assert_eq!(
             priority.cost.fast_status,
+            Some(UsageFastStatusDto::Confirmed)
+        );
+
+        let fast = UsageRequestDetailDto::from(UsageRequestDetail {
+            request: row(
+                Some(60_014),
+                Some(59_136),
+                Some(PRIORITY_CATALOG_VERSION),
+                Some("fast"),
+            ),
+            requested_service_tier: Some("fast".to_owned()),
+            actual_service_tier: Some("fast".to_owned()),
+            cached_input_tokens: Some(59_136),
+            cache_write_input_tokens: None,
+            attempts: Vec::new(),
+        });
+        assert_eq!(fast.actual_service_tier.as_deref(), Some("fast"));
+        assert_eq!(
+            fast.request.cost.fast_status,
             Some(UsageFastStatusDto::Confirmed)
         );
 
