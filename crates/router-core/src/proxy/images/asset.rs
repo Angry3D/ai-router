@@ -10,7 +10,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use axum::body::Bytes;
 use base64::{
     Engine as _, alphabet,
     engine::{DecodePaddingMode, GeneralPurposeConfig, general_purpose::GeneralPurpose},
@@ -19,6 +18,8 @@ use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::proxy::upstream::EXACT_CONTENT_DECODER_WINDOW_BYTES;
 
 pub(super) const MCP_JSON_RESPONSE_LIMIT: usize = 65 * 1024 * 1024;
 pub(super) const MAX_BASE64_BYTES: usize = 64 * 1024 * 1024;
@@ -176,7 +177,10 @@ impl McpImageAssetManager {
 pub(super) enum ImageAssetErrorKind {
     StorageUnavailable,
     InvalidResponse,
+    MissingResult,
     InvalidBase64,
+    InvalidUrl,
+    DownloadFailed,
     InvalidPng,
     TooLarge,
     WriteFailed,
@@ -187,7 +191,10 @@ impl ImageAssetErrorKind {
         match self {
             Self::StorageUnavailable => "image_asset_storage_unavailable",
             Self::InvalidResponse => "images_response_invalid",
+            Self::MissingResult => "image_result_missing",
             Self::InvalidBase64 => "image_result_invalid_base64",
+            Self::InvalidUrl => "image_result_invalid_url",
+            Self::DownloadFailed => "image_asset_download_failed",
             Self::InvalidPng => "image_result_invalid_png",
             Self::TooLarge => "image_result_too_large",
             Self::WriteFailed => "image_asset_write_failed",
@@ -198,7 +205,10 @@ impl ImageAssetErrorKind {
         match self {
             Self::StorageUnavailable => "Image asset storage is unavailable.",
             Self::InvalidResponse => "The image generation response is invalid.",
+            Self::MissingResult => "The image generation response contains no image result.",
             Self::InvalidBase64 => "The generated image Base64 is invalid.",
+            Self::InvalidUrl => "The generated image URL is not allowed.",
+            Self::DownloadFailed => "The generated image could not be downloaded.",
             Self::InvalidPng => "The generated image is not a valid PNG.",
             Self::TooLarge => "The generated image exceeds local limits.",
             Self::WriteFailed => "The generated image could not be saved.",
@@ -578,22 +588,24 @@ fn stat_is_managed_single_link_file(stat: &rustix::fs::Stat) -> bool {
     stat_is_private_regular_file(stat) && stat.st_nlink == 1
 }
 
-pub(super) fn process_image_response(
-    body: Bytes,
+pub(super) fn process_png(
+    png: &[u8],
     root: &AdmittedAssetRoot,
     fault: PublicationFault,
 ) -> Result<ImageAssetResult, ImageAssetErrorKind> {
     debug_assert!(lifecycle_budget_is_valid());
-    let encoded = take_base64(body)?;
-    let png = decode_base64(encoded)?;
-    let (width, height) = validate_png(&png)?;
-    publish_png(root, &png, width, height, Uuid::new_v4(), fault)
+    if png.len() > MAX_COMPRESSED_PNG_BYTES {
+        return Err(ImageAssetErrorKind::TooLarge);
+    }
+    let (width, height) = validate_png(png)?;
+    publish_png(root, png, width, height, Uuid::new_v4(), fault)
 }
 
 fn lifecycle_budget_is_valid() -> bool {
     [
-        MCP_JSON_RESPONSE_LIMIT * 2,
+        MCP_JSON_RESPONSE_LIMIT * 2 + EXACT_CONTENT_DECODER_WINDOW_BYTES,
         MAX_BASE64_BYTES + MAX_COMPRESSED_PNG_BYTES,
+        MAX_COMPRESSED_PNG_BYTES * 2 + EXACT_CONTENT_DECODER_WINDOW_BYTES,
         MAX_COMPRESSED_PNG_BYTES + PNG_DECODER_INTERNAL_LIMIT + MAX_DECODED_FRAME_BYTES,
         MAX_COMPRESSED_PNG_BYTES + READ_BACK_CHUNK_BYTES,
     ]
@@ -601,31 +613,13 @@ fn lifecycle_budget_is_valid() -> bool {
     .all(|phase| phase <= MCP_SINGLE_CALL_PEAK_BYTES)
 }
 
-fn take_base64(body: Bytes) -> Result<String, ImageAssetErrorKind> {
-    let parsed = serde_json::from_slice::<serde_json::Value>(&body)
-        .map_err(|_| ImageAssetErrorKind::InvalidResponse);
-    drop(body);
-    let encoded = parsed?
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|items| {
-            items.iter().find_map(|item| {
-                item.get("b64_json")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-        })
-        .ok_or(ImageAssetErrorKind::InvalidBase64)?;
+pub(super) fn decode_base64(encoded: String) -> Result<Vec<u8>, ImageAssetErrorKind> {
     if encoded.is_empty() {
         return Err(ImageAssetErrorKind::InvalidBase64);
     }
     if encoded.len() > MAX_BASE64_BYTES {
         return Err(ImageAssetErrorKind::TooLarge);
     }
-    Ok(encoded)
-}
-
-fn decode_base64(encoded: String) -> Result<Vec<u8>, ImageAssetErrorKind> {
     let decoded = STRICT_STANDARD
         .decode(encoded.as_bytes())
         .map_err(|_| ImageAssetErrorKind::InvalidBase64);

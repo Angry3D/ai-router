@@ -280,6 +280,8 @@ pub struct ProxyIngressState {
     decoded_limit: usize,
     images: ImagesGenerationService,
     mcp_image_assets: Option<McpImageAssetManager>,
+    #[cfg(test)]
+    image_asset_downloader: images::download::ImageAssetDownloader,
     image_asset_change_sink: Arc<dyn ImageAssetChangeSink>,
 }
 
@@ -298,6 +300,8 @@ impl ProxyIngressState {
             wire_limit: MAX_REQUEST_WIRE_BYTES,
             decoded_limit: MAX_REQUEST_DECODED_BYTES,
             mcp_image_assets: None,
+            #[cfg(test)]
+            image_asset_downloader: images::download::ImageAssetDownloader::default(),
             image_asset_change_sink: Arc::new(NoopImageAssetChangeSink),
         }
     }
@@ -369,6 +373,15 @@ impl ProxyIngressState {
         self.decoded_limit = decoded_limit;
         self
     }
+
+    #[cfg(test)]
+    fn with_image_asset_downloader(
+        mut self,
+        downloader: images::download::ImageAssetDownloader,
+    ) -> Self {
+        self.image_asset_downloader = downloader;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -392,13 +405,18 @@ pub fn build_proxy_router(state: ProxyIngressState) -> Router {
     let images = state.images.clone();
     let image_assets = state.mcp_image_assets.clone();
     let image_asset_change_sink = Arc::clone(&state.image_asset_change_sink);
+    #[cfg(test)]
+    let image_asset_downloader = state.image_asset_downloader.clone();
     let mcp_service = StreamableHttpService::new(
         move || {
-            Ok(images::ImageMcpServer::new(
+            let server = images::ImageMcpServer::new(
                 images.clone(),
                 image_assets.clone(),
                 Arc::clone(&image_asset_change_sink),
-            ))
+            );
+            #[cfg(test)]
+            let server = server.with_asset_downloader(image_asset_downloader.clone());
+            Ok(server)
         },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
@@ -1498,6 +1516,231 @@ mod tests {
             .filter(|data| !data.is_empty())
             .find_map(|data| serde_json::from_str(data).ok())
             .expect("MCP SSE JSON data")
+    }
+
+    async fn image_test_ingress(
+        upstream_body: Bytes,
+        asset_root: PathBuf,
+        downloader: images::download::ImageAssetDownloader,
+    ) -> (ProxyIngressState, ProxyServerHandle, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = calls.clone();
+        let server = ProxyServerHandle::start(
+            0,
+            Router::new().route(
+                "/openai/v1/images/generations",
+                post(move || {
+                    let body = upstream_body.clone();
+                    let calls = handler_calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            body,
+                        )
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("image generation fixture");
+        let image_route = Arc::new(RouteSnapshot {
+            route_id: RouteId::new(),
+            name: "Image fixture".to_owned(),
+            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", server.address()))
+                .expect("image base URL"),
+            api_key: Arc::new(ApiKey::parse("image-route-key").expect("image key")),
+            service_tier_policy: ServiceTierPolicy::Passthrough,
+            fallback_excluded_models: Arc::new(HashSet::new()),
+        });
+        let routing = RoutingSnapshotStore::new(RoutingSnapshot {
+            active: None,
+            participants: Vec::new(),
+            enabled: false,
+            selection_generation: 0,
+            health_generation: 0,
+            config_revision: 0,
+            images_generation_enabled: true,
+            images_route: Some(image_route),
+            images_generation_timeout: Duration::from_mins(10),
+        });
+        let state = ProxyIngressState::new(TOKEN, Arc::new(RecordingUpstream::default()))
+            .with_routing_store(routing)
+            .with_mcp_image_asset_root(asset_root)
+            .with_image_asset_downloader(downloader);
+        (state, server, calls)
+    }
+
+    async fn authenticated_image_tool_call(router: Router) -> serde_json::Value {
+        let request = |body: serde_json::Value, session: Option<&str>| {
+            let mut request = HttpRequest::builder()
+                .method(Method::POST)
+                .uri("/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::HOST, "127.0.0.1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream")
+                .header(header::COOKIE, "ASSET_COOKIE_SENTINEL")
+                .header(
+                    header::REFERER,
+                    "https://client.example/ASSET_REFERER_SENTINEL",
+                );
+            if let Some(session) = session {
+                request = request
+                    .header("mcp-session-id", session)
+                    .header("mcp-protocol-version", "2025-06-18");
+            }
+            request
+                .body(Body::from(body.to_string()))
+                .expect("MCP fixture request")
+        };
+        let initialized = router.clone().oneshot(request(serde_json::json!({
+            "jsonrpc":"2.0", "id":1, "method":"initialize",
+            "params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}
+        }), None)).await.expect("initialize response");
+        assert_eq!(initialized.status(), StatusCode::OK);
+        let session = initialized
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("session ID")
+            .to_owned();
+        let _ = mcp_sse_json(initialized).await;
+        let response = router.oneshot(request(serde_json::json!({
+            "jsonrpc":"2.0", "id":2, "method":"tools/call",
+            "params":{"name":"generate_image","arguments":{"prompt":"ASSET_PROMPT_SENTINEL"}}
+        }), Some(&session))).await.expect("tools/call response");
+        assert_eq!(response.status(), StatusCode::OK);
+        mcp_sse_json(response).await
+    }
+
+    #[tokio::test]
+    async fn images_http_url_payload_is_byte_preserving_without_asset_download() {
+        use images::download::test_support::{AssetFixture, AssetReply};
+        let fixture = AssetFixture::new(vec![AssetReply::ok(valid_png_fixture())]).await;
+        let body = Bytes::from(format!(
+            " \n{{\"data\":[{{\"url\":{}}}],\"extension\":\"HTTP_PASSTHROUGH_SENTINEL\"}}\n",
+            serde_json::to_string(&AssetFixture::url()).expect("URL string")
+        ));
+        let temporary = TempDir::new().expect("temporary app data");
+        let (state, upstream, calls) = image_test_ingress(
+            body.clone(),
+            temporary.path().join("mcp-images"),
+            fixture.downloader(),
+        )
+        .await;
+        let response = build_proxy_router(state)
+            .oneshot(authorized_request(
+                Method::POST,
+                "/v1/images/generations",
+                Body::from(r#"{"prompt":"synthetic image"}"#),
+            ))
+            .await
+            .expect("HTTP image response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 16 * 1024)
+                .await
+                .expect("response bytes"),
+            body
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.request_count(), 0);
+        upstream.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn images_mcp_url_success_and_download_error_keep_wire_contracts_and_privacy() {
+        use images::download::test_support::{AssetFixture, AssetReply};
+        let png = valid_png_fixture();
+        for success in [true, false] {
+            let reply = if success {
+                AssetReply::ok(png.clone())
+            } else {
+                AssetReply::status(StatusCode::FORBIDDEN, b"ASSET_RESPONSE_SENTINEL".to_vec())
+            };
+            let fixture = AssetFixture::new(vec![reply]).await;
+            let mut asset_url = url::Url::parse(&AssetFixture::url()).expect("fixture URL");
+            asset_url.set_query(Some("signature=ASSET_URL_SENTINEL"));
+            let body =
+                Bytes::from(serde_json::json!({"data":[{"url":asset_url.as_str()}]}).to_string());
+            let temporary = TempDir::new().expect("temporary app data");
+            let root = temporary.path().join("mcp-images");
+            let (state, upstream, calls) =
+                image_test_ingress(body, root.clone(), fixture.downloader()).await;
+            let history = Arc::new(RecordingHistory::default());
+            let diagnostics = Arc::new(RecordingDiagnostics::default());
+            let routing = state.routing.clone();
+            let before = routing.load();
+            let router =
+                build_proxy_router(state.with_runtime_sinks(history.clone(), diagnostics.clone()));
+            let frame = authenticated_image_tool_call(router).await;
+            if success {
+                let result = &frame["result"];
+                assert_eq!(result["content"].as_array().map(Vec::len), Some(1));
+                assert_eq!(result["content"][0]["type"], "text");
+                assert!(result.get("structuredContent").is_none());
+                let asset: serde_json::Value = serde_json::from_str(
+                    result["content"][0]["text"].as_str().expect("text result"),
+                )
+                .expect("asset JSON");
+                assert_eq!(asset.as_object().map(serde_json::Map::len), Some(8));
+                assert_eq!(asset["status"], "success");
+                assert_eq!(asset["mimeType"], "image/png");
+                assert_eq!(asset["bytes"], png.len());
+                assert_eq!(asset["sha256"], hex::encode(Sha256::digest(&png)));
+                assert_eq!(
+                    std::fs::read(asset["path"].as_str().expect("asset path"))
+                        .expect("published PNG"),
+                    png
+                );
+            } else {
+                let request_id = frame["error"]["data"]["requestId"]
+                    .as_str()
+                    .expect("request ID");
+                Uuid::parse_str(request_id).expect("local UUID");
+                assert_eq!(
+                    frame,
+                    serde_json::json!({
+                        "jsonrpc":"2.0", "id":2,
+                        "error":{"code":-32603,"message":"The generated image could not be downloaded.",
+                            "data":{"code":"image_asset_download_failed","requestId":request_id,"stage":"asset_download","upstreamStatus":403,"category":"unknown_upstream","retryable":false}}
+                    })
+                );
+                assert_eq!(std::fs::read_dir(root).expect("asset root").count(), 0);
+            }
+            let serialized = frame.to_string();
+            for sentinel in [
+                "ASSET_URL_SENTINEL",
+                "ASSET_RESPONSE_SENTINEL",
+                "ASSET_PROMPT_SENTINEL",
+                "ASSET_COOKIE_SENTINEL",
+                "ASSET_REFERER_SENTINEL",
+                "image-route-key",
+                TOKEN,
+            ] {
+                assert!(!serialized.contains(sentinel));
+            }
+            assert!(history.0.lock().expect("history").is_empty());
+            assert!(diagnostics.0.lock().expect("diagnostics").is_empty());
+            assert!(Arc::ptr_eq(&before, &routing.load()));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.request_count(), 1);
+            let requests = fixture.requests();
+            assert_eq!(requests[0].method, "GET");
+            assert!(requests[0].path.contains("signature=ASSET_URL_SENTINEL"));
+            for name in [
+                header::AUTHORIZATION,
+                header::PROXY_AUTHORIZATION,
+                header::COOKIE,
+                header::REFERER,
+                header::HeaderName::from_static("x-api-key"),
+            ] {
+                assert!(!requests[0].headers.contains_key(name));
+            }
+            upstream.shutdown().await;
+        }
     }
 
     #[tokio::test]

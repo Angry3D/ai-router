@@ -20,8 +20,10 @@ use uuid::Uuid;
 
 use self::asset::{
     AdmittedAssetRoot, ImageAssetErrorKind, MCP_JSON_RESPONSE_LIMIT, PublicationFault,
-    process_image_response,
+    decode_base64, process_png,
 };
+use self::download::{DownloadedImage, ImageAssetDownloader};
+use self::source::{ImageResultSource, take_image_source};
 
 use super::{
     RoutingSnapshotStore,
@@ -32,6 +34,8 @@ use super::{
 };
 
 mod asset;
+pub(super) mod download;
+mod source;
 
 pub use asset::{
     McpImageAssetCleanupResult, McpImageAssetMaintenanceError, McpImageAssetManager,
@@ -118,6 +122,7 @@ pub enum ImagesFailureStage {
     UpstreamHttpStatus,
     ResponseDecode,
     ResultValidation,
+    AssetDownload,
     AssetStorage,
 }
 
@@ -230,6 +235,7 @@ impl ImagesFailureStage {
             Self::UpstreamHttpStatus => "upstream_http_status",
             Self::ResponseDecode => "response_decode",
             Self::ResultValidation => "result_validation",
+            Self::AssetDownload => "asset_download",
             Self::AssetStorage => "asset_storage",
         }
     }
@@ -520,6 +526,7 @@ const fn images_failure_is_retryable(
         ImagesFailureStage::RequestConstruction
         | ImagesFailureStage::ResponseDecode
         | ImagesFailureStage::ResultValidation
+        | ImagesFailureStage::AssetDownload
         | ImagesFailureStage::AssetStorage => false,
         ImagesFailureStage::UpstreamHttpStatus => match category {
             ImagesUpstreamCategory::RateLimit => {
@@ -630,6 +637,8 @@ impl ImagesGenerationService {
             })?;
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .build()
             .map_err(|_| {
                 ImagesGenerationFailure::with_request_id(
@@ -819,8 +828,11 @@ enum WireCollectError {
 pub struct ImageMcpServer {
     service: ImagesGenerationService,
     asset_manager: Option<McpImageAssetManager>,
+    asset_downloader: ImageAssetDownloader,
     change_sink: Arc<dyn ImageAssetChangeSink>,
     publication_fault: PublicationFault,
+    #[cfg(test)]
+    source_parse_gate: Option<Arc<tests::BlockingPhaseGate>>,
     tool: Arc<Tool>,
 }
 
@@ -834,8 +846,11 @@ impl ImageMcpServer {
             service: service
                 .with_mcp_response_limits(MCP_JSON_RESPONSE_LIMIT, MCP_JSON_RESPONSE_LIMIT),
             asset_manager,
+            asset_downloader: ImageAssetDownloader::default(),
             change_sink,
             publication_fault: PublicationFault::default(),
+            #[cfg(test)]
+            source_parse_gate: None,
             tool: Arc::new(generate_image_tool()),
         }
     }
@@ -843,6 +858,18 @@ impl ImageMcpServer {
     #[cfg(test)]
     fn with_publication_fault(mut self, publication_fault: PublicationFault) -> Self {
         self.publication_fault = publication_fault;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_asset_downloader(mut self, downloader: ImageAssetDownloader) -> Self {
+        self.asset_downloader = downloader;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_source_parse_gate(mut self, gate: Arc<tests::BlockingPhaseGate>) -> Self {
+        self.source_parse_gate = Some(gate);
         self
     }
 
@@ -887,39 +914,67 @@ impl ImageMcpServer {
             .await
             .map_err(|kind| image_asset_error(kind, request_id.clone(), None))?;
         let asset_root = asset_manager.configured_path();
-        let admitted_root =
-            tokio::task::spawn_blocking(move || AdmittedAssetRoot::admit(asset_root))
-                .await
-                .map_err(|_| {
-                    image_asset_error(
-                        ImageAssetErrorKind::StorageUnavailable,
-                        request_id.clone(),
-                        None,
-                    )
-                })?
-                .map_err(|kind| image_asset_error(kind, request_id.clone(), None))?;
+        let (admitted_root, permit) =
+            blocking_image_phase(permit, ImageAssetErrorKind::StorageUnavailable, move || {
+                AdmittedAssetRoot::admit(asset_root)
+            })
+            .await
+            .map_err(|kind| image_asset_error(kind, request_id.clone(), None))?;
         let response = self
             .service
             .forward_with_request_id(Bytes::from(body), &HeaderMap::new(), request_id.clone())
             .await
             .map_err(|error| mcp_forwarding_error(&error))?;
-        let upstream_status = Some(response.status);
+        self.publish_response(response, admitted_root, permit, request_id)
+            .await
+    }
+
+    async fn publish_response(
+        &self,
+        response: ImagesGenerationResponse,
+        admitted_root: AdmittedAssetRoot,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        request_id: String,
+    ) -> Result<CallToolResult, McpError> {
+        let generation_status = response.status;
+        #[cfg(test)]
+        let source_parse_gate = self.source_parse_gate.clone();
+        let (source, permit) =
+            blocking_image_phase(permit, ImageAssetErrorKind::InvalidResponse, move || {
+                #[cfg(test)]
+                if let Some(gate) = source_parse_gate {
+                    gate.wait();
+                }
+                take_image_source(response.body)
+            })
+            .await
+            .map_err(|kind| image_asset_error(kind, request_id.clone(), Some(generation_status)))?;
+        // Release the JSON and unselected carriers before downloading. The
+        // downloader never receives the generation service or its credentials.
+        let (input, upstream_status) = match source {
+            ImageResultSource::Base64(encoded) => {
+                (ImageAssetInput::Base64(encoded), Some(generation_status))
+            }
+            ImageResultSource::Url(url) => {
+                let download = self
+                    .asset_downloader
+                    .download(url, generation_status)
+                    .await
+                    .map_err(|error| {
+                        image_asset_error(error.kind, request_id.clone(), error.upstream_status)
+                    })?;
+                let status = Some(download.upstream_status);
+                (ImageAssetInput::Downloaded(download), status)
+            }
+        };
         let fault = self.publication_fault;
-        let asset = tokio::task::spawn_blocking(move || {
-            // A cancelled MCP future cannot release the shared memory permit
-            // while its non-cancellable blocking publication is still running.
-            let _permit = permit;
-            process_image_response(response.body, &admitted_root, fault)
-        })
-        .await
-        .map_err(|_| {
-            image_asset_error(
-                ImageAssetErrorKind::WriteFailed,
-                request_id.clone(),
-                upstream_status,
-            )
-        })?
-        .map_err(|kind| image_asset_error(kind, request_id.clone(), upstream_status))?;
+        let (asset, _permit) =
+            blocking_image_phase(permit, ImageAssetErrorKind::WriteFailed, move || {
+                let png = input.decode()?;
+                process_png(&png, &admitted_root, fault)
+            })
+            .await
+            .map_err(|kind| image_asset_error(kind, request_id.clone(), upstream_status))?;
         let text = serde_json::to_string(&asset).map_err(|_| {
             image_asset_error(
                 ImageAssetErrorKind::WriteFailed,
@@ -930,6 +985,35 @@ impl ImageMcpServer {
         self.change_sink.image_assets_changed();
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
+}
+
+enum ImageAssetInput {
+    Base64(String),
+    Downloaded(DownloadedImage),
+}
+
+impl ImageAssetInput {
+    fn decode(self) -> Result<Vec<u8>, ImageAssetErrorKind> {
+        match self {
+            Self::Base64(encoded) => decode_base64(encoded),
+            Self::Downloaded(download) => download.decode().map_err(|error| error.kind),
+        }
+    }
+}
+
+async fn blocking_image_phase<T: Send + 'static>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    join_failure: ImageAssetErrorKind,
+    work: impl FnOnce() -> Result<T, ImageAssetErrorKind> + Send + 'static,
+) -> Result<(T, tokio::sync::OwnedSemaphorePermit), ImageAssetErrorKind> {
+    tokio::task::spawn_blocking(move || {
+        // The job and its unclaimed result own the permit. Cancellation drops
+        // the completed value before another high-memory call is admitted.
+        let value = work()?;
+        Ok((value, permit))
+    })
+    .await
+    .map_err(|_| join_failure)?
 }
 
 impl ServerHandler for ImageMcpServer {
@@ -1060,9 +1144,12 @@ fn image_asset_error(
 ) -> McpError {
     let stage = match kind {
         ImageAssetErrorKind::InvalidResponse => ImagesFailureStage::ResponseDecode,
-        ImageAssetErrorKind::InvalidBase64
+        ImageAssetErrorKind::MissingResult
+        | ImageAssetErrorKind::InvalidBase64
+        | ImageAssetErrorKind::InvalidUrl
         | ImageAssetErrorKind::InvalidPng
         | ImageAssetErrorKind::TooLarge => ImagesFailureStage::ResultValidation,
+        ImageAssetErrorKind::DownloadFailed => ImagesFailureStage::AssetDownload,
         ImageAssetErrorKind::StorageUnavailable | ImageAssetErrorKind::WriteFailed => {
             ImagesFailureStage::AssetStorage
         }
@@ -1158,7 +1245,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -1177,14 +1264,39 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
-        sync::Semaphore,
+        sync::{Notify, Semaphore},
     };
 
+    use super::download::test_support::{AssetFixture, AssetReply};
     use super::*;
     use crate::{
         domain::{ApiKey, BaseUrl, RouteId, ServiceTierPolicy},
         proxy::{ProxyServerHandle, RouteSnapshot, RoutingSnapshot},
     };
+
+    #[derive(Default)]
+    pub(super) struct BlockingPhaseGate {
+        entered: Notify,
+        released: Mutex<bool>,
+        wake: Condvar,
+    }
+
+    impl BlockingPhaseGate {
+        pub(super) fn wait(&self) {
+            self.entered.notify_one();
+            let released = self.released.lock().expect("blocking gate");
+            let (released, timeout) = self
+                .wake
+                .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+                .expect("blocking gate wait");
+            assert!(*released && !timeout.timed_out(), "blocking gate timed out");
+        }
+
+        fn release(&self) {
+            *self.released.lock().expect("blocking gate") = true;
+            self.wake.notify_one();
+        }
+    }
 
     fn valid_png_fixture() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -1251,6 +1363,371 @@ mod tests {
             .as_ref()
             .and_then(|data| data.get(field))
             .unwrap_or_else(|| panic!("missing MCP error field {field}"))
+    }
+
+    #[test]
+    fn local_asset_errors_preserve_exact_safe_fields_and_request_id() {
+        let request_id = Uuid::new_v4().to_string();
+        for (kind, code, stage, status) in [
+            (
+                ImageAssetErrorKind::MissingResult,
+                "image_result_missing",
+                "result_validation",
+                Some(StatusCode::OK),
+            ),
+            (
+                ImageAssetErrorKind::InvalidUrl,
+                "image_result_invalid_url",
+                "result_validation",
+                Some(StatusCode::FOUND),
+            ),
+            (
+                ImageAssetErrorKind::DownloadFailed,
+                "image_asset_download_failed",
+                "asset_download",
+                Some(StatusCode::NOT_FOUND),
+            ),
+            (
+                ImageAssetErrorKind::DownloadFailed,
+                "image_asset_download_failed",
+                "asset_download",
+                None,
+            ),
+        ] {
+            let error = image_asset_error(kind, request_id.clone(), status);
+            assert_eq!(
+                serde_json::to_value(error).expect("serialized error"),
+                json!({
+                    "code": -32603,
+                    "message": kind.message(),
+                    "data": {
+                        "code": code,
+                        "requestId": request_id,
+                        "stage": stage,
+                        "upstreamStatus": status.map(|value| value.as_u16()),
+                        "category": "unknown_upstream",
+                        "retryable": false
+                    }
+                })
+            );
+            assert!(!images_failure_is_retryable(
+                ImagesFailureStage::AssetDownload,
+                ImagesUpstreamCategory::ServerError,
+                Some(StatusCode::SERVICE_UNAVAILABLE)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_url_only_result_publishes_the_same_private_png_payload() {
+        let png = valid_png_fixture();
+        let fixture =
+            AssetFixture::new(vec![AssetReply::status(StatusCode::CREATED, png.clone())]).await;
+        let response = Bytes::from(json!({"data": [{"url": AssetFixture::url()}]}).to_string());
+        let (server, mock) = start_mock(StatusCode::OK, response).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let temporary = TempDir::new().expect("temporary app data");
+        let root = temporary.path().join("mcp-images");
+        let changes = Arc::new(RecordingImageAssetChangeSink::default());
+        let adapter = ImageMcpServer::new(
+            ImagesGenerationService::new(routing(true, Some(selected))),
+            Some(McpImageAssetManager::new(
+                root.clone(),
+                Arc::new(Semaphore::new(1)),
+            )),
+            changes.clone(),
+        )
+        .with_asset_downloader(fixture.downloader());
+        let result = adapter
+            .generate_image(default_generate_args())
+            .await
+            .expect("URL asset");
+        let path = returned_asset_path(&result);
+        let serialized = serde_json::to_value(&result).expect("MCP result");
+        assert_eq!(serialized["content"].as_array().map(Vec::len), Some(1));
+        assert_eq!(serialized["content"][0]["type"], "text");
+        assert!(serialized.get("structuredContent").is_none());
+        let asset: Value = serde_json::from_str(
+            serialized["content"][0]["text"]
+                .as_str()
+                .expect("text result"),
+        )
+        .expect("asset JSON");
+        let asset_id = Uuid::parse_str(asset["assetId"].as_str().expect("asset ID")).expect("UUID");
+        assert_eq!(
+            asset,
+            json!({
+                "status": "success", "path": path, "mimeType": "image/png",
+                "width": 1, "height": 1, "bytes": png.len(),
+                "sha256": hex::encode(Sha256::digest(&png)), "assetId": asset_id
+            })
+        );
+        assert_eq!(
+            path.parent(),
+            Some(root.canonicalize().expect("root").as_path())
+        );
+        assert_eq!(std::fs::read(&path).expect("PNG bytes"), png);
+        for (path, mode) in [(&root, 0o700), (&path, 0o600)] {
+            assert_eq!(
+                std::fs::metadata(path)
+                    .expect("private metadata")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                mode
+            );
+        }
+        assert_eq!(changes.0.load(Ordering::Acquire), 1);
+        assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.request_count(), 1);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_base64_precedence_never_fetches_urls_to_mask_validation_errors() {
+        for (encoded, expected_error) in [
+            (STANDARD.encode(valid_png_fixture()), None),
+            (String::new(), Some("image_result_invalid_base64")),
+            (
+                "not canonical Base64".to_owned(),
+                Some("image_result_invalid_base64"),
+            ),
+            (
+                STANDARD.encode(b"not PNG"),
+                Some("image_result_invalid_png"),
+            ),
+        ] {
+            let fixture = AssetFixture::new(vec![AssetReply::ok(valid_png_fixture())]).await;
+            let response = Bytes::from(json!({"data": [
+                {"url": AssetFixture::url()}, {"b64_json": null}, {"b64_json": encoded, "url": AssetFixture::url()}
+            ]}).to_string());
+            let (server, mock) = start_mock(StatusCode::OK, response).await;
+            let selected = route(
+                &format!("http://{}/openai/v1", server.address()),
+                "selected-image-key",
+            );
+            let temporary = TempDir::new().expect("temporary app data");
+            let result = mcp_adapter(
+                ImagesGenerationService::new(routing(true, Some(selected))),
+                Some(temporary.path().join("mcp-images")),
+            )
+            .with_asset_downloader(fixture.downloader())
+            .generate_image(default_generate_args())
+            .await;
+            if let Some(code) = expected_error {
+                assert_eq!(
+                    asset_error_code(&result.expect_err("invalid Base64/PNG")),
+                    Some(code)
+                );
+            } else {
+                assert!(returned_asset_path(&result.expect("Base64 asset")).is_file());
+            }
+            assert_eq!(fixture.request_count(), 0);
+            assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+            server.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_the_first_invalid_url_without_trying_another_source() {
+        for url in [
+            "",
+            "http://127.0.0.1/image.png",
+            "https://127.0.0.1/image.png",
+        ] {
+            let fixture = AssetFixture::new(vec![AssetReply::ok(valid_png_fixture())]).await;
+            let response = Bytes::from(
+                json!({"data": [{"url": url}, {"url": AssetFixture::url()}]}).to_string(),
+            );
+            let (server, mock) = start_mock(StatusCode::OK, response).await;
+            let selected = route(
+                &format!("http://{}/openai/v1", server.address()),
+                "selected-image-key",
+            );
+            let temporary = TempDir::new().expect("temporary app data");
+            let error = mcp_adapter(
+                ImagesGenerationService::new(routing(true, Some(selected))),
+                Some(temporary.path().join("mcp-images")),
+            )
+            .with_asset_downloader(fixture.downloader())
+            .generate_image(default_generate_args())
+            .await
+            .expect_err("invalid URL");
+            assert_eq!(asset_error_code(&error), Some("image_result_invalid_url"));
+            assert_eq!(mcp_error_field(&error, "stage"), "result_validation");
+            assert_eq!(mcp_error_field(&error, "upstreamStatus"), 200);
+            assert_eq!(mcp_error_field(&error, "retryable"), false);
+            assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+            assert_eq!(fixture.request_count(), 0);
+            server.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_redirects_never_replay_the_single_images_request() {
+        for status in [
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::FOUND,
+            StatusCode::SEE_OTHER,
+        ] {
+            let generation_calls = Arc::new(AtomicUsize::new(0));
+            let redirected_methods = Arc::new(Mutex::new(Vec::new()));
+            let initial_calls = generation_calls.clone();
+            let target_methods = redirected_methods.clone();
+            let server = ProxyServerHandle::start(
+                0,
+                Router::new()
+                    .route(
+                        "/openai/v1/images/generations",
+                        post(move || {
+                            let calls = initial_calls.clone();
+                            async move {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                (
+                                    status,
+                                    [(header::LOCATION, "/redirected/images/generations")],
+                                    Bytes::new(),
+                                )
+                            }
+                        }),
+                    )
+                    .route(
+                        "/redirected/images/generations",
+                        axum::routing::any(move |method: axum::http::Method| {
+                            let methods = target_methods.clone();
+                            async move {
+                                methods.lock().expect("redirected requests").push(method);
+                                (StatusCode::OK, valid_png_response())
+                            }
+                        }),
+                    ),
+            )
+            .await
+            .expect("generation redirect fixture");
+            let service = ImagesGenerationService::new(routing(
+                true,
+                Some(route(
+                    &format!("http://{}/openai/v1", server.address()),
+                    "synthetic-image-key",
+                )),
+            ));
+            let result = service
+                .forward(
+                    Bytes::from_static(br#"{"prompt":"synthetic image"}"#),
+                    &HeaderMap::new(),
+                )
+                .await;
+            server.shutdown().await;
+            assert_eq!(generation_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                *redirected_methods.lock().expect("redirected requests"),
+                Vec::<axum::http::Method>::new(),
+                "a generation redirect must not replay or switch the request"
+            );
+            let error = result.expect_err("generation redirects remain upstream failures");
+            assert_eq!(error.stage, ImagesFailureStage::UpstreamHttpStatus);
+            assert_eq!(error.upstream_status, Some(status));
+            assert_eq!(error.category, ImagesUpstreamCategory::UnknownUpstream);
+            assert!(!error.retryable);
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_generation_failure_never_starts_an_asset_download() {
+        let fixture = AssetFixture::new(vec![AssetReply::ok(valid_png_fixture())]).await;
+        let response = Bytes::from(json!({"data": [{"url": AssetFixture::url()}]}).to_string());
+        let (server, mock) = start_mock(StatusCode::INTERNAL_SERVER_ERROR, response).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let temporary = TempDir::new().expect("temporary app data");
+        let error = mcp_adapter(
+            ImagesGenerationService::new(routing(true, Some(selected))),
+            Some(temporary.path().join("mcp-images")),
+        )
+        .with_asset_downloader(fixture.downloader())
+        .generate_image(default_generate_args())
+        .await
+        .expect_err("generation failure");
+        assert_eq!(mcp_error_field(&error, "stage"), "upstream_http_status");
+        assert_eq!(mcp_error_field(&error, "upstreamStatus"), 500);
+        assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.request_count(), 0);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_asset_failures_use_the_asset_operation_status_without_regeneration() {
+        for (reply, code, stage, status) in [
+            (
+                AssetReply::status(StatusCode::NOT_FOUND, b"ASSET_BODY_SENTINEL".to_vec()),
+                "image_asset_download_failed",
+                "asset_download",
+                404,
+            ),
+            (
+                AssetReply::redirect("http://127.0.0.1/private?secret=REDIRECT_SENTINEL"),
+                "image_result_invalid_url",
+                "result_validation",
+                302,
+            ),
+            (
+                AssetReply::status(StatusCode::CREATED, b"not PNG".to_vec()),
+                "image_result_invalid_png",
+                "result_validation",
+                201,
+            ),
+        ] {
+            let fixture = AssetFixture::new(vec![reply]).await;
+            let response = Bytes::from(json!({"data": [{"url": AssetFixture::url()}]}).to_string());
+            let (server, mock) = start_mock(StatusCode::OK, response).await;
+            let selected = route(
+                &format!("http://{}/openai/v1", server.address()),
+                "selected-image-key",
+            );
+            let temporary = TempDir::new().expect("temporary app data");
+            let root = temporary.path().join("mcp-images");
+            let changes = Arc::new(RecordingImageAssetChangeSink::default());
+            let adapter = ImageMcpServer::new(
+                ImagesGenerationService::new(routing(true, Some(selected))),
+                Some(McpImageAssetManager::new(
+                    root.clone(),
+                    Arc::new(Semaphore::new(1)),
+                )),
+                changes.clone(),
+            )
+            .with_asset_downloader(fixture.downloader());
+            let error = adapter
+                .generate_image(default_generate_args())
+                .await
+                .expect_err("asset failure");
+            assert_eq!(asset_error_code(&error), Some(code));
+            assert_eq!(mcp_error_field(&error, "stage"), stage);
+            assert_eq!(mcp_error_field(&error, "upstreamStatus"), status);
+            assert_eq!(mcp_error_field(&error, "category"), "unknown_upstream");
+            assert_eq!(mcp_error_field(&error, "retryable"), false);
+            assert_eq!(changes.0.load(Ordering::Acquire), 0);
+            assert_eq!(std::fs::read_dir(root).expect("asset root").count(), 0);
+            let serialized = serde_json::to_string(&error).expect("full safe error");
+            for sentinel in [
+                "ASSET_BODY_SENTINEL",
+                "REDIRECT_SENTINEL",
+                "selected-image-key",
+                "private prompt sentinel",
+                AssetFixture::url().as_str(),
+            ] {
+                assert!(!serialized.contains(sentinel));
+            }
+            assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+            assert_eq!(fixture.request_count(), 1);
+            server.shutdown().await;
+        }
     }
 
     #[test]
@@ -2424,12 +2901,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_syntactically_valid_missing_or_unusable_base64_is_result_validation() {
+    async fn mcp_syntactically_valid_missing_or_unusable_carriers_report_missing_result() {
         for response in [
+            json!(null),
             json!({}),
+            json!({"data": {"b64_json": "AQ=="}}),
             json!({"data": []}),
             json!({"data": [{"b64_json": null}]}),
             json!({"data": [{"b64_json": 42}]}),
+            json!({"data": [{"url": false}, {"url": ["ignored"]}]}),
         ] {
             let (server, mock) =
                 start_mock(StatusCode::OK, Bytes::from(response.to_string())).await;
@@ -2444,12 +2924,9 @@ mod tests {
             )
             .generate_image(default_generate_args())
             .await
-            .expect_err("missing or unusable Base64");
+            .expect_err("missing or unusable carriers");
 
-            assert_eq!(
-                asset_error_code(&error),
-                Some("image_result_invalid_base64")
-            );
+            assert_eq!(asset_error_code(&error), Some("image_result_missing"));
             assert_eq!(mcp_error_field(&error, "stage"), "result_validation");
             assert_eq!(mcp_error_field(&error, "upstreamStatus"), 200);
             assert_eq!(mcp_error_field(&error, "retryable"), false);
@@ -2641,6 +3118,114 @@ mod tests {
             std::fs::read_dir(asset_root).expect("asset root").count(),
             2
         );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_cancellation_keeps_permit_until_source_parsing_finishes() {
+        let (server, mock) = start_mock(StatusCode::OK, valid_png_response()).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let service = ImagesGenerationService::new(routing(true, Some(selected)));
+        let temporary = TempDir::new().expect("temporary app data");
+        let root = temporary.path().join("mcp-images");
+        let semaphore = Arc::new(Semaphore::new(1));
+        let manager = McpImageAssetManager::new(root.clone(), semaphore.clone());
+        let gate = Arc::new(BlockingPhaseGate::default());
+        let first = ImageMcpServer::new(
+            service.clone(),
+            Some(manager.clone()),
+            Arc::new(NoopImageAssetChangeSink),
+        )
+        .with_source_parse_gate(gate.clone());
+        let second =
+            ImageMcpServer::new(service, Some(manager), Arc::new(NoopImageAssetChangeSink));
+        let first_call =
+            tokio::spawn(async move { first.generate_image(default_generate_args()).await });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .expect("source parsing started");
+        first_call.abort();
+        assert!(
+            first_call
+                .await
+                .expect_err("cancelled source parse caller")
+                .is_cancelled()
+        );
+        assert_eq!(semaphore.available_permits(), 0);
+        let second_call =
+            tokio::spawn(async move { second.generate_image(default_generate_args()).await });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+        gate.release();
+        second_call
+            .await
+            .expect("second task")
+            .expect("second image");
+        assert_eq!(mock.calls.load(Ordering::Acquire), 2);
+        assert_eq!(semaphore.available_permits(), 1);
+        assert_eq!(std::fs::read_dir(root).expect("asset root").count(), 1);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_download_holds_the_shared_permit_and_cancellation_releases_it() {
+        let gate = Arc::new(Notify::new());
+        let fixture = AssetFixture::new(vec![
+            AssetReply::gated(valid_png_fixture(), gate.clone()),
+            AssetReply::ok(valid_png_fixture()),
+        ])
+        .await;
+        let response = Bytes::from(json!({"data": [{"url": AssetFixture::url()}]}).to_string());
+        let (server, mock) = start_mock(StatusCode::OK, response).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let service = ImagesGenerationService::new(routing(true, Some(selected)));
+        let temporary = TempDir::new().expect("temporary app data");
+        let root = temporary.path().join("mcp-images");
+        let manager = McpImageAssetManager::new(root.clone(), Arc::new(Semaphore::new(1)));
+        let first = ImageMcpServer::new(
+            service.clone(),
+            Some(manager.clone()),
+            Arc::new(NoopImageAssetChangeSink),
+        )
+        .with_asset_downloader(fixture.downloader());
+        let second =
+            ImageMcpServer::new(service, Some(manager), Arc::new(NoopImageAssetChangeSink))
+                .with_asset_downloader(fixture.downloader());
+        let first_call =
+            tokio::spawn(async move { first.generate_image(default_generate_args()).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.request_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("asset GET started");
+        let second_call =
+            tokio::spawn(async move { second.generate_image(default_generate_args()).await });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+        first_call.abort();
+        assert!(
+            first_call
+                .await
+                .expect_err("cancelled downloader")
+                .is_cancelled()
+        );
+        tokio::time::timeout(Duration::from_secs(2), second_call)
+            .await
+            .expect("permit released after cancellation")
+            .expect("second task")
+            .expect("second image");
+        gate.notify_one();
+        assert_eq!(mock.calls.load(Ordering::Acquire), 2);
+        assert_eq!(fixture.request_count(), 2);
+        assert_eq!(std::fs::read_dir(root).expect("asset root").count(), 1);
         server.shutdown().await;
     }
 
