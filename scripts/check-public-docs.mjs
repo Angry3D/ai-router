@@ -15,6 +15,7 @@ const REQUIRED_FILES = [
   "CODE_OF_CONDUCT.md",
   "SUPPORT.md",
   "docs/engineering/README.md",
+  "docs/engineering/development-lifecycle.md",
   "docs/engineering/architecture.md",
   "docs/engineering/routing-resilience.md",
   "docs/engineering/data-privacy-recovery.md",
@@ -67,6 +68,20 @@ const REQUIRED_CONTRIBUTING_COMMANDS = [
   "pnpm security:public:check",
   "pnpm version:check",
   "pnpm license:public:check",
+];
+const DELIVERY_CONTROL_COMMANDS = [
+  "开始任务：<事项>",
+  "开始任务：<事项>，不使用 Trellis",
+  "继续当前任务",
+  "检查当前任务",
+  "交付当前任务",
+  "暂存当前成果，先不要合并",
+  "将当前任务纳入主线",
+  "延期当前任务",
+  "准备下一个版本",
+  "把 <事项列表> 纳入 <版本>，其他未合并内容延期",
+  "发布 <版本>",
+  "查看交付状态",
 ];
 
 export class PublicDocsError extends Error {}
@@ -209,6 +224,28 @@ export function validateReleaseInventoryContract(packageJson, files) {
   );
 }
 
+export function validateDeliveryLifecycleContract(packageJson, files) {
+  if (
+    packageJson.scripts?.["delivery:status"] !==
+    "node scripts/delivery-status.mjs"
+  ) {
+    throw new PublicDocsError(
+      "package.json delivery:status does not invoke the delivery status checker.",
+    );
+  }
+  const path = "docs/engineering/development-lifecycle.md";
+  const lifecycle = files.get(path);
+  for (const command of DELIVERY_CONTROL_COMMANDS) {
+    assertContains(lifecycle, `\`${command}\``, path);
+  }
+  for (const command of ["pnpm delivery:status", "pnpm release:inventory"]) {
+    assertContains(lifecycle, command, path);
+  }
+  for (const state of ["commit", "push", "PR", "main", "稳定 tag"]) {
+    assertContains(lifecycle, state, path);
+  }
+}
+
 async function validateYaml(path, content) {
   if (content.includes("\t")) {
     throw new PublicDocsError(
@@ -295,6 +332,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
   }
 
   validateVersionIndependentProjectClaims(files);
+  validateDeliveryLifecycleContract(packageJson, files);
   validateReleaseInventoryContract(packageJson, files);
   assertContains(
     files.get("release-notes/README.md"),

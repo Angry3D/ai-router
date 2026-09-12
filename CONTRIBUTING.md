@@ -26,7 +26,8 @@ pnpm install --frozen-lockfile
 - `scripts/`：版本、类型、图标、许可证、公共源码检查和 QA 工具。
 - `docs/engineering/`：外部贡献者需要遵守的工程契约。
 
-详细说明从 [工程文档索引](./docs/engineering/README.md) 开始。
+详细说明从 [工程文档索引](./docs/engineering/README.md) 开始；分支、PR、主线和版本交付按
+[开发与交付生命周期](./docs/engineering/development-lifecycle.md) 执行。
 
 ## 提交变更
 

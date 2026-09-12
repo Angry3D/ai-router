@@ -8,6 +8,7 @@
 - [macOS 原生生命周期](./native-lifecycle.md)：生产/QA 隔离、菜单面板和构建安全。
 - [发布与应用更新](./application-updates.md)：资产、签名、状态机、桥接版本与密钥轮换。
 - [稳定版本发布操作](./releasing.md)：protected environment、draft 验证、发布和失败恢复。
+- [开发与交付生命周期](./development-lifecycle.md)：自然语言控制、分支、PR、主线和版本候选边界。
 - [风险对应的验证策略](./verification.md)：按改动影响选择最小充分证据。
 - [GitHub CI 与安全设置](./github-security-settings.md)：required checks、ruleset 与安全功能交接清单。
 
