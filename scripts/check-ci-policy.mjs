@@ -95,11 +95,11 @@ const REVIEWED_ACTIONS = new Map([
   ],
   [
     "github/codeql-action/init",
-    ["db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28", "v4.37.8"],
+    ["cdf488f595d80d6e07e03d4674febd5ab45fa938", "v4.37.9"],
   ],
   [
     "github/codeql-action/analyze",
-    ["db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28", "v4.37.8"],
+    ["cdf488f595d80d6e07e03d4674febd5ab45fa938", "v4.37.9"],
   ],
   [
     "actions/attest-build-provenance",
