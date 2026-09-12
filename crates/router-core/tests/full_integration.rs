@@ -57,6 +57,8 @@ const IMAGE_PROVIDER_CODE_SENTINEL: &str = "IMAGES_PROVIDER_CODE_SENTINEL_d524";
 const IMAGE_PROVIDER_REQUEST_ID_SENTINEL: &str = "IMAGES_PROVIDER_REQUEST_ID_SENTINEL_164b";
 const IMAGE_PROVIDER_ARBITRARY_SENTINEL: &str = "IMAGES_PROVIDER_ARBITRARY_SENTINEL_791a";
 const IMAGE_PROVIDER_HEADER_SENTINEL: &str = "IMAGES_PROVIDER_HEADER_SENTINEL_b83c";
+const IMAGE_ASSET_URL_SENTINEL: &str =
+    "https://127.0.0.1/IMAGES_ASSET_URL_SENTINEL.png?signature=IMAGES_ASSET_SIGNATURE_SENTINEL";
 const IMAGE_ALLOWED_TRANSIENT_MESSAGE: &str = "benign transient provider detail";
 
 #[derive(Clone, Default)]
@@ -91,6 +93,15 @@ async fn mock_images_handler(State(state): State<MockImagesState>, request: Requ
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(state.success_body))
             .expect("image success response");
+    }
+    if call_index == 4 {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"data": [{"url": IMAGE_ASSET_URL_SENTINEL}]}).to_string(),
+            ))
+            .expect("private URL image response");
     }
     if call_index >= 3 {
         return Response::builder()
@@ -592,7 +603,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         .header(header::HOST, "127.0.0.1")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session_id)
+        .header("mcp-session-id", &session_id)
         .header("mcp-protocol-version", "2025-06-18")
         .body(
             json!({
@@ -649,6 +660,45 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         );
     }
 
+    let url_call = client
+        .post(&mcp_endpoint)
+        .bearer_auth(GATEWAY_TOKEN_SENTINEL)
+        .header(header::HOST, "127.0.0.1")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", &session_id)
+        .header("mcp-protocol-version", "2025-06-18")
+        .body(json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "generate_image", "arguments": {"prompt": IMAGE_MCP_PROMPT_SENTINEL}}
+        }).to_string())
+        .send().await.expect("MCP URL call");
+    let url_error = mcp_sse_json(url_call).await;
+    assert_eq!(
+        url_error["error"]["message"],
+        "The generated image URL is not allowed."
+    );
+    assert_eq!(
+        url_error["error"]["data"]["code"],
+        "image_result_invalid_url"
+    );
+    assert_eq!(url_error["error"]["data"]["stage"], "result_validation");
+    assert_eq!(url_error["error"]["data"]["upstreamStatus"], 200);
+    assert_eq!(url_error["error"]["data"]["retryable"], false);
+    let serialized_url_error = serde_json::to_vec(&url_error).expect("URL error frame");
+    for forbidden in [
+        IMAGE_ASSET_URL_SENTINEL,
+        "IMAGES_ASSET_SIGNATURE_SENTINEL",
+        IMAGE_MCP_PROMPT_SENTINEL,
+        IMAGE_ROUTE_KEY_SENTINEL,
+        GATEWAY_TOKEN_SENTINEL,
+    ] {
+        assert!(
+            !contains(&serialized_url_error, forbidden),
+            "URL error leaked private data"
+        );
+    }
+
     history.shutdown().await;
     proxy.shutdown().await;
     image_upstream.shutdown().await;
@@ -658,7 +708,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
             .requests
             .lock()
             .expect("image capture mutex");
-        assert_eq!(captured.len(), 3, "each incoming request gets one attempt");
+        assert_eq!(captured.len(), 4, "each incoming request gets one attempt");
         for (index, request) in captured.iter().enumerate() {
             assert_eq!(
                 request.headers.get(header::AUTHORIZATION),
@@ -722,6 +772,8 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         IMAGE_PROVIDER_ARBITRARY_SENTINEL,
         IMAGE_PROVIDER_HEADER_SENTINEL,
         IMAGE_ALLOWED_TRANSIENT_MESSAGE,
+        IMAGE_ASSET_URL_SENTINEL,
+        "IMAGES_ASSET_SIGNATURE_SENTINEL",
     ] {
         assert!(
             !contains(&database_bytes, forbidden),

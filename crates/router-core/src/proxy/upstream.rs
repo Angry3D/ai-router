@@ -51,6 +51,7 @@ use crate::{
 };
 
 const DEFAULT_RESPONSE_LIMIT: usize = 200 * 1024 * 1024;
+pub(crate) const EXACT_CONTENT_DECODER_WINDOW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_UPSTREAM_ERROR_MESSAGE_CHARS: usize = 1_800;
 const RESPONSE_TERMINAL_GRACE: Duration = Duration::from_secs(3);
 
@@ -2890,8 +2891,8 @@ pub(crate) fn decode_supported(
     Ok(body)
 }
 
-/// Decodes an MCP image response without geometric `Vec` growth invalidating
-/// its reviewed single-call allocation budget.
+/// Decodes MCP image payloads and bounded Images error bodies without geometric
+/// `Vec` growth invalidating their reviewed allocation budgets.
 pub(crate) fn decode_supported_exact(
     mut body: Vec<u8>,
     encodings: &[String],
@@ -2911,7 +2912,12 @@ pub(crate) fn decode_supported_exact(
             "deflate" => decode_deflate_exact(&body, limit)?,
             "br" => read_bounded_exact(brotli::Decompressor::new(body.as_slice(), 4096), limit)?,
             "zstd" | "zst" => {
-                let decoder = zstd::stream::read::Decoder::new(body.as_slice())
+                let mut decoder = zstd::stream::read::Decoder::new(body.as_slice())
+                    .map_err(|_| DecodeError::Invalid)?;
+                // Output limits do not bound zstd's separate history window.
+                // Bound it for every consumer of this strict decoder.
+                decoder
+                    .window_log_max(EXACT_CONTENT_DECODER_WINDOW_BYTES.ilog2())
                     .map_err(|_| DecodeError::Invalid)?;
                 read_bounded_exact(decoder, limit)?
             }
@@ -4773,6 +4779,45 @@ mod tests {
             decode_supported_exact(original.to_vec(), &["compress".to_owned()], 1024),
             Err(DecodeError::Unsupported)
         ));
+
+        let zstd = zstd::stream::encode_all(original.as_slice(), 0).expect("zstd encode");
+        for encoding in ["zstd", "zst"] {
+            assert_eq!(
+                decode_supported_exact(zstd.clone(), &[encoding.to_owned()], 1024)
+                    .expect("exact-capacity zstd decode"),
+                original
+            );
+            assert!(matches!(
+                decode_supported_exact(zstd.clone(), &[encoding.to_owned()], original.len() - 1),
+                Err(DecodeError::TooLarge)
+            ));
+        }
+    }
+
+    #[test]
+    fn exact_capacity_zstd_decoder_bounds_window_memory_without_changing_http() {
+        // A synthetic empty raw block advertises an unknown content size and
+        // an explicit history window, without allocating a large test body.
+        let empty_frame =
+            |window_log: u8| vec![0x28, 0xb5, 0x2f, 0xfd, 0, (window_log - 10) << 3, 1, 0, 0];
+        for encoding in ["zstd", "zst"] {
+            assert!(
+                decode_supported_exact(empty_frame(24), &[encoding.to_owned()], 16)
+                    .expect("MCP window boundary")
+                    .is_empty()
+            );
+            for window_log in [25, 27] {
+                assert!(matches!(
+                    decode_supported_exact(empty_frame(window_log), &[encoding.to_owned()], 16),
+                    Err(DecodeError::Invalid)
+                ));
+            }
+            assert!(
+                decode_supported(empty_frame(25), &[encoding.to_owned()], 16)
+                    .expect("HTTP keeps its existing decoder window policy")
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

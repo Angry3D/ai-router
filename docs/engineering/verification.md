@@ -44,6 +44,9 @@ cargo test --workspace
 - 恢复：sanitized round trip、敏感/非关键表边界、保留策略、损坏主库、发布/回滚失败。
 - 路由/回退：不可变快照、响应提交边界、重试分类、尝试上限、并发 generation、持久激活。
 - SSE：首输出、token、终止状态、终止前/后断流和有界错误。
+- 图片 MCP：Base64/URL 来源优先级、公共 HTTPS 与 DNS 固定、凭据隔离、重定向/下载预算、完整 PNG
+  校验、取消期间共享许可、六字段错误状态来源，以及成功八字段兼容和 HTTP 字节透传。网络测试只使用
+  合成响应与本地 TLS 服务，测试连接映射不能成为生产环境的本机地址例外。
 - Codex 配置：基线不可变、provider identity、无关字段保留、symlink、fingerprint 竞态和精确恢复。
 - 原生生命周期：只使用 QA identity，验证隐藏/重开、主线程 generation、菜单聚焦和生产连续性。
 - 发布：锁定工具链、稳定 tag/ref/version/commit、ad-hoc bundle 身份、arm64/minimum OS、updater
