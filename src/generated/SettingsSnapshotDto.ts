@@ -9,8 +9,9 @@ import type { ImagesGenerationSettingsDto } from "./ImagesGenerationSettingsDto"
 import type { McpImageCapacityDto } from "./McpImageCapacityDto";
 import type { MenuBarSettingsDto } from "./MenuBarSettingsDto";
 import type { MetadataFailureDto } from "./MetadataFailureDto";
+import type { OutboundProxySettingsDto } from "./OutboundProxySettingsDto";
 import type { RecoveryHealthDto } from "./RecoveryHealthDto";
 import type { RouteId } from "./RouteId";
 import type { RouteSummaryDto } from "./RouteSummaryDto";
 
-export type SettingsSnapshotDto = { routes: Array<RouteSummaryDto>, activeRouteId: RouteId | null, fallback: FallbackStateDto, proxyPort: number, codexStatus: CodexConfigStatus, baseline: CodexBaselineSummaryDto, originalBackup: CodexBaselineSummaryDto, recoveryConfig: CodexRecoverySummaryDto, balanceScriptRiskConfirmed: boolean, balanceQuery: BalanceQuerySettingsDto, imagesGeneration: ImagesGenerationSettingsDto, mcpImageCapacity: McpImageCapacityDto, history: HistorySummaryDto, metadataFailure: MetadataFailureDto, recovery: RecoveryHealthDto, menuBar: MenuBarSettingsDto, };
+export type SettingsSnapshotDto = { routes: Array<RouteSummaryDto>, activeRouteId: RouteId | null, fallback: FallbackStateDto, proxyPort: number, outboundProxy: OutboundProxySettingsDto, codexStatus: CodexConfigStatus, baseline: CodexBaselineSummaryDto, originalBackup: CodexBaselineSummaryDto, recoveryConfig: CodexRecoverySummaryDto, balanceScriptRiskConfirmed: boolean, balanceQuery: BalanceQuerySettingsDto, imagesGeneration: ImagesGenerationSettingsDto, mcpImageCapacity: McpImageCapacityDto, history: HistorySummaryDto, metadataFailure: MetadataFailureDto, recovery: RecoveryHealthDto, menuBar: MenuBarSettingsDto, };

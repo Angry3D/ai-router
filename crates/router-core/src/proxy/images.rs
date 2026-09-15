@@ -26,7 +26,7 @@ use self::download::{DownloadedImage, ImageAssetDownloader};
 use self::source::{ImageResultSource, take_image_source};
 
 use super::{
-    RoutingSnapshotStore,
+    OutboundProxyTransport, RoutingSnapshotStore,
     upstream::{
         DecodeError, connection_nominated_headers, decode_supported, decode_supported_exact,
         filtered_response_headers, remove_request_header, response_encodings,
@@ -66,6 +66,7 @@ impl ImageAssetChangeSink for NoopImageAssetChangeSink {
 #[derive(Clone)]
 pub struct ImagesGenerationService {
     routing: RoutingSnapshotStore,
+    outbound_proxy: OutboundProxyTransport,
     config: ImagesGenerationConfig,
 }
 
@@ -556,8 +557,15 @@ impl ImagesGenerationService {
     pub fn new(routing: RoutingSnapshotStore) -> Self {
         Self {
             routing,
+            outbound_proxy: OutboundProxyTransport::default(),
             config: ImagesGenerationConfig::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_outbound_proxy(mut self, outbound_proxy: OutboundProxyTransport) -> Self {
+        self.outbound_proxy = outbound_proxy;
+        self
     }
 
     fn with_mcp_response_limits(mut self, wire_limit: usize, decoded_limit: usize) -> Self {
@@ -635,10 +643,14 @@ impl ImagesGenerationService {
                     request_id.clone(),
                 )
             })?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
+        let client = self
+            .outbound_proxy
+            .configure_current_client(
+                reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(30))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .retry(reqwest::retry::never()),
+            )
             .build()
             .map_err(|_| {
                 ImagesGenerationFailure::with_request_id(
@@ -2050,6 +2062,37 @@ mod tests {
             assert_eq!(error.kind.code(), expected.code());
         }
         assert_eq!(mock.calls.load(Ordering::Acquire), 0);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn image_generation_uses_the_explicit_outbound_proxy() {
+        let (server, mock) = start_mock(StatusCode::OK, valid_png_response()).await;
+        let outbound_proxy = OutboundProxyTransport::default();
+        outbound_proxy.set_endpoint(Some(
+            url::Url::parse(&format!("http://{}", server.address())).expect("proxy URL"),
+        ));
+        let selected = route(
+            "http://images.external.invalid/openai/v1",
+            "selected-image-key",
+        );
+        let service = ImagesGenerationService::new(routing(true, Some(selected)))
+            .with_outbound_proxy(outbound_proxy);
+
+        let response = service
+            .forward(
+                Bytes::from_static(br#"{"prompt":"private prompt"}"#),
+                &HeaderMap::new(),
+            )
+            .await
+            .expect("proxied image generation");
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+        {
+            let captures = mock.captures.lock().expect("captures");
+            assert_eq!(captures[0].0, "/openai/v1/images/generations");
+        }
         server.shutdown().await;
     }
 

@@ -71,6 +71,7 @@ const keysByArea: Record<StateArea, ReadonlyArray<readonly unknown[]>> = {
     queryKeys.menu,
     queryKeys.settings,
   ],
+  outbound_proxy: [queryKeys.settings],
   codex_connection: [
     queryKeys.codexConnection,
     queryKeys.bootstrap,

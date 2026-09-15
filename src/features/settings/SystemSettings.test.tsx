@@ -39,9 +39,11 @@ const ipc = vi.hoisted(() => ({
   setFallbackEnabled: vi.fn(),
   startOverDatabase: vi.fn(),
   testBalanceQuery: vi.fn(),
+  testOutboundProxy: vi.fn(),
   updateBalanceQuerySettings: vi.fn(),
   updateImagesGenerationSettings: vi.fn(),
   updateMenuBarSettings: vi.fn(),
+  updateOutboundProxySettings: vi.fn(),
   getRunningAppVersion: vi.fn(),
   hideSettingsWindow: vi.fn(),
   quitApplication: vi.fn(),
@@ -97,9 +99,11 @@ vi.mock("../../api/ipc", () => ({
   setFallbackEnabled: ipc.setFallbackEnabled,
   startOverDatabase: ipc.startOverDatabase,
   testBalanceQuery: ipc.testBalanceQuery,
+  testOutboundProxy: ipc.testOutboundProxy,
   updateBalanceQuerySettings: ipc.updateBalanceQuerySettings,
   updateImagesGenerationSettings: ipc.updateImagesGenerationSettings,
   updateMenuBarSettings: ipc.updateMenuBarSettings,
+  updateOutboundProxySettings: ipc.updateOutboundProxySettings,
   quitApplication: ipc.quitApplication,
 }));
 
@@ -181,10 +185,14 @@ beforeEach(() => {
   ipc.retryDatabaseStartup.mockReset();
   ipc.startOverDatabase.mockReset();
   ipc.testBalanceQuery.mockReset();
+  ipc.testOutboundProxy.mockReset();
   ipc.updateBalanceQuerySettings.mockReset();
   ipc.updateImagesGenerationSettings.mockReset();
   ipc.updateMenuBarSettings.mockReset();
   ipc.updateMenuBarSettings.mockResolvedValue({ revision: 1 });
+  ipc.updateOutboundProxySettings.mockReset();
+  ipc.updateOutboundProxySettings.mockResolvedValue({ revision: 2 });
+  ipc.testOutboundProxy.mockResolvedValue(undefined);
   ipc.getRunningAppVersion.mockReset();
   ipc.quitApplication.mockReset();
   ipc.tauriRuntime = false;
@@ -353,6 +361,7 @@ describe("SystemSettings interactions", () => {
     ).toEqual([
       "外观",
       "菜单栏",
+      "全局出站代理",
       "应用更新",
       "余额查询",
       "数据库恢复",
@@ -377,13 +386,240 @@ describe("SystemSettings interactions", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("hides proxy-specific controls in direct mode and retains the saved address", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+
+    expect(screen.getByRole("radio", { name: "直连" })).toBeChecked();
+    expect(
+      screen.getByText("外部请求将直接连接目标服务。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("代理地址")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "测试连接" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "代理" }));
+    expect(screen.getByLabelText("代理地址")).toHaveValue(
+      "http://127.0.0.1:7890",
+    );
+    await waitFor(() =>
+      expect(ipc.updateOutboundProxySettings).toHaveBeenCalledWith({
+        enabled: true,
+        url: "http://127.0.0.1:7890",
+      }),
+    );
+    expect(
+      screen.getByText("仅本地回环地址直连，外部请求使用此代理。"),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a local proxy draft without enabling it when no address is retained", async () => {
+    await renderSettings({
+      settings: { outboundProxy: { enabled: false, url: null } },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    fireEvent.click(screen.getByRole("radio", { name: "代理" }));
+
+    expect(screen.getByLabelText("代理地址")).toHaveValue("");
+    expect(screen.getByText("请输入代理地址。")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(ipc.updateOutboundProxySettings).not.toHaveBeenCalled();
+  });
+
+  it("saves a valid proxy address on Enter and direct mode preserves it", async () => {
+    await renderSettings({
+      settings: {
+        outboundProxy: {
+          enabled: true,
+          url: "http://127.0.0.1:7890",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    const address = screen.getByLabelText("代理地址");
+
+    fireEvent.change(address, {
+      target: { value: "socks5h://localhost:7891" },
+    });
+    fireEvent.keyDown(address, { key: "Enter" });
+    await waitFor(() =>
+      expect(ipc.updateOutboundProxySettings).toHaveBeenCalledWith({
+        enabled: true,
+        url: "socks5h://localhost:7891",
+      }),
+    );
+    fireEvent.blur(address);
+    await waitFor(() =>
+      expect(ipc.updateOutboundProxySettings).toHaveBeenCalledTimes(1),
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "直连" }));
+    await waitFor(() =>
+      expect(ipc.updateOutboundProxySettings).toHaveBeenLastCalledWith({
+        enabled: false,
+        url: "socks5h://localhost:7891",
+      }),
+    );
+    expect(screen.queryByLabelText("代理地址")).not.toBeInTheDocument();
+  });
+
+  it("discards an unsaved draft when direct mode retains the last valid address", async () => {
+    await renderSettings({
+      settings: {
+        outboundProxy: {
+          enabled: true,
+          url: "http://127.0.0.1:7890",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    fireEvent.change(screen.getByLabelText("代理地址"), {
+      target: { value: "not-a-proxy" },
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: "直连" }));
+    await waitFor(() =>
+      expect(ipc.updateOutboundProxySettings).toHaveBeenCalledWith({
+        enabled: false,
+        url: "http://127.0.0.1:7890",
+      }),
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "代理" }));
+
+    expect(screen.getByLabelText("代理地址")).toHaveValue(
+      "http://127.0.0.1:7890",
+    );
+  });
+
+  it("saves a valid proxy address when the field loses focus", async () => {
+    await renderSettings({
+      settings: {
+        outboundProxy: {
+          enabled: true,
+          url: "http://127.0.0.1:7890",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    const address = screen.getByLabelText("代理地址");
+    fireEvent.change(address, {
+      target: { value: "https://proxy.example:8443" },
+    });
+    fireEvent.blur(address);
+
+    await waitFor(() =>
+      expect(ipc.updateOutboundProxySettings).toHaveBeenCalledWith({
+        enabled: true,
+        url: "https://proxy.example:8443",
+      }),
+    );
+  });
+
+  it("keeps invalid address drafts visible without replacing active settings", async () => {
+    await renderSettings({
+      settings: {
+        outboundProxy: {
+          enabled: true,
+          url: "http://127.0.0.1:7890",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    const address = screen.getByLabelText("代理地址");
+    fireEvent.change(address, {
+      target: { value: "http://user:secret@127.0.0.1:7890" },
+    });
+    fireEvent.blur(address);
+
+    expect(screen.getByText("代理地址不能包含用户名或密码。")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(address).toHaveValue("http://user:secret@127.0.0.1:7890");
+    expect(ipc.updateOutboundProxySettings).not.toHaveBeenCalled();
+  });
+
+  it("tests the visible draft without saving it and reports diagnostic state", async () => {
+    await renderSettings({
+      settings: {
+        outboundProxy: {
+          enabled: true,
+          url: "http://127.0.0.1:7890",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    const address = screen.getByLabelText("代理地址");
+    const test = screen.getByRole("button", { name: "测试连接" });
+    fireEvent.change(address, { target: { value: "socks5://127.0.0.1:7891" } });
+    fireEvent.blur(address, { relatedTarget: test });
+    fireEvent.click(test);
+
+    await waitFor(() =>
+      expect(ipc.testOutboundProxy).toHaveBeenCalledWith(
+        "socks5://127.0.0.1:7891",
+      ),
+    );
+    expect(await screen.findByText("连接正常")).toBeInTheDocument();
+    expect(ipc.updateOutboundProxySettings).not.toHaveBeenCalled();
+  });
+
+  it("locks proxy controls while testing and reports a failed diagnostic", async () => {
+    let rejectTest: ((reason: Error) => void) | undefined;
+    ipc.testOutboundProxy.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectTest = reject;
+        }),
+    );
+    await renderSettings({
+      settings: {
+        outboundProxy: {
+          enabled: true,
+          url: "http://127.0.0.1:7890",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    const address = screen.getByLabelText("代理地址");
+    const test = screen.getByRole("button", { name: "测试连接" });
+
+    fireEvent.click(test);
+    expect(screen.getByText("正在测试")).toBeInTheDocument();
+    expect(address).toBeDisabled();
+    expect(test).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "直连" })).toBeDisabled();
+
+    rejectTest?.(new Error("unreachable"));
+    expect(await screen.findByText("连接失败")).toBeInTheDocument();
+    expect(address).toBeEnabled();
+    expect(test).toBeEnabled();
+    expect(ipc.updateOutboundProxySettings).not.toHaveBeenCalled();
+  });
+
+  it("restores the confirmed mode when a mode update fails", async () => {
+    ipc.updateOutboundProxySettings.mockRejectedValueOnce(new Error("failed"));
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    fireEvent.click(screen.getByRole("radio", { name: "代理" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(screen.getByRole("radio", { name: "直连" })).toBeChecked();
+    expect(screen.queryByLabelText("代理地址")).not.toBeInTheDocument();
+  });
+
   it("submits menu bar settings as one complete preference object", async () => {
     const { client } = await renderSettings();
     const invalidate = vi.spyOn(client, "invalidateQueries");
     fireEvent.click(screen.getByRole("button", { name: "系统" }));
 
     const statusText = screen.getByRole("switch", { name: "菜单栏状态文字" });
-    const activityAnimation = screen.getByRole("switch", { name: "菜单栏活动动画" });
+    const activityAnimation = screen.getByRole("switch", {
+      name: "菜单栏活动动画",
+    });
     expect(statusText).toBeChecked();
     expect(activityAnimation).toBeChecked();
 
@@ -411,7 +647,9 @@ describe("SystemSettings interactions", () => {
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "系统" }));
     const statusText = screen.getByRole("switch", { name: "菜单栏状态文字" });
-    const activityAnimation = screen.getByRole("switch", { name: "菜单栏活动动画" });
+    const activityAnimation = screen.getByRole("switch", {
+      name: "菜单栏活动动画",
+    });
 
     fireEvent.click(statusText);
     expect(statusText).toBeDisabled();
@@ -427,7 +665,9 @@ describe("SystemSettings interactions", () => {
     const { client } = await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "系统" }));
     const statusText = screen.getByRole("switch", { name: "菜单栏状态文字" });
-    const activityAnimation = screen.getByRole("switch", { name: "菜单栏活动动画" });
+    const activityAnimation = screen.getByRole("switch", {
+      name: "菜单栏活动动画",
+    });
 
     client.setQueryData(queryKeys.settings, {
       ...previewSettingsSnapshot,

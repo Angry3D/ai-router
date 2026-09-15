@@ -20,6 +20,7 @@ import type {
   MenuSnapshotDto,
   MenuBarSettingsDto,
   MutationResultDto,
+  UpdateOutboundProxySettingsInputDto,
   ReachabilityResult,
   RecoveryHealthDto,
   RecoverySnapshotDto,
@@ -75,6 +76,8 @@ export const IPC_COMMANDS = {
   updateMcpImageCapacityThreshold: "update_mcp_image_capacity_threshold",
   updateAppearancePreference: "update_appearance_preference",
   updateMenuBarSettings: "update_menu_bar_settings",
+  updateOutboundProxySettings: "update_outbound_proxy_settings",
+  testOutboundProxy: "test_outbound_proxy",
   refreshBalance: "refresh_balance",
   refreshAllBalances: "refresh_all_balances",
   testBalanceQuery: "test_balance_query",
@@ -151,6 +154,18 @@ export async function updateMenuBarSettings(
   input: MenuBarSettingsDto,
 ): Promise<MutationResultDto> {
   return invoke<MutationResultDto>(IPC_COMMANDS.updateMenuBarSettings, { input });
+}
+
+export async function updateOutboundProxySettings(
+  input: UpdateOutboundProxySettingsInputDto,
+): Promise<MutationResultDto> {
+  return invoke<MutationResultDto>(IPC_COMMANDS.updateOutboundProxySettings, {
+    input,
+  });
+}
+
+export async function testOutboundProxy(url: string): Promise<void> {
+  return invoke<void>(IPC_COMMANDS.testOutboundProxy, { url });
 }
 
 export async function getApplicationUpdateSnapshot(): Promise<ApplicationUpdateSnapshotDto> {

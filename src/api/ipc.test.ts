@@ -19,6 +19,8 @@ import {
   getUsageRouteOptions,
   normalizeIpcError,
   openProjectRepository,
+  testOutboundProxy,
+  updateOutboundProxySettings,
 } from "./ipc";
 import { previewFallbackUiRouteEdits } from "../previewFixtures";
 
@@ -61,6 +63,34 @@ describe("project repository command", () => {
     expect(IPC_COMMANDS.openProjectRepository).toBe("open_project_repository");
     expect(tauri.invoke).toHaveBeenCalledOnce();
     expect(tauri.invoke).toHaveBeenCalledWith("open_project_repository");
+  });
+});
+
+describe("outbound proxy commands", () => {
+  it("submits the complete retained proxy settings object", async () => {
+    tauri.invoke.mockResolvedValueOnce({ revision: 18 });
+
+    await updateOutboundProxySettings({
+      enabled: false,
+      url: "http://127.0.0.1:7890",
+    });
+
+    expect(tauri.invoke).toHaveBeenCalledWith(
+      "update_outbound_proxy_settings",
+      {
+        input: { enabled: false, url: "http://127.0.0.1:7890" },
+      },
+    );
+  });
+
+  it("keeps the connection test diagnostic separate from persistence", async () => {
+    tauri.invoke.mockResolvedValueOnce(undefined);
+
+    await testOutboundProxy("socks5://127.0.0.1:7890");
+
+    expect(tauri.invoke).toHaveBeenCalledWith("test_outbound_proxy", {
+      url: "socks5://127.0.0.1:7890",
+    });
   });
 });
 

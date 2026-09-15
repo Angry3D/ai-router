@@ -170,6 +170,23 @@ describe("router state synchronization", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.bootstrap });
   });
 
+  it("invalidates Settings for an outbound proxy publication", async () => {
+    const client = createRouterQueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    render(
+      <QueryClientProvider client={client}>
+        <StateSyncProbe view="settings" />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(ipc.listener).toBeDefined());
+    invalidate.mockClear();
+
+    act(() => ipc.listener?.({ revision: 15, areas: ["outbound_proxy"] }));
+
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.settings });
+  });
+
   it("invalidates only the application update snapshot for update boundaries", async () => {
     const client = createRouterQueryClient();
     const invalidate = vi.spyOn(client, "invalidateQueries");

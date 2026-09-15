@@ -52,6 +52,7 @@ function renderWithData(view: "menu" | "settings") {
       hasNext: false,
     },
     proxyPort: 32189,
+    outboundProxy: { enabled: false, url: null },
     menuBar: { statusTextEnabled: true, activityAnimationEnabled: true },
     imagesGeneration: { enabled: false, routeId: null, timeoutSecs: 600 },
     mcpImageCapacity: {

@@ -1946,6 +1946,63 @@ body[data-view="settings"] .app-variant-badge {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.outbound-proxy-mode {
+  max-width: 252px;
+}
+
+.outbound-proxy-url-row {
+  align-items: start;
+}
+
+.outbound-proxy-url-row > .settings-field-label {
+  padding-top: 7px;
+}
+
+.outbound-proxy-url-control {
+  display: grid;
+  width: min(100%, 650px);
+  min-width: 0;
+  grid-template-columns: minmax(160px, 1fr) auto minmax(78px, auto);
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.outbound-proxy-test-status {
+  display: flex;
+  min-width: 78px;
+  min-height: var(--settings-control-height);
+  align-items: center;
+}
+
+.outbound-proxy-test-status .settings-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+.outbound-proxy-field-error {
+  grid-column: 1 / -1;
+}
+
+.outbound-proxy-help,
+.outbound-proxy-mode-error {
+  margin: 6px 0 0 calc(var(--settings-label-width) + var(--settings-field-gap));
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.outbound-proxy-help {
+  color: var(--muted);
+}
+
+.outbound-proxy-mode-error {
+  min-height: 18px;
+  margin-top: 0;
+  color: var(--red);
+}
+
 .settings-segments:has(input:disabled) {
   opacity: 0.64;
 }
@@ -2264,23 +2321,30 @@ body[data-view="settings"] .app-variant-badge {
 }
 
 .settings-page {
+  display: grid;
   min-width: 0;
   min-height: 0;
   height: 100%;
+  grid-template-rows: var(--settings-title-drag-height) minmax(0, 1fr);
   overflow: hidden;
 }
 
+.settings-page > .settings-page-title-band {
+  min-height: var(--settings-title-drag-height);
+  padding-inline: var(--settings-page-padding-inline);
+  border-bottom: 1px solid var(--settings-divider);
+}
+
 .settings-page-scroll {
+  min-height: 0;
   height: 100%;
 }
 
 .settings-page-viewport {
   height: 100%;
-  padding: var(--settings-page-padding-block)
-    var(--settings-page-padding-inline) 26px;
+  padding: 16px var(--settings-page-padding-inline) 26px;
 }
 
-.settings-page .settings-page-title-band,
 .route-form-fields > .settings-page-title-band {
   width: calc(
     100% + var(--settings-page-padding-inline) +

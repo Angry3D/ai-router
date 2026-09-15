@@ -24,7 +24,7 @@ getrandom = "0.3"
 hex = "0.4"
 http-body = "1"
 png = "0.18.1"
-reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "socks", "stream"] }
 rmcp = { version = "3.1.2", default-features = false, features = ["base64", "server", "transport-streamable-http-server"] }
 rquickjs = "0.12.1"
 rustix = { version = "1", features = ["fs"] }

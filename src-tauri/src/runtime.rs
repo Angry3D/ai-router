@@ -20,8 +20,9 @@ use router_core::{
         RecoveryHealthDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
         ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
         RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, SettingsSnapshotDto,
-        UpdateImagesGenerationSettingsInputDto, UsageHistoryPageDto, UsageHistoryQueryDto,
-        UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsDto, UsageStatisticsQueryDto,
+        UpdateImagesGenerationSettingsInputDto, UpdateOutboundProxySettingsInputDto,
+        UsageHistoryPageDto, UsageHistoryQueryDto, UsageRequestDetailDto, UsageRouteOptionDto,
+        UsageStatisticsDto, UsageStatisticsQueryDto,
     },
     balance::{
         BalanceCoordinator, BalanceDisplaySnapshot, BalanceExecutor, BalanceQueryConfig,
@@ -37,7 +38,8 @@ use router_core::{
     domain::{
         ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, CodexModelValidationError,
         FallbackExcludedModelValidationError, ImagesGenerationTimeout,
-        McpImageCapacityWarningThreshold, ReachabilityResult, RouteId, ValidationError,
+        McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl,
+        ReachabilityResult, RouteId, ValidationError,
     },
     lifecycle::{
         AppCoordinator, AppLifecycleIssue, AppLifecyclePhase, AppLifecycleServices,
@@ -47,11 +49,11 @@ use router_core::{
         ActivatedSkipHealth, AsyncHistoryRecorder, FallbackActivationError, FallbackActivationMode,
         FallbackActivationRequest, FallbackActivator, HealthActivationProof, ImageAssetChangeSink,
         InferenceStatusService, LogicalRequestActivitySink, LogicalRequestActivityTracker,
-        McpImageAssetMaintenanceError, McpImageAssetManager, ProxyIngressState, ProxyPortError,
-        ProxyPortStore, ProxyServerHandle, ReachabilityProbe, RequestTransitionSink,
-        ResponsesForwarder, RouteHealthRegistry, RouteSnapshot, RoutingSnapshot,
-        RoutingSnapshotStore, RuntimeDiagnosticEvent, RuntimeDiagnosticSink, build_proxy_router,
-        transition_proxy_port_with_listener_replaced,
+        McpImageAssetMaintenanceError, McpImageAssetManager, OutboundProxyTransport,
+        ProxyIngressState, ProxyPortError, ProxyPortStore, ProxyServerHandle, ReachabilityProbe,
+        RequestTransitionSink, ResponsesForwarder, RouteHealthRegistry, RouteSnapshot,
+        RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
+        build_proxy_router, transition_proxy_port_with_listener_replaced,
     },
     qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     recovery::{
@@ -267,9 +269,11 @@ pub struct DesktopLifecycleServices {
     ingress: tokio::sync::Mutex<Option<ProxyIngressState>>,
     routing: RoutingSnapshotStore,
     route_health: Arc<RouteHealthRegistry>,
+    outbound_proxy: OutboundProxyTransport,
     routing_write_gate: Arc<tokio::sync::Mutex<()>>,
     codex_projection_gate: Arc<tokio::sync::Mutex<()>>,
     balance_settings_write_gate: tokio::sync::Mutex<()>,
+    outbound_proxy_settings_write_gate: tokio::sync::Mutex<()>,
     menu_bar_settings_write_gate: tokio::sync::Mutex<()>,
     codex_model_retry: tokio::sync::Mutex<Option<CodexModelRetryPermit>>,
     codex_model_retry_generation: AtomicU64,
@@ -375,9 +379,11 @@ impl DesktopLifecycleServices {
             ingress: tokio::sync::Mutex::new(None),
             routing: RoutingSnapshotStore::default(),
             route_health,
+            outbound_proxy: OutboundProxyTransport::default(),
             routing_write_gate: Arc::new(tokio::sync::Mutex::new(())),
             codex_projection_gate: Arc::new(tokio::sync::Mutex::new(())),
             balance_settings_write_gate: tokio::sync::Mutex::new(()),
+            outbound_proxy_settings_write_gate: tokio::sync::Mutex::new(()),
             menu_bar_settings_write_gate: tokio::sync::Mutex::new(()),
             codex_model_retry: tokio::sync::Mutex::new(None),
             codex_model_retry_generation: AtomicU64::new(0),
@@ -401,6 +407,7 @@ impl DesktopLifecycleServices {
         ProxyIngressState::new(gateway_token, Arc::new(forwarder))
             .with_runtime_sinks(history, self.diagnostics.clone())
             .with_activity_tracker(self.activity.clone())
+            .with_outbound_proxy(self.outbound_proxy.clone())
             .with_routing_store(self.routing.clone())
             .with_mcp_image_assets(self.mcp_image_assets.clone())
             .with_image_asset_change_sink(Arc::new(DesktopImageAssetChangeSink {
@@ -899,6 +906,7 @@ impl DesktopLifecycleServices {
                 .map_err(map_storage_error)?,
             fallback: self.runtime_state.bootstrap_snapshot().fallback,
             proxy_port: settings.proxy_port,
+            outbound_proxy: (&settings.outbound_proxy).into(),
             codex_status: self.codex_status().await?,
             baseline: baseline.as_ref().map_or(
                 CodexBaselineSummaryDto {
@@ -1621,6 +1629,80 @@ impl DesktopLifecycleServices {
             .publish_background_change(vec![StateArea::BalanceSettings]))
     }
 
+    pub async fn update_outbound_proxy_settings(
+        &self,
+        input: UpdateOutboundProxySettingsInputDto,
+    ) -> Result<MutationResultDto, IpcErrorDto> {
+        let parsed_url = input
+            .url
+            .as_deref()
+            .map(OutboundProxyUrl::parse)
+            .transpose()
+            .map_err(|error| map_validation_error(&error))?;
+        let _write = self.outbound_proxy_settings_write_gate.lock().await;
+        let database = self.database_for_ipc().await?;
+        let current = database.app_settings().await.map_err(map_storage_error)?;
+        let retained_url = parsed_url
+            .clone()
+            .or_else(|| current.outbound_proxy.url().cloned());
+        let candidate = OutboundProxyConfig::new(input.enabled, retained_url)
+            .map_err(|error| map_validation_error(&error))?;
+        let endpoint = OutboundProxyTransport::endpoint_from_config(&candidate)
+            .map_err(|_| ipc_error("outbound_proxy_invalid", "代理地址无效。", false))?;
+        let changed = database
+            .set_outbound_proxy_settings(input.enabled, parsed_url)
+            .await
+            .map_err(map_storage_error)?;
+        self.outbound_proxy.set_endpoint(endpoint);
+        if !changed {
+            return Ok(MutationResultDto {
+                revision: self.runtime_state.bootstrap_snapshot().revision,
+            });
+        }
+        Ok(self
+            .runtime_state
+            .publish_background_change(vec![StateArea::OutboundProxy]))
+    }
+
+    pub async fn test_outbound_proxy(&self, raw_url: String) -> Result<(), IpcErrorDto> {
+        let proxy =
+            OutboundProxyUrl::parse(&raw_url).map_err(|error| map_validation_error(&error))?;
+        drop(raw_url);
+        let parsed = url::Url::parse(proxy.as_str())
+            .map_err(|_| ipc_error("outbound_proxy_invalid", "代理地址无效。", false))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| ipc_error("outbound_proxy_invalid", "代理地址无效。", false))?
+            .to_owned();
+        let port = parsed
+            .port_or_known_default()
+            .or_else(|| matches!(parsed.scheme(), "socks5" | "socks5h").then_some(1_080));
+        let port =
+            port.ok_or_else(|| ipc_error("outbound_proxy_invalid", "代理地址无效。", false))?;
+        let reachable = tokio::time::timeout(Duration::from_secs(5), async move {
+            let addresses = tokio::net::lookup_host((host.as_str(), port))
+                .await
+                .map_err(|_| ())?;
+            for address in addresses.take(16) {
+                if tokio::net::TcpStream::connect(address).await.is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(())
+        })
+        .await
+        .is_ok_and(|result| result.is_ok());
+        if reachable {
+            Ok(())
+        } else {
+            Err(ipc_error(
+                "outbound_proxy_unreachable",
+                "无法连接到代理服务器。",
+                true,
+            ))
+        }
+    }
+
     pub async fn update_appearance_preference(
         &self,
         appearance_preference: AppearancePreference,
@@ -1777,7 +1859,7 @@ impl DesktopLifecycleServices {
             ApiKey::parse(&input.api_key).map_err(|error| map_validation_error(&error))?;
         let base_url =
             BaseUrl::parse(&input.base_url).map_err(|error| map_validation_error(&error))?;
-        BalanceExecutor::new()
+        BalanceExecutor::new_with_outbound_proxy(&self.outbound_proxy)
             .map_err(|_| ipc_error("balance_unavailable", "余额服务尚未就绪。", true))?
             .query(
                 &BalanceQueryConfig {
@@ -1795,7 +1877,7 @@ impl DesktopLifecycleServices {
         &self,
         base_url: String,
     ) -> Result<ReachabilityResult, IpcErrorDto> {
-        let probe = ReachabilityProbe::new()
+        let probe = ReachabilityProbe::new_with_outbound_proxy(&self.outbound_proxy)
             .map_err(|_| ipc_error("reachability_unavailable", "地址检查暂不可用。", true))?;
         probe
             .check(&base_url)
@@ -3063,6 +3145,9 @@ impl AppLifecycleServices for DesktopLifecycleServices {
             .app_settings()
             .await
             .map_err(|_| LifecycleFailure::Database)?;
+        self.outbound_proxy
+            .apply(&settings.outbound_proxy)
+            .map_err(|_| LifecycleFailure::Proxy)?;
         let gateway_token = load_or_create_gateway_token(&database)
             .await
             .map_err(|_| LifecycleFailure::Database)?;
@@ -3113,7 +3198,7 @@ impl AppLifecycleServices for DesktopLifecycleServices {
             route_health: Arc::clone(&self.route_health),
         });
         let transition_sink: Arc<dyn RequestTransitionSink> = Arc::new(transitions);
-        let forwarder = ResponsesForwarder::new()
+        let forwarder = ResponsesForwarder::new_with_outbound_proxy(&self.outbound_proxy)
             .map_err(|_| LifecycleFailure::Proxy)?
             .with_runtime_services(history.clone(), self.diagnostics.clone(), inference.clone())
             .with_fallback_services(self.routing.clone(), activator)
@@ -3164,7 +3249,10 @@ impl AppLifecycleServices for DesktopLifecycleServices {
             .await
             .map_err(|_| LifecycleFailure::Database)?;
         let source = Arc::new(SqliteBalanceRouteSource::new(database));
-        let engine = Arc::new(BalanceExecutor::new().map_err(|_| LifecycleFailure::Balance)?);
+        let engine = Arc::new(
+            BalanceExecutor::new_with_outbound_proxy(&self.outbound_proxy)
+                .map_err(|_| LifecycleFailure::Balance)?,
+        );
         let coordinator = BalanceCoordinator::new(
             source,
             engine,
@@ -3582,6 +3670,22 @@ pub async fn update_balance_query_settings(
     input: BalanceQuerySettingsDto,
 ) -> Result<MutationResultDto, IpcErrorDto> {
     services.update_balance_query_settings(input).await
+}
+
+#[tauri::command]
+pub async fn update_outbound_proxy_settings(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+    input: UpdateOutboundProxySettingsInputDto,
+) -> Result<MutationResultDto, IpcErrorDto> {
+    services.update_outbound_proxy_settings(input).await
+}
+
+#[tauri::command]
+pub async fn test_outbound_proxy(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+    url: String,
+) -> Result<(), IpcErrorDto> {
+    services.test_outbound_proxy(url).await
 }
 
 #[tauri::command]
@@ -6103,6 +6207,120 @@ mod tests {
 
         services.stop_balance().await;
         services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn outbound_proxy_settings_hot_swap_and_retain_the_last_url_in_direct_mode() {
+        let directory = TempDir::new().expect("app data fixture");
+        let runtime = Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink)));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+
+        let endpoint = "http://127.0.0.1:7890";
+        services
+            .update_outbound_proxy_settings(UpdateOutboundProxySettingsInputDto {
+                enabled: true,
+                url: Some(endpoint.to_owned()),
+            })
+            .await
+            .expect("enable outbound proxy");
+        assert_eq!(
+            services
+                .outbound_proxy
+                .endpoint()
+                .as_deref()
+                .map(url::Url::as_str)
+                .map(|value| value.trim_end_matches('/')),
+            Some(endpoint)
+        );
+
+        services
+            .update_outbound_proxy_settings(UpdateOutboundProxySettingsInputDto {
+                enabled: false,
+                url: None,
+            })
+            .await
+            .expect("switch to direct mode");
+        assert!(services.outbound_proxy.endpoint().is_none());
+        let durable = services
+            .database()
+            .await
+            .expect("database")
+            .app_settings()
+            .await
+            .expect("settings");
+        assert!(!durable.outbound_proxy.enabled());
+        assert_eq!(
+            durable.outbound_proxy.url().map(OutboundProxyUrl::as_str),
+            Some(endpoint)
+        );
+
+        let error = services
+            .update_outbound_proxy_settings(UpdateOutboundProxySettingsInputDto {
+                enabled: true,
+                url: Some("http://user:secret@127.0.0.1:7890".to_owned()),
+            })
+            .await
+            .expect_err("credential-bearing proxy must fail closed");
+        assert_eq!(error.code, "outbound_proxy_url_invalid");
+        assert!(services.outbound_proxy.endpoint().is_none());
+    }
+
+    #[tokio::test]
+    async fn outbound_proxy_test_is_bounded_and_does_not_mutate_active_settings() {
+        let directory = TempDir::new().expect("app data fixture");
+        let runtime = Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink)));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            runtime,
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("proxy fixture");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("proxy fixture address")
+        );
+        services
+            .test_outbound_proxy(endpoint)
+            .await
+            .expect("reachable proxy");
+        assert!(services.outbound_proxy.endpoint().is_none());
+        assert!(
+            !services
+                .database()
+                .await
+                .expect("database")
+                .app_settings()
+                .await
+                .expect("settings")
+                .outbound_proxy
+                .enabled()
+        );
+
+        let error = services
+            .test_outbound_proxy("http://user:secret@127.0.0.1:7890".to_owned())
+            .await
+            .expect_err("invalid proxy test input");
+        assert_eq!(error.code, "outbound_proxy_url_invalid");
+        assert_eq!(error.field.as_deref(), Some("url"));
     }
 
     #[tokio::test]

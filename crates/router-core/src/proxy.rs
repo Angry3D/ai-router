@@ -54,6 +54,7 @@ mod fallback;
 mod health;
 mod history;
 mod images;
+mod outbound;
 mod sse;
 pub(crate) mod upstream;
 
@@ -82,6 +83,7 @@ pub use images::{
     McpImageAssetMaintenanceError, McpImageAssetManager, McpImageAssetSummary,
     NoopImageAssetChangeSink,
 };
+pub use outbound::{OutboundHttpClient, OutboundProxyTransport};
 pub use upstream::{ResponsesForwarder, UpstreamForwarderConfig};
 
 pub const MAX_REQUEST_WIRE_BYTES: usize = 200 * 1024 * 1024;
@@ -279,6 +281,7 @@ pub struct ProxyIngressState {
     wire_limit: usize,
     decoded_limit: usize,
     images: ImagesGenerationService,
+    outbound_proxy: OutboundProxyTransport,
     mcp_image_assets: Option<McpImageAssetManager>,
     #[cfg(test)]
     image_asset_downloader: images::download::ImageAssetDownloader,
@@ -289,9 +292,12 @@ impl ProxyIngressState {
     #[must_use]
     pub fn new(gateway_token: &str, upstream: Arc<dyn UpstreamRequestHandler>) -> Self {
         let routing = RoutingSnapshotStore::default();
+        let outbound_proxy = OutboundProxyTransport::default();
         Self {
             gateway_token_digest: Sha256::digest(gateway_token.as_bytes()).into(),
-            images: ImagesGenerationService::new(routing.clone()),
+            images: ImagesGenerationService::new(routing.clone())
+                .with_outbound_proxy(outbound_proxy.clone()),
+            outbound_proxy,
             routing,
             upstream,
             history: Arc::new(NoopHistorySink),
@@ -325,8 +331,16 @@ impl ProxyIngressState {
 
     #[must_use]
     pub fn with_routing_store(mut self, routing: RoutingSnapshotStore) -> Self {
-        self.images = ImagesGenerationService::new(routing.clone());
+        self.images = ImagesGenerationService::new(routing.clone())
+            .with_outbound_proxy(self.outbound_proxy.clone());
         self.routing = routing;
+        self
+    }
+
+    #[must_use]
+    pub fn with_outbound_proxy(mut self, outbound_proxy: OutboundProxyTransport) -> Self {
+        self.images = self.images.with_outbound_proxy(outbound_proxy.clone());
+        self.outbound_proxy = outbound_proxy;
         self
     }
 
@@ -1081,7 +1095,7 @@ where
 }
 
 pub struct ReachabilityProbe {
-    client: reqwest::Client,
+    client: OutboundHttpClient,
     attempt_timeout: Duration,
     slow_threshold: Duration,
 }
@@ -1093,8 +1107,20 @@ impl ReachabilityProbe {
     ///
     /// Returns a client-construction error.
     pub fn new() -> Result<Self, reqwest::Error> {
+        Self::new_with_outbound_proxy(&OutboundProxyTransport::default())
+    }
+
+    /// Creates a no-key reachability client backed by the shared outbound
+    /// proxy state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a client-construction error.
+    pub fn new_with_outbound_proxy(
+        outbound_proxy: &OutboundProxyTransport,
+    ) -> Result<Self, reqwest::Error> {
         Ok(Self {
-            client: reqwest::Client::builder().build()?,
+            client: OutboundHttpClient::new(outbound_proxy.clone(), reqwest::Client::builder)?,
             attempt_timeout: Duration::from_secs(8),
             slow_threshold: Duration::from_secs(6),
         })
@@ -1121,8 +1147,10 @@ impl ReachabilityProbe {
         let inference_url = base_url.inference_url();
         for attempt in 0..2 {
             let started = Instant::now();
-            let result = self
-                .client
+            let Ok(client) = self.client.client() else {
+                return Ok(unreachable_result("network"));
+            };
+            let result = client
                 .get(&inference_url)
                 .header(header::ACCEPT, "*/*")
                 .header(header::ACCEPT_ENCODING, "identity")

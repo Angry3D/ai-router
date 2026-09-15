@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 
 pub const MAX_ROUTE_NAME_CHARS: usize = 30;
 pub const MAX_BASE_URL_BYTES: usize = 2_048;
+pub const MAX_OUTBOUND_PROXY_URL_BYTES: usize = 2_048;
 pub const MAX_API_KEY_BYTES: usize = 8_192;
 pub const MAX_BALANCE_SCRIPT_BYTES: usize = 256 * 1024;
 pub const MIN_MENU_BALANCE_DEBOUNCE_SECONDS: u16 = 10;
@@ -164,6 +165,7 @@ impl BaseUrl {
             || parsed.host_str().is_none()
             || !parsed.username().is_empty()
             || parsed.password().is_some()
+            || parsed.port() == Some(0)
             || parsed.query().is_some()
             || parsed.fragment().is_some()
         {
@@ -222,6 +224,109 @@ impl BaseUrl {
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
             .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct OutboundProxyUrl(String);
+
+impl OutboundProxyUrl {
+    /// Validates and normalizes an explicit HTTP or SOCKS proxy URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a field-specific error for an oversized or malformed URL, an
+    /// unsupported scheme, credentials, query parameters, fragments, or
+    /// control characters.
+    pub fn parse(value: &str) -> Result<Self, ValidationError> {
+        if value.chars().any(char::is_control) {
+            return Err(ValidationError::new("outbound_proxy_url_invalid", "url"));
+        }
+        let value = value.trim();
+        if value.len() > MAX_OUTBOUND_PROXY_URL_BYTES {
+            return Err(ValidationError::new("outbound_proxy_url_too_long", "url"));
+        }
+        let parsed = Url::parse(value)
+            .map_err(|_| ValidationError::new("outbound_proxy_url_invalid", "url"))?;
+        let authority = value
+            .split_once("://")
+            .and_then(|(_, remainder)| remainder.split(['/', '?', '#']).next());
+        let has_userinfo = authority.is_some_and(|authority| authority.contains('@'));
+        let has_empty_port = authority.is_some_and(|authority| authority.ends_with(':'));
+        if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h")
+            || parsed.host_str().is_none()
+            || has_userinfo
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || has_empty_port
+            || parsed.port() == Some(0)
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(ValidationError::new("outbound_proxy_url_invalid", "url"));
+        }
+
+        Ok(Self(parsed.as_str().trim_end_matches('/').to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OutboundProxyUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("OutboundProxyUrl")
+            .field(&"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct OutboundProxyConfig {
+    enabled: bool,
+    url: Option<OutboundProxyUrl>,
+}
+
+impl OutboundProxyConfig {
+    /// Builds a complete proxy setting while enforcing that enabled mode has
+    /// a configured URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a field-specific required error when proxy mode has no URL.
+    pub fn new(enabled: bool, url: Option<OutboundProxyUrl>) -> Result<Self, ValidationError> {
+        if enabled && url.is_none() {
+            return Err(ValidationError::new("outbound_proxy_url_required", "url"));
+        }
+        Ok(Self { enabled, url })
+    }
+
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub const fn url(&self) -> Option<&OutboundProxyUrl> {
+        self.url.as_ref()
+    }
+
+    #[must_use]
+    pub fn into_url(self) -> Option<OutboundProxyUrl> {
+        self.url
+    }
+}
+
+impl fmt::Debug for OutboundProxyConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutboundProxyConfig")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url.as_ref().map(|_| "[redacted]"))
+            .finish()
     }
 }
 
@@ -709,7 +814,8 @@ mod tests {
     use super::{
         ApiKey, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
         ImagesGenerationTimeout, MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW,
-        McpImageCapacityWarningThreshold, RouteName,
+        MAX_OUTBOUND_PROXY_URL_BYTES, McpImageCapacityWarningThreshold, OutboundProxyConfig,
+        OutboundProxyUrl, RouteName,
     };
 
     #[derive(Deserialize)]
@@ -766,6 +872,71 @@ mod tests {
         let error = BaseUrl::parse(&oversized).expect_err("oversized URL");
         assert_eq!(error.code, "base_url_too_long");
         assert_eq!(error.field, "baseUrl");
+    }
+
+    #[test]
+    fn outbound_proxy_url_normalizes_supported_credential_free_urls() {
+        for (input, expected) in [
+            (" http://127.0.0.1:7890/ ", "http://127.0.0.1:7890"),
+            ("https://proxy.example:8443", "https://proxy.example:8443"),
+            ("socks5://localhost:7890/", "socks5://localhost:7890"),
+            ("socks5h://[::1]:7890", "socks5h://[::1]:7890"),
+        ] {
+            let proxy = OutboundProxyUrl::parse(input).expect("valid proxy URL");
+            assert_eq!(proxy.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn outbound_proxy_url_rejects_unsafe_or_unsupported_values() {
+        for input in [
+            "",
+            "127.0.0.1:7890",
+            "ftp://proxy.example:21",
+            "http://user@proxy.example:7890",
+            "http://:password@proxy.example:7890",
+            "http://@proxy.example:7890",
+            "http://proxy.example:7890?mode=fast",
+            "http://proxy.example:7890#fragment",
+            "http://proxy.example:invalid",
+            "http://proxy.example:",
+            "http://proxy.example:0",
+            "http://proxy.example:\u{000a}7890",
+        ] {
+            let error = OutboundProxyUrl::parse(input).expect_err("invalid proxy URL");
+            assert_eq!(error.code, "outbound_proxy_url_invalid", "input: {input:?}");
+            assert_eq!(error.field, "url", "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn outbound_proxy_url_enforces_the_utf8_byte_limit() {
+        let oversized = format!(
+            "http://proxy.example/{}",
+            "x".repeat(MAX_OUTBOUND_PROXY_URL_BYTES)
+        );
+        let error = OutboundProxyUrl::parse(&oversized).expect_err("oversized proxy URL");
+        assert_eq!(error.code, "outbound_proxy_url_too_long");
+        assert_eq!(error.field, "url");
+    }
+
+    #[test]
+    fn outbound_proxy_config_requires_a_url_only_when_enabled() {
+        assert_eq!(OutboundProxyConfig::default().url(), None);
+        assert!(OutboundProxyConfig::new(false, None).is_ok());
+        let error = OutboundProxyConfig::new(true, None).expect_err("missing proxy URL");
+        assert_eq!(error.code, "outbound_proxy_url_required");
+        assert_eq!(error.field, "url");
+    }
+
+    #[test]
+    fn outbound_proxy_debug_output_redacts_the_url() {
+        let proxy = OutboundProxyUrl::parse("http://proxy.example:7890").expect("proxy URL");
+        let config = OutboundProxyConfig::new(true, Some(proxy.clone())).expect("proxy config");
+        assert_eq!(format!("{proxy:?}"), "OutboundProxyUrl(\"[redacted]\")");
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("proxy.example"));
     }
 
     #[test]

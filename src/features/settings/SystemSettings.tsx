@@ -8,8 +8,10 @@ import {
   createRecoveryPoint,
   normalizeIpcError,
   openRuntimeLogDirectory,
+  testOutboundProxy,
   updateBalanceQuerySettings,
   updateMenuBarSettings,
+  updateOutboundProxySettings,
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
 import { useAppearance } from "../appearance/useAppearance";
@@ -18,6 +20,7 @@ import type {
   ApplicationUpdateSnapshotDto,
   BalanceQuerySettingsDto,
   MenuBarSettingsDto,
+  OutboundProxySettingsDto,
   RecoveryHealthKind,
   SettingsSnapshotDto,
 } from "../../generated";
@@ -58,10 +61,292 @@ export function SystemSettings({
     <SettingsPage title="系统" titleId="system-title">
       <AppearanceSettings />
       <MenuBarSettings snapshot={snapshot} />
+      <OutboundProxySettings settings={snapshot.outboundProxy} />
       <ApplicationUpdateSettings snapshot={applicationUpdate} />
       <ParameterSettings snapshot={snapshot} />
       <DataLogSettings snapshot={snapshot} />
     </SettingsPage>
+  );
+}
+
+type OutboundProxyMode = "direct" | "proxy";
+type OutboundProxyTestState = "idle" | "pending" | "success" | "failure";
+
+const OUTBOUND_PROXY_URL_MAX_LENGTH = 2048;
+
+function validateOutboundProxyDraft(raw: string): string | null {
+  const value = raw.trim();
+  if (!value) return "请输入代理地址。";
+  if (
+    new TextEncoder().encode(value).byteLength > OUTBOUND_PROXY_URL_MAX_LENGTH
+  )
+    return "代理地址过长。";
+  if (
+    Array.from(value).some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || (codePoint >= 127 && codePoint <= 159);
+    })
+  )
+    return "代理地址不能包含控制字符。";
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "请输入有效的代理地址。";
+  }
+  if (!["http:", "https:", "socks5:", "socks5h:"].includes(parsed.protocol))
+    return "支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H 代理。";
+  if (parsed.username || parsed.password)
+    return "代理地址不能包含用户名或密码。";
+  if (parsed.search || parsed.hash) return "代理地址不能包含查询参数或片段。";
+  return null;
+}
+
+function OutboundProxySettings({
+  settings,
+}: {
+  settings: OutboundProxySettingsDto;
+}) {
+  const queryClient = useQueryClient();
+  const [confirmed, setConfirmed] = useState(settings);
+  const [mode, setMode] = useState<OutboundProxyMode>(
+    settings.enabled ? "proxy" : "direct",
+  );
+  const [draftUrl, setDraftUrl] = useState(settings.url ?? "");
+  const [syncedSnapshotKey, setSyncedSnapshotKey] = useState(
+    `${settings.enabled}:${settings.url ?? ""}`,
+  );
+  const [savePending, setSavePending] = useState(false);
+  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [modeError, setModeError] = useState<string | null>(null);
+  const [testState, setTestState] = useState<OutboundProxyTestState>("idle");
+  const snapshotKey = `${settings.enabled}:${settings.url ?? ""}`;
+  const draftValidation = validateOutboundProxyDraft(draftUrl);
+  const pending = savePending || testState === "pending";
+
+  if (!pending && syncedSnapshotKey !== snapshotKey) {
+    setSyncedSnapshotKey(snapshotKey);
+    setConfirmed(settings);
+    setMode(settings.enabled ? "proxy" : "direct");
+    setDraftUrl(settings.url ?? "");
+    setFieldError(null);
+    setModeError(null);
+    setTestState("idle");
+  }
+
+  async function refreshSettings() {
+    await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
+  }
+
+  async function selectMode(nextMode: OutboundProxyMode) {
+    if (pending || nextMode === mode) return;
+    setMode(nextMode);
+    setFieldError(null);
+    setModeError(null);
+    setTestState("idle");
+
+    if (nextMode === "proxy" && confirmed.url === null) return;
+    const next: OutboundProxySettingsDto = {
+      enabled: nextMode === "proxy",
+      url: confirmed.url,
+    };
+    if (next.enabled === confirmed.enabled) return;
+
+    setSavePending(true);
+    try {
+      await updateOutboundProxySettings(next);
+      setConfirmed(next);
+      if (nextMode === "direct") setDraftUrl(next.url ?? "");
+      await refreshSettings();
+    } catch (reason) {
+      setMode(confirmed.enabled ? "proxy" : "direct");
+      setModeError(normalizeIpcError(reason).message);
+    } finally {
+      setSavePending(false);
+    }
+  }
+
+  async function saveDraft() {
+    if (pending || mode !== "proxy") return;
+    const value = draftUrl.trim();
+    const validation = validateOutboundProxyDraft(value);
+    if (validation) {
+      setFieldError(validation);
+      return;
+    }
+    if (confirmed.enabled && confirmed.url === value) {
+      setDraftUrl(value);
+      setFieldError(null);
+      return;
+    }
+
+    const next: OutboundProxySettingsDto = { enabled: true, url: value };
+    setSavePending(true);
+    setFieldError(null);
+    setModeError(null);
+    setTestState("idle");
+    try {
+      await updateOutboundProxySettings(next);
+      setConfirmed(next);
+      setDraftUrl(value);
+      await refreshSettings();
+    } catch (reason) {
+      setFieldError(normalizeIpcError(reason).message);
+    } finally {
+      setSavePending(false);
+    }
+  }
+
+  async function runConnectionTest() {
+    if (pending) return;
+    const value = draftUrl.trim();
+    const validation = validateOutboundProxyDraft(value);
+    if (validation) {
+      setFieldError(validation);
+      return;
+    }
+    setFieldError(null);
+    setModeError(null);
+    setTestState("pending");
+    try {
+      await testOutboundProxy(value);
+      setTestState("success");
+    } catch {
+      setTestState("failure");
+    }
+  }
+
+  return (
+    <SettingsSection title="全局出站代理">
+      <SettingsFieldRow label="模式">
+        <div
+          className="settings-segments outbound-proxy-mode"
+          role="radiogroup"
+          aria-label="全局出站代理模式"
+          aria-busy={savePending}
+        >
+          {(
+            [
+              { value: "direct", label: "直连" },
+              { value: "proxy", label: "代理" },
+            ] as const
+          ).map((option) => (
+            <label className="settings-segment-option" key={option.value}>
+              <input
+                type="radio"
+                name="outbound-proxy-mode"
+                value={option.value}
+                checked={mode === option.value}
+                disabled={pending}
+                data-outbound-proxy-no-blur-save="true"
+                onChange={() => void selectMode(option.value)}
+              />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+      </SettingsFieldRow>
+      {mode === "proxy" ? (
+        <SettingsFieldRow
+          label="代理地址"
+          htmlFor="outbound-proxy-url"
+          required
+          className="outbound-proxy-url-row"
+        >
+          <div className="outbound-proxy-url-control">
+            <SettingsTextInput
+              id="outbound-proxy-url"
+              type="url"
+              inputMode="url"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              placeholder="http://127.0.0.1:7890"
+              value={draftUrl}
+              disabled={pending}
+              aria-required="true"
+              aria-invalid={fieldError !== null || draftValidation !== null}
+              aria-describedby={
+                fieldError || draftValidation
+                  ? "outbound-proxy-url-error"
+                  : "outbound-proxy-help"
+              }
+              onChange={(event) => {
+                setDraftUrl(event.currentTarget.value);
+                setFieldError(null);
+                setModeError(null);
+                setTestState("idle");
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                void saveDraft();
+              }}
+              onBlur={(event) => {
+                const nextTarget = event.relatedTarget;
+                if (
+                  nextTarget instanceof HTMLElement &&
+                  nextTarget.closest(
+                    '[data-outbound-proxy-no-blur-save="true"]',
+                  )
+                ) {
+                  return;
+                }
+                void saveDraft();
+              }}
+            />
+            <SettingsButton
+              type="button"
+              disabled={pending || draftValidation !== null}
+              data-outbound-proxy-no-blur-save="true"
+              onClick={() => void runConnectionTest()}
+            >
+              测试连接
+            </SettingsButton>
+            <div
+              className="outbound-proxy-test-status"
+              aria-live="polite"
+              aria-busy={testState === "pending"}
+            >
+              {testState === "pending" ? (
+                <SettingsStatus>
+                  <LoaderCircle aria-hidden="true" className="spin" size={14} />
+                  正在测试
+                </SettingsStatus>
+              ) : null}
+              {testState === "success" ? (
+                <SettingsStatus tone="success">连接正常</SettingsStatus>
+              ) : null}
+              {testState === "failure" ? (
+                <SettingsStatus tone="danger">连接失败</SettingsStatus>
+              ) : null}
+            </div>
+            {fieldError || draftValidation ? (
+              <p
+                id="outbound-proxy-url-error"
+                className="parameter-field-error outbound-proxy-field-error"
+                role="alert"
+              >
+                {fieldError ?? draftValidation}
+              </p>
+            ) : null}
+          </div>
+        </SettingsFieldRow>
+      ) : null}
+      <p id="outbound-proxy-help" className="outbound-proxy-help">
+        {mode === "proxy"
+          ? "仅本地回环地址直连，外部请求使用此代理。"
+          : "外部请求将直接连接目标服务。"}
+      </p>
+      <p
+        className="outbound-proxy-mode-error"
+        role={modeError ? "alert" : undefined}
+        aria-live="polite"
+      >
+        {modeError ?? "\u00a0"}
+      </p>
+    </SettingsSection>
   );
 }
 

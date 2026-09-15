@@ -10,13 +10,14 @@ use router_core::{
         CodexModelsActivation, CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto,
         CodexRecoveryUpdatePreviewDto, CodexRestartNoticeDto, FallbackStopReasonDto,
         HistorySummaryDto, ImagesGenerationSettingsDto, McpImageCapacityDto, MenuBarSettingsDto,
-        MenuSnapshotDto, MetadataFailureDto, RecoveryCandidateDto, RecoveryHealthDto,
-        RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult,
-        RouteActivationPreviewDto, RouteActivationResultDto, RouteCatalogMode, RouteEditDto,
-        RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto, RoutingSkippedRouteDto,
-        SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto, UsageAttemptDto, UsageCostDto,
-        UsageCostStateDto, UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto,
-        UsageHistoryQueryDto, UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
+        MenuSnapshotDto, MetadataFailureDto, OutboundProxySettingsDto, RecoveryCandidateDto,
+        RecoveryHealthDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
+        ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
+        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto,
+        RoutingSkippedRouteDto, SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
+        UpdateOutboundProxySettingsInputDto, UsageAttemptDto, UsageCostDto, UsageCostStateDto,
+        UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto,
+        UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
         UsageStatisticsAttributionDimensionDto, UsageStatisticsAttributionDto,
         UsageStatisticsAttributionMetricDto, UsageStatisticsBucketDto, UsageStatisticsDto,
         UsageStatisticsGranularityDto, UsageStatisticsQueryDto, UsageStatisticsTokensDto,
@@ -78,6 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     HistorySummaryDto::export_all_to(&output)?;
     ImagesGenerationSettingsDto::export_all_to(&output)?;
     McpImageCapacityDto::export_all_to(&output)?;
+    OutboundProxySettingsDto::export_all_to(&output)?;
     MenuSnapshotDto::export_all_to(&output)?;
     MetadataFailureDto::export_all_to(&output)?;
     RecoveryCandidateDto::export_all_to(&output)?;
@@ -96,6 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     SettingsSnapshotDto::export_all_to(&output)?;
     MenuBarSettingsDto::export_all_to(&output)?;
     UpdateImagesGenerationSettingsInputDto::export_all_to(&output)?;
+    UpdateOutboundProxySettingsInputDto::export_all_to(&output)?;
     UsageAttemptDto::export_all_to(&output)?;
     UsageCostDto::export_all_to(&output)?;
     UsageCostStateDto::export_all_to(&output)?;

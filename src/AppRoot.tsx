@@ -24,6 +24,8 @@ function DevelopmentPreviewData({
       const parameters = new URLSearchParams(window.location.search);
       const mode = parameters.get("recovery");
       const imagesMode = parameters.get("images");
+      const outboundProxyMode = parameters.get("outbound-proxy");
+      const theme = parameters.get("theme");
       const fallbackUiPreview = parameters.get("fallback-ui") === "preview";
       const fatalIssue = mode?.startsWith("fatal-")
         ? mode.slice("fatal-".length)
@@ -32,13 +34,17 @@ function DevelopmentPreviewData({
         value: string | null,
       ): value is keyof typeof fixtures.previewFatalDatabaseBootstraps =>
         value !== null && value in fixtures.previewFatalDatabaseBootstraps;
-      const bootstrap =
+      const baseBootstrap =
         mode === "required" || mode === "empty"
           ? fixtures.previewRecoveryRequiredBootstrap
           : isFatalIssue(fatalIssue)
             ? fixtures.previewFatalDatabaseBootstraps[fatalIssue]
             : fixtures.previewMenuSnapshot.bootstrap;
-      const settings = fallbackUiPreview
+      const bootstrap =
+        theme === "light" || theme === "dark"
+          ? { ...baseBootstrap, appearancePreference: theme }
+          : baseBootstrap;
+      const baseSettings = fallbackUiPreview
         ? fixtures.previewFallbackUiSettingsSnapshot
         : mode === null && imagesMode === "missing"
           ? fixtures.previewMissingImageRouteSettingsSnapshot
@@ -49,6 +55,21 @@ function DevelopmentPreviewData({
               : mode === "degraded"
                 ? fixtures.previewDegradedSettingsSnapshot
                 : fixtures.previewSettingsSnapshot;
+      const settings =
+        outboundProxyMode === "enabled"
+          ? {
+              ...baseSettings,
+              outboundProxy: {
+                enabled: true,
+                url: "http://127.0.0.1:7890",
+              },
+            }
+          : outboundProxyMode === "empty"
+            ? {
+                ...baseSettings,
+                outboundProxy: { enabled: false, url: null },
+              }
+            : baseSettings;
       queryClient.setQueryData(queryKeys.bootstrap, bootstrap);
       queryClient.setQueryData(queryKeys.menu, fixtures.previewMenuSnapshot);
       queryClient.setQueryData(queryKeys.settings, settings);

@@ -27,13 +27,13 @@ use crate::domain::{
     ApiKey, AppearancePreference, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
     CodexModelValidationError, CompletionState, DeliveryState,
     FallbackExcludedModelValidationError, ImagesGenerationTimeout,
-    McpImageCapacityWarningThreshold, RouteId, RouteMoveDirection, RouteName, SecretId,
-    UpstreamAttemptId, ValidationError,
+    McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl, RouteId,
+    RouteMoveDirection, RouteName, SecretId, UpstreamAttemptId, ValidationError,
 };
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
 
 const GENERAL_BALANCE_SOURCE_HASHES: [&str; 3] = [
     "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507",
@@ -48,6 +48,8 @@ fn is_general_balance_source_hash(source_hash: &str) -> bool {
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 type AppSettingsRow = (
     i64,
+    i64,
+    Option<String>,
     bool,
     bool,
     i64,
@@ -164,6 +166,7 @@ pub struct HistorySummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppSettingsRecord {
     pub proxy_port: u16,
+    pub outbound_proxy: OutboundProxyConfig,
     pub first_run_presented: bool,
     pub balance_script_risk_confirmed: bool,
     pub balance_query_policy: BalanceQueryPolicy,
@@ -2041,6 +2044,8 @@ impl DatabaseExecutor {
         self.call(|connection| {
             let (
                 proxy_port,
+                outbound_proxy_enabled,
+                outbound_proxy_url,
                 first_run_presented,
                 balance_script_risk_confirmed,
                 menu_debounce_seconds,
@@ -2056,7 +2061,7 @@ impl DatabaseExecutor {
                 mcp_image_capacity_active_episode,
                 mcp_image_capacity_dismissed_episode,
             ): AppSettingsRow = connection.query_row(
-                "SELECT proxy_port, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode FROM app_settings WHERE singleton = 1",
+                "SELECT proxy_port, outbound_proxy_enabled, outbound_proxy_url, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
@@ -2075,6 +2080,8 @@ impl DatabaseExecutor {
                         row.get(12)?,
                         row.get(13)?,
                         row.get(14)?,
+                        row.get(15)?,
+                        row.get(16)?,
                     ))
                 },
             )?;
@@ -2082,6 +2089,13 @@ impl DatabaseExecutor {
                 .ok()
                 .filter(|port| *port != 0)
                 .ok_or(StorageError::Initialization)?;
+            let outbound_proxy = OutboundProxyConfig::new(
+                parse_persisted_bool(outbound_proxy_enabled)?,
+                outbound_proxy_url
+                    .as_deref()
+                    .map(OutboundProxyUrl::parse)
+                    .transpose()?,
+            )?;
             let menu_debounce_seconds = u16::try_from(menu_debounce_seconds)
                 .map_err(|_| StorageError::Initialization)?;
             let automatic_refresh_minutes = u16::try_from(automatic_refresh_minutes)
@@ -2116,6 +2130,7 @@ impl DatabaseExecutor {
             }
             Ok(AppSettingsRecord {
                 proxy_port,
+                outbound_proxy,
                 first_run_presented,
                 balance_script_risk_confirmed,
                 balance_query_policy,
@@ -2304,6 +2319,50 @@ impl DatabaseExecutor {
             )?;
             transaction.commit()?;
             Ok(true)
+        })
+        .await
+    }
+
+    /// Atomically updates global outbound proxy mode and the last valid URL.
+    ///
+    /// Omitting the URL retains the currently saved address. This lets direct
+    /// mode disable proxy use without discarding a previously valid value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, transaction, or field-specific validation error.
+    pub async fn set_outbound_proxy_settings(
+        &self,
+        enabled: bool,
+        url: Option<OutboundProxyUrl>,
+    ) -> Result<bool, StorageError> {
+        self.call_critical(move |connection| {
+            let transaction = connection.transaction()?;
+            let (current_enabled, current_url): (i64, Option<String>) = transaction.query_row(
+                "SELECT outbound_proxy_enabled, outbound_proxy_url FROM app_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let current = OutboundProxyConfig::new(
+                parse_persisted_bool(current_enabled)?,
+                current_url
+                    .as_deref()
+                    .map(OutboundProxyUrl::parse)
+                    .transpose()?,
+            )?;
+            let retained_url = url.or_else(|| current.url().cloned());
+            let next = OutboundProxyConfig::new(enabled, retained_url)?;
+            if current == next {
+                transaction.commit()?;
+                return Ok((false, None));
+            }
+            transaction.execute(
+                "UPDATE app_settings SET outbound_proxy_enabled = ?1, outbound_proxy_url = ?2 WHERE singleton = 1",
+                params![next.enabled(), next.url().map(OutboundProxyUrl::as_str)],
+            )?;
+            let revision = mark_critical_change(&transaction)?;
+            transaction.commit()?;
+            Ok((true, Some(revision)))
         })
         .await
     }
@@ -3957,6 +4016,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     if version < 24 {
         migrate_v24(connection)?;
     }
+    if version < 25 {
+        migrate_v25(connection)?;
+    }
     Ok(())
 }
 
@@ -4556,6 +4618,20 @@ fn migrate_v24(connection: &mut Connection) -> Result<(), StorageError> {
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         "ALTER TABLE routes ADD COLUMN menu_visible INTEGER NOT NULL DEFAULT 1 CHECK (menu_visible IN (0, 1)); PRAGMA user_version = 24;",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v25(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "
+        ALTER TABLE app_settings ADD COLUMN outbound_proxy_enabled INTEGER NOT NULL DEFAULT 0
+            CHECK (outbound_proxy_enabled IN (0, 1));
+        ALTER TABLE app_settings ADD COLUMN outbound_proxy_url TEXT;
+        PRAGMA user_version = 25;
+        ",
     )?;
     transaction.commit()?;
     Ok(())
@@ -5288,13 +5364,14 @@ mod tests {
         migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7, migrate_v8, migrate_v9,
         migrate_v10, migrate_v11, migrate_v12, migrate_v13, migrate_v14, migrate_v15, migrate_v16,
         migrate_v17, migrate_v18, migrate_v19, migrate_v20, migrate_v21, migrate_v22, migrate_v23,
-        migrate_v24, statistics_attribution, statistics_bucket_windows, validate_balance_query,
+        migrate_v24, migrate_v25, statistics_attribution, statistics_bucket_windows,
+        validate_balance_query,
     };
     use crate::{
         balance::{BalanceQueryMode, BalanceRouteSource, LEGACY_GENERAL_V1_SOURCE},
         domain::{
             ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationTimeout,
-            McpImageCapacityWarningThreshold, RouteId, RouteMoveDirection,
+            McpImageCapacityWarningThreshold, OutboundProxyUrl, RouteId, RouteMoveDirection,
         },
         recovery::{
             NoopRecoveryEventSink, RecoveryCoordinator, RecoveryFailureCode, RecoveryHealthKind,
@@ -5477,6 +5554,53 @@ mod tests {
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .expect("version"),
             24
+        );
+    }
+
+    #[test]
+    fn migration_v25_defaults_outbound_proxy_and_rolls_back_atomically() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v22(&mut connection);
+        migrate_v23(&mut connection).expect("v23");
+        migrate_v24(&mut connection).expect("v24");
+        migrate_v25(&mut connection).expect("v25");
+
+        let values: (i64, Option<String>) = connection
+            .query_row(
+                "SELECT outbound_proxy_enabled, outbound_proxy_url FROM app_settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("outbound proxy settings");
+        assert_eq!(values, (0, None));
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            25
+        );
+
+        let mut rollback = Connection::open_in_memory().expect("rollback database");
+        migrate_test_database_to_v22(&mut rollback);
+        migrate_v23(&mut rollback).expect("v23");
+        migrate_v24(&mut rollback).expect("v24");
+        rollback
+            .execute(
+                "ALTER TABLE app_settings ADD COLUMN outbound_proxy_url TEXT",
+                [],
+            )
+            .expect("collision column");
+        assert!(migrate_v25(&mut rollback).is_err());
+        assert_eq!(
+            rollback
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            24
+        );
+        assert!(
+            rollback
+                .prepare("SELECT outbound_proxy_enabled FROM app_settings")
+                .is_err()
         );
     }
 
@@ -7142,6 +7266,139 @@ mod tests {
             initial.balance_script_risk_confirmed
         );
         assert_eq!(changed.balance_query_policy, initial.balance_query_policy);
+    }
+
+    #[tokio::test]
+    async fn outbound_proxy_settings_round_trip_retain_url_and_skip_no_op_revision() {
+        let (_directory, database) = database();
+        let initial = database.app_settings().await.expect("settings");
+        assert!(!initial.outbound_proxy.enabled());
+        assert_eq!(initial.outbound_proxy.url(), None);
+        let initial_revision = database.critical_revision().await.expect("revision");
+
+        let missing = database
+            .set_outbound_proxy_settings(true, None)
+            .await
+            .expect_err("enabled proxy needs a URL");
+        assert!(matches!(missing, StorageError::Validation(_)));
+        assert_eq!(
+            database
+                .critical_revision()
+                .await
+                .expect("unchanged revision"),
+            initial_revision
+        );
+
+        let first_url = OutboundProxyUrl::parse("http://127.0.0.1:7890/").expect("proxy URL");
+        assert!(
+            database
+                .set_outbound_proxy_settings(true, Some(first_url))
+                .await
+                .expect("enable proxy")
+        );
+        let enabled_revision = database
+            .critical_revision()
+            .await
+            .expect("enabled revision");
+        assert_eq!(enabled_revision, initial_revision + 1);
+        let enabled = database.app_settings().await.expect("enabled settings");
+        assert!(enabled.outbound_proxy.enabled());
+        assert_eq!(
+            enabled.outbound_proxy.url().map(OutboundProxyUrl::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+
+        assert!(
+            database
+                .set_outbound_proxy_settings(false, None)
+                .await
+                .expect("disable proxy")
+        );
+        let disabled = database.app_settings().await.expect("disabled settings");
+        assert!(!disabled.outbound_proxy.enabled());
+        assert_eq!(
+            disabled.outbound_proxy.url().map(OutboundProxyUrl::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+        let disabled_revision = database
+            .critical_revision()
+            .await
+            .expect("disabled revision");
+        assert_eq!(disabled_revision, enabled_revision + 1);
+
+        assert!(
+            !database
+                .set_outbound_proxy_settings(false, None)
+                .await
+                .expect("no-op proxy settings")
+        );
+        assert_eq!(
+            database.critical_revision().await.expect("no-op revision"),
+            disabled_revision
+        );
+
+        assert!(
+            database
+                .set_outbound_proxy_settings(true, None)
+                .await
+                .expect("restore retained proxy")
+        );
+        let restored = database.app_settings().await.expect("restored settings");
+        assert!(restored.outbound_proxy.enabled());
+        assert_eq!(
+            restored.outbound_proxy.url().map(OutboundProxyUrl::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_persisted_outbound_proxy_settings_fail_closed() {
+        let (_directory, database) = database();
+        database
+            .test_execute(|connection| {
+                connection.execute(
+                    "UPDATE app_settings SET outbound_proxy_url = 'http://user:secret@proxy.example:7890'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("inject credential URL");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Validation(_))
+        ));
+
+        database
+            .test_execute(|connection| {
+                connection.execute(
+                    "UPDATE app_settings SET outbound_proxy_enabled = 1, outbound_proxy_url = NULL",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("inject missing active URL");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Validation(_))
+        ));
+
+        database
+            .test_execute(|connection| {
+                connection.pragma_update(None, "ignore_check_constraints", true)?;
+                connection.execute(
+                    "UPDATE app_settings SET outbound_proxy_enabled = 2, outbound_proxy_url = NULL",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("inject invalid enablement");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Initialization)
+        ));
     }
 
     #[tokio::test]

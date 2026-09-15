@@ -122,8 +122,10 @@ vi.mock("../../api/ipc", () => ({
   setFallbackEnabled: ipc.setFallbackEnabled,
   startOverDatabase: ipc.startOverDatabase,
   testBalanceQuery: ipc.testBalanceQuery,
+  testOutboundProxy: vi.fn(),
   updateBalanceQuerySettings: ipc.updateBalanceQuerySettings,
   updateImagesGenerationSettings: ipc.updateImagesGenerationSettings,
+  updateOutboundProxySettings: vi.fn(),
   updateMcpImageCapacityThreshold: ipc.updateMcpImageCapacityThreshold,
   quitApplication: ipc.quitApplication,
 }));
