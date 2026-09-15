@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -5,7 +7,10 @@ use crate::storage::CodexModelRecord;
 use crate::{
     balance::{BalanceDisplaySnapshot, BalanceQueryMode, BalanceRefreshBatchState},
     codex_config::CodexConfigStatus,
-    domain::{BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, ValidationError},
+    domain::{
+        BalanceQueryPolicy, CompletionState, DeliveryState, OutboundProxyConfig, RouteId,
+        ValidationError,
+    },
     recovery::{DatabaseStartupIssue, RecoveryHealth, RecoveryHealthKind},
     state::{BootstrapSnapshotDto, FallbackStateDto, RouteSummaryDto},
     storage::{
@@ -937,6 +942,33 @@ pub struct ImagesGenerationSettingsDto {
     pub timeout_secs: u16,
 }
 
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct OutboundProxySettingsDto {
+    pub enabled: bool,
+    pub url: Option<String>,
+}
+
+impl From<&OutboundProxyConfig> for OutboundProxySettingsDto {
+    fn from(config: &OutboundProxyConfig) -> Self {
+        Self {
+            enabled: config.enabled(),
+            url: config.url().map(|url| url.as_str().to_owned()),
+        }
+    }
+}
+
+impl fmt::Debug for OutboundProxySettingsDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutboundProxySettingsDto")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -959,6 +991,24 @@ pub struct UpdateImagesGenerationSettingsInputDto {
     pub enabled: bool,
     pub route_id: Option<RouteId>,
     pub timeout_secs: u16,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct UpdateOutboundProxySettingsInputDto {
+    pub enabled: bool,
+    pub url: Option<String>,
+}
+
+impl fmt::Debug for UpdateOutboundProxySettingsInputDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UpdateOutboundProxySettingsInputDto")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 impl From<BalanceQueryPolicy> for BalanceQuerySettingsDto {
@@ -1002,6 +1052,7 @@ pub struct SettingsSnapshotDto {
     pub active_route_id: Option<RouteId>,
     pub fallback: FallbackStateDto,
     pub proxy_port: u16,
+    pub outbound_proxy: OutboundProxySettingsDto,
     pub codex_status: CodexConfigStatus,
     pub baseline: CodexBaselineSummaryDto,
     pub original_backup: CodexBaselineSummaryDto,
@@ -1136,11 +1187,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BalanceQuerySettingsDto, UsageFastStatusDto, UsageHistoryQueryDto, UsageHistoryRowDto,
-        UsageRequestDetailDto, UsageStatisticsDto,
+        BalanceQuerySettingsDto, OutboundProxySettingsDto, UpdateOutboundProxySettingsInputDto,
+        UsageFastStatusDto, UsageHistoryQueryDto, UsageHistoryRowDto, UsageRequestDetailDto,
+        UsageStatisticsDto,
     };
     use crate::{
-        domain::{BalanceQueryPolicy, CompletionState},
+        domain::{BalanceQueryPolicy, CompletionState, OutboundProxyConfig, OutboundProxyUrl},
         pricing::{CATALOG_VERSION, CostStatus, PRIORITY_CATALOG_VERSION},
         storage::{
             UsageHistoryRow, UsageRequestDetail, UsageStatistics, UsageStatisticsAttribution,
@@ -1169,6 +1221,34 @@ mod tests {
         }))
         .expect("integer DTO");
         assert!(BalanceQueryPolicy::try_from(zero).is_err());
+    }
+
+    #[test]
+    fn outbound_proxy_dtos_serialize_for_settings_and_redact_debug_output() {
+        let config = OutboundProxyConfig::new(
+            true,
+            Some(
+                OutboundProxyUrl::parse("http://proxy.example:7890/").expect("outbound proxy URL"),
+            ),
+        )
+        .expect("outbound proxy config");
+        let settings = OutboundProxySettingsDto::from(&config);
+        assert_eq!(
+            serde_json::to_value(&settings).expect("settings JSON"),
+            json!({
+                "enabled": true,
+                "url": "http://proxy.example:7890",
+            })
+        );
+        assert!(!format!("{settings:?}").contains("proxy.example"));
+
+        let input = UpdateOutboundProxySettingsInputDto {
+            enabled: true,
+            url: Some("http://synthetic-user:synthetic-secret@proxy.invalid:7890".to_owned()),
+        };
+        let debug = format!("{input:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("synthetic-secret"));
     }
 
     #[test]

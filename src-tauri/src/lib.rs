@@ -40,8 +40,9 @@ use runtime::{
     refresh_balance, reorder_routes_and_fallback, restore_codex, restore_recovery_point,
     retry_database_startup, runtime_log_bootstrap_plugin, runtime_log_plugin, save_route,
     set_fallback_enabled, show_settings_window, start_over_database, test_balance_query,
-    update_appearance_preference, update_balance_query_settings, update_images_generation_settings,
-    update_mcp_image_capacity_threshold, update_menu_bar_settings,
+    test_outbound_proxy, update_appearance_preference, update_balance_query_settings,
+    update_images_generation_settings, update_mcp_image_capacity_threshold,
+    update_menu_bar_settings, update_outbound_proxy_settings,
 };
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, ipc::Channel};
 
@@ -791,6 +792,8 @@ pub fn run() {
             dismiss_mcp_image_capacity_warning,
             set_fallback_enabled,
             update_balance_query_settings,
+            update_outbound_proxy_settings,
+            test_outbound_proxy,
             update_appearance_preference,
             update_menu_bar_settings,
             update_images_generation_settings,

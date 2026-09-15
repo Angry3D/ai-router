@@ -126,11 +126,11 @@ export function SettingsPage({
       className={classes("settings-page", className)}
       aria-labelledby={titleId}
     >
+      <SettingsPageTitle title={title} titleId={titleId} />
       <AppScrollArea
         className="settings-page-scroll"
         viewportClassName="settings-page-viewport"
       >
-        <SettingsPageTitle title={title} titleId={titleId} />
         {children}
       </AppScrollArea>
     </section>

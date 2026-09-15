@@ -112,6 +112,12 @@ describe("Settings visual primitives", () => {
     expect(pageTitle).toHaveAttribute("data-tauri-drag-region");
     expect(pageTitle.parentElement).toHaveClass("settings-page-title-band");
     expect(pageTitle.parentElement).toHaveAttribute("data-tauri-drag-region");
+    expect(pageTitle.closest(".settings-page-viewport")).toBeNull();
+    expect(
+      screen
+        .getByRole("heading", { name: "本地代理", level: 3 })
+        .closest(".settings-page-viewport"),
+    ).not.toBeNull();
     expect(
       screen.getByRole("heading", { name: "本地代理", level: 3 }),
     ).toBeInTheDocument();

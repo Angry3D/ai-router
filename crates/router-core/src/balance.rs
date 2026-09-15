@@ -15,7 +15,10 @@ use zeroize::Zeroizing;
 
 use crate::{
     domain::{ApiKey, BaseUrl, MAX_BALANCE_SCRIPT_BYTES},
-    proxy::upstream::{DecodeError, decode_supported, response_encodings},
+    proxy::{
+        OutboundHttpClient, OutboundProxyTransport,
+        upstream::{DecodeError, decode_supported, response_encodings},
+    },
 };
 
 mod scheduler;
@@ -270,7 +273,7 @@ enum PreparedBalanceQuery {
 }
 
 pub struct BalanceExecutor {
-    client: reqwest::Client,
+    client: OutboundHttpClient,
     attempt_timeout: Duration,
     retry_delay: Duration,
 }
@@ -282,15 +285,43 @@ impl BalanceExecutor {
     ///
     /// Returns a client-construction error.
     pub fn new() -> Result<Self, reqwest::Error> {
-        Self::with_timing(Duration::from_secs(10), Duration::from_millis(1_500))
+        Self::new_with_outbound_proxy(&OutboundProxyTransport::default())
     }
 
+    /// Creates the balance client backed by the shared outbound proxy state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a client-construction error.
+    pub fn new_with_outbound_proxy(
+        outbound_proxy: &OutboundProxyTransport,
+    ) -> Result<Self, reqwest::Error> {
+        Self::with_timing_and_outbound_proxy(
+            Duration::from_secs(10),
+            Duration::from_millis(1_500),
+            outbound_proxy,
+        )
+    }
+
+    #[cfg(test)]
     fn with_timing(
         attempt_timeout: Duration,
         retry_delay: Duration,
     ) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+        Self::with_timing_and_outbound_proxy(
+            attempt_timeout,
+            retry_delay,
+            &OutboundProxyTransport::default(),
+        )
+    }
+
+    fn with_timing_and_outbound_proxy(
+        attempt_timeout: Duration,
+        retry_delay: Duration,
+        outbound_proxy: &OutboundProxyTransport,
+    ) -> Result<Self, reqwest::Error> {
+        let client = OutboundHttpClient::new(outbound_proxy.clone(), || {
+            reqwest::Client::builder().redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if !matches!(attempt.url().scheme(), "http" | "https") {
                     return attempt.stop();
                 }
@@ -300,7 +331,7 @@ impl BalanceExecutor {
                     attempt.follow()
                 }
             }))
-            .build()?;
+        })?;
         Ok(Self {
             client,
             attempt_timeout,
@@ -337,8 +368,10 @@ impl BalanceExecutor {
         let request = prepared
             .build_request(remaining(self.attempt_timeout, started)?)
             .await?;
-        let mut builder = self
-            .client
+        let client = self.client.client().map_err(|_| {
+            BalanceError::retryable(BalanceErrorStage::Http, BalanceErrorCategory::Network)
+        })?;
+        let mut builder = client
             .request(request.method, request.url)
             .headers(request.headers)
             .header(axum::http::header::ACCEPT_ENCODING, "identity");
@@ -2011,6 +2044,32 @@ mod tests {
                 Some(&HeaderValue::from_static("identity"))
             );
         }
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn balance_requests_use_the_explicit_outbound_proxy() {
+        let state = mock_state(vec![StatusCode::OK], &serde_json::json!({"remaining": 12}));
+        let calls = Arc::clone(&state.calls);
+        let server = MockBalanceServer::start(state).await;
+        let outbound_proxy = OutboundProxyTransport::default();
+        outbound_proxy.set_endpoint(Some(
+            url::Url::parse(&format!("http://{}", server.address)).expect("proxy URL"),
+        ));
+        let executor =
+            BalanceExecutor::new_with_outbound_proxy(&outbound_proxy).expect("balance executor");
+
+        let result = executor
+            .query(
+                &custom_query(query_source("http://balance.external.invalid/usage")),
+                &key(),
+                &base("https://unused.test"),
+            )
+            .await
+            .expect("proxied balance query");
+
+        assert_eq!(result.remaining, Some(12.0));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         server.shutdown().await;
     }
 

@@ -286,6 +286,7 @@ export const previewSettingsSnapshot: SettingsSnapshotDto = {
     hasNext: true,
   },
   proxyPort: 32189,
+  outboundProxy: { enabled: false, url: "http://127.0.0.1:7890" },
   menuBar: { statusTextEnabled: true, activityAnimationEnabled: true },
   imagesGeneration: { enabled: true, routeId: workRouteId, timeoutSecs: 600 },
   mcpImageCapacity: { ...previewMcpImageCapacity },

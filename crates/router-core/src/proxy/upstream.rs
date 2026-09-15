@@ -21,10 +21,10 @@ use serde::Deserialize;
 
 use super::{
     FallbackActivationRequest, FallbackActivator, HistorySink, InferenceStatusService,
-    NoopFallbackActivator, NoopRequestTransitionSink, RequestActivityDisposition,
-    RequestTransitionSink, RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticCode,
-    RuntimeDiagnosticComponent, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
-    UpstreamRequestHandler, ValidatedProxyRequest,
+    NoopFallbackActivator, NoopRequestTransitionSink, OutboundHttpClient, OutboundProxyTransport,
+    RequestActivityDisposition, RequestTransitionSink, RoutingSnapshot, RoutingSnapshotStore,
+    RuntimeDiagnosticCode, RuntimeDiagnosticComponent, RuntimeDiagnosticEvent,
+    RuntimeDiagnosticSink, UpstreamRequestHandler, ValidatedProxyRequest,
     fallback::{
         ClassifiedFailure, FIRST_MEANINGFUL_OUTPUT_TIMEOUT, FailurePolicy, SSE_PREFLIGHT_LIMIT,
         TransportFailure, classify_http, classify_semantic, classify_transport,
@@ -129,7 +129,7 @@ impl Default for UpstreamForwarderConfig {
 }
 
 pub struct ResponsesForwarder {
-    client: reqwest::Client,
+    client: OutboundHttpClient,
     config: UpstreamForwarderConfig,
     history: Arc<dyn HistorySink>,
     diagnostics: Arc<dyn RuntimeDiagnosticSink>,
@@ -214,7 +214,22 @@ impl ResponsesForwarder {
     ///
     /// Returns a client construction error.
     pub fn new() -> Result<Self, reqwest::Error> {
-        Self::with_config(UpstreamForwarderConfig::default())
+        Self::with_config_and_outbound_proxy(
+            UpstreamForwarderConfig::default(),
+            &OutboundProxyTransport::default(),
+        )
+    }
+
+    /// Creates a forwarder whose newly started requests observe the shared
+    /// outbound proxy state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a client construction error.
+    pub fn new_with_outbound_proxy(
+        outbound_proxy: &OutboundProxyTransport,
+    ) -> Result<Self, reqwest::Error> {
+        Self::with_config_and_outbound_proxy(UpstreamForwarderConfig::default(), outbound_proxy)
     }
 
     /// Creates a forwarder with explicit response deadlines and limits.
@@ -223,9 +238,17 @@ impl ResponsesForwarder {
     ///
     /// Returns a client construction error.
     pub fn with_config(config: UpstreamForwarderConfig) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(config.connect_timeout)
-            .build()?;
+        Self::with_config_and_outbound_proxy(config, &OutboundProxyTransport::default())
+    }
+
+    fn with_config_and_outbound_proxy(
+        config: UpstreamForwarderConfig,
+        outbound_proxy: &OutboundProxyTransport,
+    ) -> Result<Self, reqwest::Error> {
+        let connect_timeout = config.connect_timeout;
+        let client = OutboundHttpClient::new(outbound_proxy.clone(), move || {
+            reqwest::Client::builder().connect_timeout(connect_timeout)
+        })?;
         Ok(Self {
             client,
             config,
@@ -1217,12 +1240,26 @@ impl ResponsesForwarder {
         let body = upstream_request_body(request);
         let started = Instant::now();
         let probe_deadline = probe_evidence_timeout.map(|timeout| started + timeout);
-        let send = self
-            .client
-            .post(&endpoint)
-            .headers(headers)
-            .body(body)
-            .send();
+        let Ok(client) = self.client.client() else {
+            let failure = classify_transport(TransportFailure::FastRequest);
+            context.finish_failure(
+                None,
+                DeliveryState::None,
+                ResponseMetadata::default(),
+                failure,
+                RuntimeDiagnosticCode::UpstreamRequestFailed,
+            );
+            return AttemptResult::failure(
+                local_error_with_request_id(
+                    StatusCode::BAD_GATEWAY,
+                    failure.category,
+                    "The upstream request could not be prepared.",
+                    request.request_id.clone(),
+                ),
+                failure,
+            );
+        };
+        let send = client.post(&endpoint).headers(headers).body(body).send();
         let upstream = match tokio::time::timeout(
             bounded_timeout(self.config.header_timeout, probe_deadline),
             send,
@@ -4053,6 +4090,39 @@ mod tests {
                 Some(&HeaderValue::from_static("sticky"))
             );
         }
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn responses_requests_use_the_explicit_outbound_proxy() {
+        let state = mock_upstream(
+            StatusCode::OK,
+            br#"{"id":"response-id","status":"completed"}"#.as_slice(),
+        );
+        let captured_paths = Arc::clone(&state.request_paths);
+        let server = start_mock_upstream(state).await;
+        let outbound_proxy = OutboundProxyTransport::default();
+        outbound_proxy.set_endpoint(Some(
+            url::Url::parse(&format!("http://{}", server.address())).expect("proxy URL"),
+        ));
+        let forwarder =
+            ResponsesForwarder::new_with_outbound_proxy(&outbound_proxy).expect("forwarder");
+
+        let response = forwarder
+            .handle(request_for_base(
+                false,
+                "http://responses.external.invalid/v1",
+            ))
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            captured_paths
+                .lock()
+                .expect("request path capture mutex")
+                .as_slice(),
+            ["/v1/responses"]
+        );
         server.shutdown().await;
     }
 

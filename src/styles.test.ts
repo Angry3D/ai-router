@@ -54,7 +54,12 @@ describe("cross-window style isolation", () => {
 
     expect(pageRule).toContain("min-height: 0;");
     expect(pageRule).toContain("height: 100%;");
+    expect(pageRule).toContain("display: grid;");
+    expect(pageRule).toContain(
+      "grid-template-rows: var(--settings-title-drag-height) minmax(0, 1fr);",
+    );
     expect(pageRule).toContain("overflow: hidden;");
+    expect(rootRule).toContain("min-height: 0;");
     expect(rootRule).toContain("height: 100%;");
     expect(viewportRule).toContain("height: 100%;");
   });
@@ -162,9 +167,13 @@ describe("cross-window style isolation", () => {
       )?.[1] ?? "";
     const routeTopDragRule =
       styles.match(/\.route-list-top-drag-region \{([^}]*)\}/u)?.[1] ?? "";
-    const contentTitleBandRule =
+    const pageTitleBandRule =
       styles.match(
-        /\.settings-page \.settings-page-title-band,\s*\.route-form-fields > \.settings-page-title-band \{([^}]*)\}/u,
+        /\.settings-page > \.settings-page-title-band \{([^}]*)\}/u,
+      )?.[1] ?? "";
+    const routeFormTitleBandRule =
+      styles.match(
+        /\.route-form-fields > \.settings-page-title-band \{([^}]*)\}/u,
       )?.[1] ?? "";
 
     expect(titleBandRule).toContain("width: 100%;");
@@ -177,18 +186,36 @@ describe("cross-window style isolation", () => {
     expect(routeTitleBandRule).toContain("flex: 1 1 auto;");
     expect(routeTopDragRule).toContain("position: absolute;");
     expect(routeTopDragRule).toContain("inset: 0;");
-    expect(contentTitleBandRule).toContain(
+    expect(pageTitleBandRule).toContain(
       "min-height: var(--settings-title-drag-height);",
     );
-    expect(contentTitleBandRule).toContain(
+    expect(pageTitleBandRule).toContain(
       "padding-inline: var(--settings-page-padding-inline);",
     );
-    expect(contentTitleBandRule).toContain(
+    expect(pageTitleBandRule).toContain(
+      "border-bottom: 1px solid var(--settings-divider);",
+    );
+    expect(routeFormTitleBandRule).toContain(
       "margin-top: calc(0px - var(--settings-page-padding-block));",
     );
-    expect(contentTitleBandRule).toContain(
+    expect(routeFormTitleBandRule).toContain(
       "margin-inline: calc(0px - var(--settings-page-padding-inline));",
     );
+  });
+
+  it("keeps outbound proxy controls bounded at the minimum Settings width", () => {
+    const controlRule =
+      styles.match(/\.outbound-proxy-url-control \{([^}]*)\}/u)?.[1] ?? "";
+    const statusRule =
+      styles.match(/\.outbound-proxy-test-status \{([^}]*)\}/u)?.[1] ?? "";
+
+    expect(controlRule).toContain("width: min(100%, 650px);");
+    expect(controlRule).toContain("min-width: 0;");
+    expect(controlRule).toContain(
+      "grid-template-columns: minmax(160px, 1fr) auto minmax(78px, auto);",
+    );
+    expect(statusRule).toContain("min-width: 78px;");
+    expect(statusRule).toContain("min-height: var(--settings-control-height);");
   });
 
   it("keeps route editor labels compact without changing shared settings rows", () => {

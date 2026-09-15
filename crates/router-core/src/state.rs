@@ -91,6 +91,7 @@ pub enum StateArea {
     ImagesGeneration,
     McpImageAssets,
     Proxy,
+    OutboundProxy,
     CodexConnection,
     CodexCatalog,
     CodexRestartNotice,

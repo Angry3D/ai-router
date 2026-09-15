@@ -17,7 +17,8 @@ use router_core::{
     balance::BalanceQueryMode,
     domain::{
         ApiKey, BalanceQueryPolicy, BaseUrl, CompletionState, DeliveryState,
-        ImagesGenerationTimeout, InferenceStatus, InferenceStatusKind, UpstreamAttemptId,
+        ImagesGenerationTimeout, InferenceStatus, InferenceStatusKind, OutboundProxyUrl,
+        UpstreamAttemptId,
     },
     proxy::{
         AsyncHistoryRecorder, HistorySummaryChangeSink, InferenceStatusChangeSink,
@@ -43,6 +44,7 @@ const RESPONSE_BODY_SENTINEL: &str = "P9_RESPONSE_BODY_SENTINEL_2c19";
 const SSE_SENTINEL: &str = "P9_SSE_SENTINEL_9e52";
 const BALANCE_SCRIPT_SENTINEL: &str = "P9_BALANCE_SCRIPT_SENTINEL_41fd";
 const CODEX_BASELINE_SENTINEL: &str = "P9_CODEX_BASELINE_SENTINEL_3a76";
+const OUTBOUND_PROXY_SENTINEL: &str = "http://127.0.0.1:47891";
 const CODEX_RECOVERY_SENTINEL: &str = "P9_CODEX_RECOVERY_SENTINEL_b527";
 const RECOVERY_EXCLUDED_SENTINEL: &str = "V02B_EXCLUDED_HISTORY_SENTINEL_91ce";
 const RECOVERY_SECOND_KEY: &str = "V02B_SECOND_ROUTE_KEY_44da";
@@ -888,6 +890,13 @@ async fn seed_recovery_critical_state(database: &DatabaseExecutor) -> RecoveryCr
         .await
         .expect("fallback enabled");
     database.set_proxy_port(43_123).await.expect("proxy port");
+    database
+        .set_outbound_proxy_settings(
+            true,
+            Some(OutboundProxyUrl::parse(OUTBOUND_PROXY_SENTINEL).expect("outbound proxy URL")),
+        )
+        .await
+        .expect("outbound proxy settings");
     let balance_policy = BalanceQueryPolicy::parse(45, 120).expect("balance policy");
     database
         .set_balance_query_policy(balance_policy)
@@ -988,6 +997,7 @@ fn assert_recovery_point_privacy(point_bytes: &[u8]) {
         GATEWAY_TOKEN_SENTINEL,
         BALANCE_SCRIPT_SENTINEL,
         CODEX_BASELINE_SENTINEL,
+        OUTBOUND_PROXY_SENTINEL,
     ] {
         assert!(contains(point_bytes, allowed), "point omitted {allowed}");
     }
