@@ -940,6 +940,7 @@ pub struct ImagesGenerationSettingsDto {
     pub enabled: bool,
     pub route_id: Option<RouteId>,
     pub timeout_secs: u16,
+    pub model: String,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -991,6 +992,7 @@ pub struct UpdateImagesGenerationSettingsInputDto {
     pub enabled: bool,
     pub route_id: Option<RouteId>,
     pub timeout_secs: u16,
+    pub model: String,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]

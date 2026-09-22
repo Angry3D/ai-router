@@ -54,7 +54,12 @@ function renderWithData(view: "menu" | "settings") {
     proxyPort: 32189,
     outboundProxy: { enabled: false, url: null },
     menuBar: { statusTextEnabled: true, activityAnimationEnabled: true },
-    imagesGeneration: { enabled: false, routeId: null, timeoutSecs: 600 },
+    imagesGeneration: {
+      enabled: false,
+      routeId: null,
+      timeoutSecs: 600,
+      model: "gpt-image-2",
+    },
     mcpImageCapacity: {
       available: true,
       imageCount: 0,

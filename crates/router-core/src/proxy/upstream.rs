@@ -3228,6 +3228,7 @@ mod tests {
                 images_generation_enabled: false,
                 images_route: None,
                 images_generation_timeout: Duration::from_mins(10),
+                images_generation_model: Arc::from("gpt-image-2"),
             }),
             headers,
         }
@@ -3397,6 +3398,7 @@ mod tests {
             images_generation_enabled: false,
             images_route: None,
             images_generation_timeout: Duration::from_mins(10),
+            images_generation_model: Arc::from("gpt-image-2"),
         });
         let mut request = request_for_base(stream, active.base_url.as_str());
         request.route = active;
@@ -3522,6 +3524,7 @@ mod tests {
                 images_generation_enabled: current.images_generation_enabled,
                 images_route: current.images_route.clone(),
                 images_generation_timeout: current.images_generation_timeout,
+                images_generation_model: Arc::clone(&current.images_generation_model),
             });
             if let (Some(health), Some(proof)) = (&self.health, request.health_proof.as_ref()) {
                 let participant_ids = snapshot
@@ -5241,6 +5244,7 @@ mod tests {
             images_generation_enabled: current.images_generation_enabled,
             images_route: current.images_route.clone(),
             images_generation_timeout: current.images_generation_timeout,
+            images_generation_model: Arc::clone(&current.images_generation_model),
         }));
         clock.advance(Duration::from_mins(1));
         let ready_health = health.snapshot(&a.route_id);
@@ -5871,6 +5875,7 @@ mod tests {
             images_generation_enabled: false,
             images_route: None,
             images_generation_timeout: Duration::from_mins(10),
+            images_generation_model: Arc::from("gpt-image-2"),
         });
         let mut request = request_for_base(false, outside.base_url.as_str());
         request.route = Arc::clone(&outside);
@@ -6599,6 +6604,7 @@ mod tests {
             images_generation_enabled: current.images_generation_enabled,
             images_route: current.images_route.clone(),
             images_generation_timeout: current.images_generation_timeout,
+            images_generation_model: Arc::clone(&current.images_generation_model),
         }));
 
         let response = tokio::time::timeout(Duration::from_millis(500), response_task)

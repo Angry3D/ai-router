@@ -21,6 +21,8 @@ pub const DEFAULT_AUTOMATIC_BALANCE_REFRESH_MINUTES: u16 = 30;
 pub const MIN_IMAGES_GENERATION_TIMEOUT_SECS: u16 = 600;
 pub const DEFAULT_IMAGES_GENERATION_TIMEOUT_SECS: u16 = 600;
 pub const MAX_IMAGES_GENERATION_TIMEOUT_SECS: u16 = 3_600;
+pub const DEFAULT_IMAGES_GENERATION_MODEL: &str = "gpt-image-2";
+pub const MAX_IMAGES_GENERATION_MODEL_BYTES: usize = 256;
 pub const MIN_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 128;
 pub const DEFAULT_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 1_024;
 pub const MAX_MCP_IMAGE_CAPACITY_WARNING_MIB: u32 = 102_400;
@@ -532,6 +534,52 @@ impl Default for ImagesGenerationTimeout {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImagesGenerationModel(String);
+
+impl ImagesGenerationModel {
+    /// Validates the durable upstream image model identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a field-specific error when the trimmed value is empty,
+    /// contains a control character, or exceeds 256 bytes. Unknown model IDs
+    /// are valid; upstream compatibility is decided by the one real request.
+    pub fn parse(value: &str) -> Result<Self, ValidationError> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(ValidationError::new(
+                "images_generation_model_required",
+                "model",
+            ));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(ValidationError::new(
+                "images_generation_model_control_character",
+                "model",
+            ));
+        }
+        if value.len() > MAX_IMAGES_GENERATION_MODEL_BYTES {
+            return Err(ValidationError::new(
+                "images_generation_model_too_long",
+                "model",
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for ImagesGenerationModel {
+    fn default() -> Self {
+        Self(DEFAULT_IMAGES_GENERATION_MODEL.to_owned())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct McpImageCapacityWarningThreshold(u32);
 
@@ -813,7 +861,8 @@ mod tests {
 
     use super::{
         ApiKey, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
-        ImagesGenerationTimeout, MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW,
+        DEFAULT_IMAGES_GENERATION_MODEL, ImagesGenerationModel, ImagesGenerationTimeout,
+        MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW, MAX_IMAGES_GENERATION_MODEL_BYTES,
         MAX_OUTBOUND_PROXY_URL_BYTES, McpImageCapacityWarningThreshold, OutboundProxyConfig,
         OutboundProxyUrl, RouteName,
     };
@@ -969,6 +1018,56 @@ mod tests {
             assert_eq!(error.code, "images_generation_timeout_out_of_range");
             assert_eq!(error.field, "timeoutSecs");
         }
+    }
+
+    #[test]
+    fn images_generation_model_trims_and_defaults_to_gpt_image_2() {
+        assert_eq!(ImagesGenerationModel::default().as_str(), "gpt-image-2");
+        assert_eq!(
+            ImagesGenerationModel::default(),
+            ImagesGenerationModel::parse(DEFAULT_IMAGES_GENERATION_MODEL).expect("default")
+        );
+        let trimmed =
+            ImagesGenerationModel::parse("  gpt-image-2.5-flare \t").expect("trimmed model");
+        assert_eq!(trimmed.as_str(), "gpt-image-2.5-flare");
+        let unknown = ImagesGenerationModel::parse("relay-image-2.5").expect("unknown model");
+        assert_eq!(unknown.as_str(), "relay-image-2.5");
+        let limit = ImagesGenerationModel::parse(&"x".repeat(MAX_IMAGES_GENERATION_MODEL_BYTES))
+            .expect("model at the byte limit");
+        assert_eq!(limit.as_str().len(), MAX_IMAGES_GENERATION_MODEL_BYTES);
+    }
+
+    #[test]
+    fn images_generation_model_rejects_empty_control_and_oversized_values() {
+        for (input, code) in [
+            ("", "images_generation_model_required"),
+            ("   ", "images_generation_model_required"),
+            ("\n\t", "images_generation_model_required"),
+            (
+                "gpt-image\u{0}-2",
+                "images_generation_model_control_character",
+            ),
+            (
+                "gpt-image-2\nx",
+                "images_generation_model_control_character",
+            ),
+            (
+                "gpt\u{7f}image",
+                "images_generation_model_control_character",
+            ),
+        ] {
+            let error = ImagesGenerationModel::parse(input).expect_err("invalid model");
+            assert_eq!(error.code, code, "input: {input:?}");
+            assert_eq!(error.field, "model", "input: {input:?}");
+        }
+        let oversized = "x".repeat(MAX_IMAGES_GENERATION_MODEL_BYTES + 1);
+        let error = ImagesGenerationModel::parse(&oversized).expect_err("oversized model");
+        assert_eq!(error.code, "images_generation_model_too_long");
+        assert_eq!(error.field, "model");
+        let multibyte = "模".repeat(MAX_IMAGES_GENERATION_MODEL_BYTES / 3 + 1);
+        assert!(multibyte.len() > MAX_IMAGES_GENERATION_MODEL_BYTES);
+        let error = ImagesGenerationModel::parse(&multibyte).expect_err("oversized UTF-8 model");
+        assert_eq!(error.code, "images_generation_model_too_long");
     }
 
     #[test]

@@ -37,7 +37,7 @@ use router_core::{
     },
     domain::{
         ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, CodexModelValidationError,
-        FallbackExcludedModelValidationError, ImagesGenerationTimeout,
+        FallbackExcludedModelValidationError, ImagesGenerationModel, ImagesGenerationTimeout,
         McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl,
         ReachabilityResult, RouteId, ValidationError,
     },
@@ -673,6 +673,7 @@ impl DesktopLifecycleServices {
             images_generation_enabled: settings.images_generation_enabled,
             images_route,
             images_generation_timeout: settings.images_generation_timeout.duration(),
+            images_generation_model: Arc::from(settings.images_generation_model.as_str()),
         }))
     }
 
@@ -950,6 +951,7 @@ impl DesktopLifecycleServices {
                 enabled: settings.images_generation_enabled,
                 route_id: settings.images_generation_route_id,
                 timeout_secs: settings.images_generation_timeout.seconds(),
+                model: settings.images_generation_model.as_str().to_owned(),
             },
             mcp_image_capacity,
             history: HistorySummaryDto {
@@ -1764,8 +1766,10 @@ impl DesktopLifecycleServices {
         let before = database.app_settings().await.map_err(map_storage_error)?;
         let timeout = ImagesGenerationTimeout::parse(input.timeout_secs)
             .map_err(|error| map_validation_error(&error))?;
+        let model = ImagesGenerationModel::parse(&input.model)
+            .map_err(|error| map_validation_error(&error))?;
         let changed = database
-            .set_images_generation_settings(input.enabled, input.route_id, timeout)
+            .set_images_generation_settings(input.enabled, input.route_id, timeout, model)
             .await
             .map_err(map_storage_error)?;
         if !changed {
@@ -2941,6 +2945,7 @@ impl DesktopFallbackActivator {
             images_generation_enabled: latest_projection.images_generation_enabled,
             images_route: latest_projection.images_route.clone(),
             images_generation_timeout: latest_projection.images_generation_timeout,
+            images_generation_model: Arc::clone(&latest_projection.images_generation_model),
         });
         let Ok(projected_fallback) = fallback_state(&snapshot) else {
             self.route_health.cancel_activation(&health_reservation);
@@ -3973,6 +3978,9 @@ fn map_validation_error(error: &ValidationError) -> IpcErrorDto {
             "base_url_unsupported_endpoint" => "仅支持 Responses API 地址。",
             "base_url_duplicate_responses" => "Responses 地址不能重复包含 /responses。",
             "images_generation_timeout_out_of_range" => "生成等待上限需为 600 至 3600 秒。",
+            "images_generation_model_required" => "请输入生图模型。",
+            "images_generation_model_control_character" => "生图模型不能包含控制字符。",
+            "images_generation_model_too_long" => "生图模型过长。",
             _ => "输入内容无效。",
         }
         .to_owned(),
@@ -4807,6 +4815,7 @@ mod tests {
                 enabled: true,
                 route_id: Some(route_id.clone()),
                 timeout_secs: 600,
+                model: "gpt-image-2".to_owned(),
             })
             .await
             .expect("enable images");
@@ -6516,6 +6525,7 @@ mod tests {
                 enabled: true,
                 route_id: Some(first.route_id.clone()),
                 timeout_secs: 599,
+                model: "gpt-image-2".to_owned(),
             })
             .await
             .expect_err("timeout below the minimum");
@@ -6530,6 +6540,7 @@ mod tests {
                 enabled: true,
                 route_id: Some(first.route_id.clone()),
                 timeout_secs: 600,
+                model: "gpt-image-2".to_owned(),
             })
             .await
             .expect("enable image generation");
@@ -6545,6 +6556,7 @@ mod tests {
                 enabled: true,
                 route_id: Some(second.route_id.clone()),
                 timeout_secs: 900,
+                model: "gpt-image-2".to_owned(),
             })
             .await
             .expect("change image route");
@@ -6585,6 +6597,7 @@ mod tests {
                 enabled: false,
                 route_id: Some(second.route_id.clone()),
                 timeout_secs: 900,
+                model: "gpt-image-2".to_owned(),
             })
             .await
             .expect("disable image generation");
@@ -6608,6 +6621,162 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn image_model_defaults_validates_and_projects_into_routing() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let services = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        let database = services.database().await.expect("database");
+        let route = database
+            .create_route(CreateRouteInput {
+                name: "Image model".to_owned(),
+                base_url: "https://image-model.example/v1".to_owned(),
+                api_key: ApiKey::parse("image-model-key").expect("API key"),
+                menu_visible: None,
+                balance_query: None,
+                accept_script_risk: false,
+            })
+            .await
+            .expect("image route");
+
+        let initial = services
+            .settings_snapshot()
+            .await
+            .expect("initial snapshot");
+        assert_eq!(initial.images_generation.model, "gpt-image-2");
+        assert_eq!(
+            services.routing.load().images_generation_model.as_ref(),
+            "gpt-image-2"
+        );
+
+        let oversized = "x".repeat(257);
+        for (model, code, message) in [
+            ("", "images_generation_model_required", "请输入生图模型。"),
+            (
+                "   ",
+                "images_generation_model_required",
+                "请输入生图模型。",
+            ),
+            (
+                "gpt-image\u{0}2",
+                "images_generation_model_control_character",
+                "生图模型不能包含控制字符。",
+            ),
+            (
+                oversized.as_str(),
+                "images_generation_model_too_long",
+                "生图模型过长。",
+            ),
+        ] {
+            let revision_before = database.critical_revision().await.expect("revision");
+            let error = services
+                .update_images_generation_settings(UpdateImagesGenerationSettingsInputDto {
+                    enabled: true,
+                    route_id: Some(route.route_id.clone()),
+                    timeout_secs: 900,
+                    model: model.to_owned(),
+                })
+                .await
+                .expect_err("invalid model must be rejected");
+            assert_eq!(error.code, code, "model {model:?}");
+            assert_eq!(error.message, message, "model {model:?}");
+            assert_eq!(error.field.as_deref(), Some("model"), "model {model:?}");
+            assert!(!error.retryable);
+            let stored = database.app_settings().await.expect("stored settings");
+            assert_eq!(stored.images_generation_model.as_str(), "gpt-image-2");
+            assert!(!stored.images_generation_enabled);
+            assert_eq!(stored.images_generation_timeout.seconds(), 600);
+            assert_eq!(
+                database.critical_revision().await.expect("revision"),
+                revision_before
+            );
+        }
+        assert_eq!(
+            services.routing.load().images_generation_model.as_ref(),
+            "gpt-image-2"
+        );
+
+        services
+            .update_images_generation_settings(UpdateImagesGenerationSettingsInputDto {
+                enabled: true,
+                route_id: Some(route.route_id.clone()),
+                timeout_secs: 900,
+                model: "  gpt-image-2.5-flare  ".to_owned(),
+            })
+            .await
+            .expect("custom model");
+        let stored = database.app_settings().await.expect("custom settings");
+        assert_eq!(
+            stored.images_generation_model.as_str(),
+            "gpt-image-2.5-flare"
+        );
+        let snapshot = services.settings_snapshot().await.expect("custom snapshot");
+        assert_eq!(snapshot.images_generation.model, "gpt-image-2.5-flare");
+        assert!(snapshot.images_generation.enabled);
+        assert_eq!(snapshot.images_generation.timeout_secs, 900);
+        let routing = services.routing.load();
+        assert_eq!(
+            routing.images_generation_model.as_ref(),
+            "gpt-image-2.5-flare"
+        );
+        assert!(routing.images_generation_enabled);
+        assert_eq!(routing.images_generation_timeout, Duration::from_mins(15));
+
+        let revision_before = database.critical_revision().await.expect("revision");
+        let published_before = runtime.bootstrap_snapshot().revision;
+        let no_op = services
+            .update_images_generation_settings(UpdateImagesGenerationSettingsInputDto {
+                enabled: true,
+                route_id: Some(route.route_id.clone()),
+                timeout_secs: 900,
+                model: "gpt-image-2.5-flare".to_owned(),
+            })
+            .await
+            .expect("no-op model");
+        assert_eq!(no_op.revision, published_before);
+        assert_eq!(
+            database.critical_revision().await.expect("revision"),
+            revision_before
+        );
+
+        services
+            .update_images_generation_settings(UpdateImagesGenerationSettingsInputDto {
+                enabled: true,
+                route_id: Some(route.route_id.clone()),
+                timeout_secs: 900,
+                model: "relay-image-custom".to_owned(),
+            })
+            .await
+            .expect("model-only change");
+        assert_eq!(
+            services.routing.load().images_generation_model.as_ref(),
+            "relay-image-custom"
+        );
+        assert_eq!(
+            services
+                .settings_snapshot()
+                .await
+                .expect("model-only snapshot")
+                .images_generation
+                .model,
+            "relay-image-custom"
+        );
+
+        services.close_database().await;
+    }
+
+    #[tokio::test]
     async fn image_mcp_repair_preview_rejects_disabled_and_stale_projection_inputs() {
         let fixture = image_mcp_repair_fixture().await;
         fixture
@@ -6616,6 +6785,7 @@ mod tests {
                 enabled: false,
                 route_id: Some(fixture.route_id.clone()),
                 timeout_secs: 600,
+                model: "gpt-image-2".to_owned(),
             })
             .await
             .expect("disable images");
@@ -6631,6 +6801,7 @@ mod tests {
                 enabled: true,
                 route_id: Some(fixture.route_id.clone()),
                 timeout_secs: 600,
+                model: "gpt-image-2".to_owned(),
             })
             .await
             .expect("re-enable images");
@@ -6862,6 +7033,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn fallback_activation_preserves_a_newer_image_route_projection() {
         let directory = TempDir::new().expect("app data fixture");
         let runtime = Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink)));
@@ -6903,6 +7075,7 @@ mod tests {
                 true,
                 Some(routes[0].route_id.clone()),
                 ImagesGenerationTimeout::parse(700).expect("timeout"),
+                ImagesGenerationModel::default(),
             )
             .await
             .expect("initial image route");
@@ -6922,6 +7095,7 @@ mod tests {
                 enabled: true,
                 route_id: Some(routes[1].route_id.clone()),
                 timeout_secs: 1_000,
+                model: "gpt-image-2.5-flare".to_owned(),
             })
             .await
             .expect("publish newer image route");
@@ -6953,6 +7127,11 @@ mod tests {
         assert_eq!(
             activated.images_generation_timeout,
             Duration::from_secs(1_000)
+        );
+        assert_eq!(
+            activated.images_generation_model.as_ref(),
+            "gpt-image-2.5-flare",
+            "fallback activation copies the newest published image model"
         );
         assert_eq!(
             services
@@ -7055,6 +7234,7 @@ mod tests {
             images_generation_enabled: false,
             images_route: None,
             images_generation_timeout: Duration::from_mins(10),
+            images_generation_model: Arc::from("gpt-image-2"),
         };
 
         let projected = fallback_state(&snapshot).expect("fallback projection");

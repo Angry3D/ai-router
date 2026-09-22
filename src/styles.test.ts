@@ -233,6 +233,16 @@ describe("cross-window style isolation", () => {
     const timeoutRule =
       styles.match(/\.images-generation-timeout-control \{([^}]*)\}/u)?.[1] ??
       "";
+    const modelRule =
+      styles.match(/\.images-generation-model-control \{([^}]*)\}/u)?.[1] ?? "";
+    const modelPresetRule =
+      styles.match(
+        /\.images-generation-model-control\[data-custom="false"\] \{([^}]*)\}/u,
+      )?.[1] ?? "";
+    const modelInputRule =
+      styles.match(
+        /\.images-generation-model-control \.settings-text-input \{([^}]*)\}/u,
+      )?.[1] ?? "";
     const sharedParameterRule =
       styles.match(/\.parameter-input-control \{([^}]*)\}/u)?.[1] ?? "";
 
@@ -241,6 +251,19 @@ describe("cross-window style isolation", () => {
     expect(routeRule).toContain("width: min(200px, 100%);");
     expect(timeoutRule).toContain(
       "grid-template-columns: minmax(0, 200px) auto;",
+    );
+    expect(modelRule).toContain(
+      "grid-template-columns: minmax(0, 200px) minmax(0, 1fr);",
+    );
+    expect(modelRule).toContain("gap: 8px;");
+    expect(modelRule).not.toMatch(/\b(?:height|min-height):/u);
+    expect(modelPresetRule).toContain(
+      "grid-template-columns: minmax(0, 200px);",
+    );
+    expect(modelInputRule).toContain("min-width: 120px;");
+    expect(modelInputRule).toContain("max-width: 320px;");
+    expect(styles).not.toMatch(
+      /data-theme="dark"\][^{]*images-generation-model/u,
     );
     expect(sharedParameterRule).toContain(
       "grid-template-columns: minmax(0, 120px) auto;",

@@ -1,0 +1,32 @@
+[
+  { "model": "gpt-image-2.5-sunburst", "profile": "flexible_extended" },
+  { "model": "gpt-image-2.5-flare", "profile": "flexible_extended" },
+  { "model": "gpt-image-2.5", "profile": "flexible_extended" },
+  {
+    "model": "gpt-image-2.5-sunburst-2026-09-08",
+    "profile": "flexible_extended"
+  },
+  { "model": "gpt-image-2.5-flare-2026-09-08", "profile": "flexible_extended" },
+  { "model": "gpt-image-2", "profile": "flexible" },
+  { "model": "gpt-image-2-2026-04-21", "profile": "flexible" },
+  { "model": "gpt-image-1.5", "profile": "standard" },
+  { "model": "gpt-image-1.5-2025-12-16", "profile": "standard" },
+  { "model": "gpt-image-1", "profile": "standard" },
+  { "model": "gpt-image-1-mini", "profile": "standard" },
+  { "model": "chatgpt-image-latest", "profile": "standard" },
+  { "model": "gpt-image-20", "profile": "flexible_extended" },
+  { "model": "gpt-image-2x", "profile": "flexible_extended" },
+  { "model": "gpt-image-25", "profile": "flexible_extended" },
+  { "model": "gpt-image-2.55", "profile": "flexible_extended" },
+  { "model": "gpt-image-10", "profile": "flexible_extended" },
+  { "model": "gpt-image-1.55", "profile": "flexible_extended" },
+  { "model": "gpt-image-1x", "profile": "flexible_extended" },
+  { "model": "chatgpt-image-latest-2", "profile": "flexible_extended" },
+  { "model": "GPT-IMAGE-2", "profile": "flexible_extended" },
+  { "model": "relay-image-2.5", "profile": "flexible_extended" },
+  { "model": "dall-e-3", "profile": "flexible_extended" },
+  { "model": "  gpt-image-2  ", "profile": "flexible" },
+  { "model": "\tgpt-image-1.5\n", "profile": "standard" },
+  { "model": " gpt-image-2.5-flare ", "profile": "flexible_extended" },
+  { "model": " chatgpt-image-latest ", "profile": "standard" }
+]

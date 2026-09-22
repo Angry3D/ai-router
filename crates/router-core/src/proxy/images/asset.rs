@@ -647,8 +647,8 @@ fn validate_png(png: &[u8]) -> Result<(u32, u32), ImageAssetErrorKind> {
         .ok_or(ImageAssetErrorKind::TooLarge)?;
     if width == 0
         || height == 0
-        || u64::from(width) >= super::MAX_IMAGE_EDGE_EXCLUSIVE
-        || u64::from(height) >= super::MAX_IMAGE_EDGE_EXCLUSIVE
+        || u64::from(width) > super::MAX_IMAGE_EDGE
+        || u64::from(height) > super::MAX_IMAGE_EDGE
         || pixels > super::MAX_IMAGE_PIXELS
     {
         return Err(ImageAssetErrorKind::TooLarge);
@@ -1155,14 +1155,30 @@ mod tests {
             ImageAssetErrorKind::InvalidPng
         );
 
+        let mut at_limit = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut at_limit, 3_840, 1);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("at-limit PNG header");
+            writer
+                .write_image_data(&vec![0; 3_840])
+                .expect("at-limit PNG data");
+            writer.finish().expect("at-limit PNG end");
+        }
+        assert_eq!(
+            validate_png(&at_limit).expect("inclusive 3,840 edge"),
+            (3_840, 1)
+        );
+
         let mut oversized = Vec::new();
         {
-            let mut encoder = png::Encoder::new(&mut oversized, 3_840, 1);
+            let mut encoder = png::Encoder::new(&mut oversized, 3_856, 1);
             encoder.set_color(png::ColorType::Grayscale);
             encoder.set_depth(png::BitDepth::Eight);
             let mut writer = encoder.write_header().expect("oversized PNG header");
             writer
-                .write_image_data(&vec![0; 3_840])
+                .write_image_data(&vec![0; 3_856])
                 .expect("oversized PNG data");
             writer.finish().expect("oversized PNG end");
         }

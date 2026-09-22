@@ -26,14 +26,14 @@ use crate::balance::{
 use crate::domain::{
     ApiKey, AppearancePreference, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
     CodexModelValidationError, CompletionState, DeliveryState,
-    FallbackExcludedModelValidationError, ImagesGenerationTimeout,
+    FallbackExcludedModelValidationError, ImagesGenerationModel, ImagesGenerationTimeout,
     McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl, RouteId,
     RouteMoveDirection, RouteName, SecretId, UpstreamAttemptId, ValidationError,
 };
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 26;
 
 const GENERAL_BALANCE_SOURCE_HASHES: [&str; 3] = [
     "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507",
@@ -64,6 +64,7 @@ type AppSettingsRow = (
     i64,
     Option<String>,
     Option<String>,
+    String,
 );
 
 #[derive(Clone)]
@@ -173,6 +174,7 @@ pub struct AppSettingsRecord {
     pub images_generation_enabled: bool,
     pub images_generation_route_id: Option<RouteId>,
     pub images_generation_timeout: ImagesGenerationTimeout,
+    pub images_generation_model: ImagesGenerationModel,
     pub appearance_preference: AppearancePreference,
     pub last_automatic_update_check_at_ms: Option<i64>,
     pub menu_bar: MenuBarSettingsRecord,
@@ -2060,8 +2062,9 @@ impl DatabaseExecutor {
                 mcp_image_capacity_warning_mib,
                 mcp_image_capacity_active_episode,
                 mcp_image_capacity_dismissed_episode,
+                images_generation_model,
             ): AppSettingsRow = connection.query_row(
-                "SELECT proxy_port, outbound_proxy_enabled, outbound_proxy_url, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode FROM app_settings WHERE singleton = 1",
+                "SELECT proxy_port, outbound_proxy_enabled, outbound_proxy_url, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode, images_generation_model FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
@@ -2082,6 +2085,7 @@ impl DatabaseExecutor {
                         row.get(14)?,
                         row.get(15)?,
                         row.get(16)?,
+                        row.get(17)?,
                     ))
                 },
             )?;
@@ -2107,6 +2111,8 @@ impl DatabaseExecutor {
                 u16::try_from(images_generation_timeout_secs)
                     .map_err(|_| StorageError::Initialization)?,
             )?;
+            let images_generation_model = ImagesGenerationModel::parse(&images_generation_model)
+                .map_err(|_| StorageError::Initialization)?;
             if last_automatic_update_check_at_ms.is_some_and(|timestamp| timestamp < 0) {
                 return Err(StorageError::Initialization);
             }
@@ -2137,6 +2143,7 @@ impl DatabaseExecutor {
                 images_generation_enabled,
                 images_generation_route_id: images_generation_route_id.map(RouteId::from_string),
                 images_generation_timeout,
+                images_generation_model,
                 appearance_preference: AppearancePreference::parse_persisted(&appearance_preference)?,
                 last_automatic_update_check_at_ms,
                 menu_bar: MenuBarSettingsRecord {
@@ -2367,7 +2374,8 @@ impl DatabaseExecutor {
         .await
     }
 
-    /// Atomically updates global image generation admission and its dedicated route.
+    /// Atomically updates global image generation admission, its dedicated
+    /// route, the response-header wait budget, and the upstream model.
     ///
     /// # Errors
     ///
@@ -2378,6 +2386,7 @@ impl DatabaseExecutor {
         enabled: bool,
         route_id: Option<RouteId>,
         timeout: ImagesGenerationTimeout,
+        model: ImagesGenerationModel,
     ) -> Result<bool, StorageError> {
         self.call_critical(move |connection| {
             let transaction = connection.transaction()?;
@@ -2394,22 +2403,28 @@ impl DatabaseExecutor {
                     return Err(StorageError::InvalidImagesGenerationRoute);
                 }
             }
-            let current: (i64, Option<String>, i64) = transaction.query_row(
-                "SELECT images_generation_enabled, images_generation_route_id, images_generation_timeout_secs FROM app_settings WHERE singleton = 1",
+            let current: (i64, Option<String>, i64, String) = transaction.query_row(
+                "SELECT images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, images_generation_model FROM app_settings WHERE singleton = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
             let current_enabled = parse_persisted_bool(current.0)?;
             if current_enabled == enabled
                 && current.1.as_deref() == route_id.as_ref().map(RouteId::as_str)
                 && current.2 == i64::from(timeout.seconds())
+                && current.3 == model.as_str()
             {
                 transaction.commit()?;
                 return Ok((false, None));
             }
             transaction.execute(
-                "UPDATE app_settings SET images_generation_enabled = ?1, images_generation_route_id = ?2, images_generation_timeout_secs = ?3 WHERE singleton = 1",
-                params![enabled, route_id.as_ref().map(RouteId::as_str), timeout.seconds()],
+                "UPDATE app_settings SET images_generation_enabled = ?1, images_generation_route_id = ?2, images_generation_timeout_secs = ?3, images_generation_model = ?4 WHERE singleton = 1",
+                params![
+                    enabled,
+                    route_id.as_ref().map(RouteId::as_str),
+                    timeout.seconds(),
+                    model.as_str()
+                ],
             )?;
             let revision = mark_critical_change(&transaction)?;
             transaction.commit()?;
@@ -4019,6 +4034,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     if version < 25 {
         migrate_v25(connection)?;
     }
+    if version < 26 {
+        migrate_v26(connection)?;
+    }
     Ok(())
 }
 
@@ -4631,6 +4649,19 @@ fn migrate_v25(connection: &mut Connection) -> Result<(), StorageError> {
             CHECK (outbound_proxy_enabled IN (0, 1));
         ALTER TABLE app_settings ADD COLUMN outbound_proxy_url TEXT;
         PRAGMA user_version = 25;
+        ",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v26(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "
+        ALTER TABLE app_settings ADD COLUMN images_generation_model TEXT NOT NULL DEFAULT 'gpt-image-2'
+            CHECK (length(images_generation_model) BETWEEN 1 AND 256);
+        PRAGMA user_version = 26;
         ",
     )?;
     transaction.commit()?;
@@ -5364,14 +5395,15 @@ mod tests {
         migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7, migrate_v8, migrate_v9,
         migrate_v10, migrate_v11, migrate_v12, migrate_v13, migrate_v14, migrate_v15, migrate_v16,
         migrate_v17, migrate_v18, migrate_v19, migrate_v20, migrate_v21, migrate_v22, migrate_v23,
-        migrate_v24, migrate_v25, statistics_attribution, statistics_bucket_windows,
+        migrate_v24, migrate_v25, migrate_v26, statistics_attribution, statistics_bucket_windows,
         validate_balance_query,
     };
     use crate::{
         balance::{BalanceQueryMode, BalanceRouteSource, LEGACY_GENERAL_V1_SOURCE},
         domain::{
-            ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationTimeout,
-            McpImageCapacityWarningThreshold, OutboundProxyUrl, RouteId, RouteMoveDirection,
+            ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationModel,
+            ImagesGenerationTimeout, McpImageCapacityWarningThreshold, OutboundProxyUrl, RouteId,
+            RouteMoveDirection,
         },
         recovery::{
             NoopRecoveryEventSink, RecoveryCoordinator, RecoveryFailureCode, RecoveryHealthKind,
@@ -5602,6 +5634,117 @@ mod tests {
                 .prepare("SELECT outbound_proxy_enabled FROM app_settings")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn migration_v26_defaults_image_model_and_rolls_back_atomically() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v22(&mut connection);
+        migrate_v23(&mut connection).expect("v23");
+        migrate_v24(&mut connection).expect("v24");
+        migrate_v25(&mut connection).expect("v25");
+        migrate_v26(&mut connection).expect("v26");
+
+        let model: String = connection
+            .query_row(
+                "SELECT images_generation_model FROM app_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("image model");
+        assert_eq!(model, "gpt-image-2");
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            26
+        );
+        assert!(
+            connection
+                .execute("UPDATE app_settings SET images_generation_model = ''", [])
+                .is_err(),
+            "the length CHECK must reject an empty model"
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE app_settings SET images_generation_model = ?1",
+                    ["x".repeat(257)],
+                )
+                .is_err(),
+            "the length CHECK must reject a 257-character model"
+        );
+        connection
+            .execute(
+                "UPDATE app_settings SET images_generation_model = ?1",
+                ["x".repeat(256)],
+            )
+            .expect("a 256-character model satisfies the CHECK");
+
+        let mut rollback = Connection::open_in_memory().expect("rollback database");
+        migrate_test_database_to_v22(&mut rollback);
+        migrate_v23(&mut rollback).expect("v23");
+        migrate_v24(&mut rollback).expect("v24");
+        migrate_v25(&mut rollback).expect("v25");
+        rollback
+            .execute(
+                "ALTER TABLE app_settings ADD COLUMN images_generation_model TEXT",
+                [],
+            )
+            .expect("collision column");
+        assert!(migrate_v26(&mut rollback).is_err());
+        assert_eq!(
+            rollback
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            25
+        );
+        let collided: Option<String> = rollback
+            .query_row(
+                "SELECT images_generation_model FROM app_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("collision column value");
+        assert_eq!(
+            collided, None,
+            "the failed migration must not apply its default"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_v26_database_reads_back_the_default_image_model() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("router.sqlite3");
+        let mut connection = Connection::open(&path).expect("legacy connection");
+        migrate_test_database_to_v22(&mut connection);
+        migrate_v23(&mut connection).expect("v23");
+        migrate_v24(&mut connection).expect("v24");
+        migrate_v25(&mut connection).expect("v25");
+        connection
+            .execute(
+                "UPDATE app_settings SET images_generation_timeout_secs = 900",
+                [],
+            )
+            .expect("legacy image timeout");
+        drop(connection);
+
+        let database = DatabaseExecutor::open(&path).expect("migrated database");
+        let settings = database.app_settings().await.expect("settings");
+        assert_eq!(settings.images_generation_model.as_str(), "gpt-image-2");
+        assert_eq!(
+            settings.images_generation_model,
+            ImagesGenerationModel::default()
+        );
+        assert_eq!(settings.images_generation_timeout.seconds(), 900);
+        let version = database
+            .test_execute(|connection| {
+                Ok(connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?)
+            })
+            .await
+            .expect("schema version");
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -6461,6 +6604,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn image_settings_round_trip_clear_and_skip_no_op_revisions() {
         let (_directory, database) = database();
         database
@@ -6473,7 +6617,12 @@ mod tests {
             .expect("ordinary route");
         assert!(matches!(
             database
-                .set_images_generation_settings(true, None, ImagesGenerationTimeout::default(),)
+                .set_images_generation_settings(
+                    true,
+                    None,
+                    ImagesGenerationTimeout::default(),
+                    ImagesGenerationModel::default(),
+                )
                 .await,
             Err(StorageError::InvalidImagesGenerationRoute)
         ));
@@ -6483,6 +6632,7 @@ mod tests {
                     true,
                     Some(RouteId::from_string("missing-route".to_owned())),
                     ImagesGenerationTimeout::default(),
+                    ImagesGenerationModel::default(),
                 )
                 .await,
             Err(StorageError::InvalidImagesGenerationRoute)
@@ -6494,6 +6644,7 @@ mod tests {
                     true,
                     Some(ordinary.route_id.clone()),
                     ImagesGenerationTimeout::parse(900).expect("timeout"),
+                    ImagesGenerationModel::default(),
                 )
                 .await
                 .expect("enable images")
@@ -6505,6 +6656,7 @@ mod tests {
             Some(ordinary.route_id.clone())
         );
         assert_eq!(settings.images_generation_timeout.seconds(), 900);
+        assert_eq!(settings.images_generation_model.as_str(), "gpt-image-2");
         let enabled_revision = database.critical_revision().await.expect("revision");
         assert!(
             !database
@@ -6512,6 +6664,7 @@ mod tests {
                     true,
                     Some(ordinary.route_id.clone()),
                     ImagesGenerationTimeout::parse(900).expect("timeout"),
+                    ImagesGenerationModel::default(),
                 )
                 .await
                 .expect("no-op settings")
@@ -6519,6 +6672,46 @@ mod tests {
         assert_eq!(
             database.critical_revision().await.expect("no-op revision"),
             enabled_revision
+        );
+
+        let custom_model = ImagesGenerationModel::parse("gpt-image-2.5-flare").expect("model");
+        assert!(
+            database
+                .set_images_generation_settings(
+                    true,
+                    Some(ordinary.route_id.clone()),
+                    ImagesGenerationTimeout::parse(900).expect("timeout"),
+                    custom_model.clone(),
+                )
+                .await
+                .expect("model-only change")
+        );
+        let model_revision = database.critical_revision().await.expect("model revision");
+        assert!(model_revision > enabled_revision);
+        let settings = database
+            .app_settings()
+            .await
+            .expect("custom model settings");
+        assert_eq!(settings.images_generation_model, custom_model);
+        assert!(settings.images_generation_enabled);
+        assert_eq!(settings.images_generation_timeout.seconds(), 900);
+        assert!(
+            !database
+                .set_images_generation_settings(
+                    true,
+                    Some(ordinary.route_id.clone()),
+                    ImagesGenerationTimeout::parse(900).expect("timeout"),
+                    ImagesGenerationModel::parse("  gpt-image-2.5-flare  ").expect("model"),
+                )
+                .await
+                .expect("no-op custom model")
+        );
+        assert_eq!(
+            database
+                .critical_revision()
+                .await
+                .expect("no-op model revision"),
+            model_revision
         );
 
         let replacement = database
@@ -6530,6 +6723,7 @@ mod tests {
                 false,
                 Some(replacement.route_id.clone()),
                 ImagesGenerationTimeout::parse(1_200).expect("timeout"),
+                ImagesGenerationModel::parse("relay-image-2.5").expect("model"),
             )
             .await
             .expect("select while disabled");
@@ -6541,6 +6735,7 @@ mod tests {
         assert!(!settings.images_generation_enabled);
         assert_eq!(settings.images_generation_route_id, None);
         assert_eq!(settings.images_generation_timeout.seconds(), 1_200);
+        assert_eq!(settings.images_generation_model.as_str(), "relay-image-2.5");
     }
 
     #[tokio::test]
@@ -6568,6 +6763,48 @@ mod tests {
         assert!(matches!(
             database.app_settings().await,
             Err(StorageError::Validation(_))
+        ));
+        database
+            .test_execute(|connection| {
+                connection.execute(
+                    "UPDATE app_settings SET images_generation_timeout_secs = 600, images_generation_model = 'gpt-image' || char(10) || '2'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("inject control character model");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Initialization)
+        ));
+        database
+            .test_execute(|connection| {
+                connection.execute(
+                    "UPDATE app_settings SET images_generation_model = '   '",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("inject blank model");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Initialization)
+        ));
+        database
+            .test_execute(|connection| {
+                connection.execute(
+                    "UPDATE app_settings SET images_generation_model = ?1",
+                    ["模".repeat(100)],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("inject oversized UTF-8 model within the character CHECK");
+        assert!(matches!(
+            database.app_settings().await,
+            Err(StorageError::Initialization)
         ));
     }
 
