@@ -28,7 +28,7 @@
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "ci:policy": "node scripts/check-ci-policy.mjs",
-    "contracts:check": "node scripts/generate-types.mjs --check && vitest run src/features/settings/baseUrlPreview.test.ts && cargo test -p router-core base_url_matches_the_shared_cross_layer_contract",
+    "contracts:check": "node scripts/generate-types.mjs --check && vitest run src/features/settings/baseUrlPreview.test.ts src/features/settings/imageModelProfile.test.ts && cargo test -p router-core base_url_matches_the_shared_cross_layer_contract && cargo test -p router-core image_model_profile_matches_the_shared_cross_layer_contract",
     "docs:check": "node scripts/check-public-docs.mjs",
     "license:check": "node scripts/check-licenses.mjs",
     "license:public:check": "node scripts/check-licenses.mjs --scan-public-tree .",

@@ -22,6 +22,12 @@ import {
 import { queryKeys } from "../../api/query";
 import type { CodexConfigStatus, SettingsSnapshotDto } from "../../generated";
 import {
+  IMAGE_MODEL_PRESETS,
+  imageModelTooltipLines,
+  isImageModelPreset,
+  type ImageModelPreset,
+} from "./imageModelProfile";
+import {
   SettingsActionGroup,
   SettingsButton,
   SettingsConfirmDialog,
@@ -37,6 +43,18 @@ import {
   SettingsTextInput,
   type SettingsConfirmation,
 } from "./SettingsPrimitives";
+
+const CUSTOM_IMAGE_MODEL_OPTION = "custom";
+
+type ImageModelDraft =
+  | { choice: "preset"; preset: ImageModelPreset }
+  | { choice: "custom"; text: string };
+
+function imageModelDraftFromStored(model: string): ImageModelDraft {
+  return isImageModelPreset(model)
+    ? { choice: "preset", preset: model }
+    : { choice: "custom", text: model };
+}
 
 const codexLabels: Record<CodexConfigStatus, string> = {
   checking: "检查中",
@@ -452,6 +470,11 @@ function ImageGenerationSettingsSection({
   const [timeoutDraft, setTimeoutDraft] = useState(
     String(snapshot.imagesGeneration.timeoutSecs),
   );
+  const [modelDraft, setModelDraft] = useState<ImageModelDraft>(() =>
+    imageModelDraftFromStored(snapshot.imagesGeneration.model),
+  );
+  const customModelInputRef = useRef<HTMLInputElement>(null);
+  const customModelFocusPending = useRef(false);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -486,16 +509,33 @@ function ImageGenerationSettingsSection({
     titleRef.current.focus({ preventScroll: true });
     onFocusConsumed?.();
   }, [focusRequested, onFocusConsumed]);
+  const modelChoice = modelDraft.choice;
+  useEffect(() => {
+    // The custom input mounts only after `自定义` is chosen, so focus it once
+    // the reveal has committed instead of on every later draft edit.
+    if (modelChoice !== "custom" || !customModelFocusPending.current) return;
+    customModelFocusPending.current = false;
+    customModelInputRef.current?.focus();
+  }, [modelChoice]);
   const selectedRouteExists =
     routeId !== null &&
     snapshot.routes.some((route) => route.routeId === routeId);
   const timeoutSecs = parseImagesGenerationTimeout(timeoutDraft);
   const timeoutError =
     enabled && timeoutSecs === null ? "请输入 600 至 3600 的整数。" : null;
+  const effectiveModel =
+    modelDraft.choice === "preset" ? modelDraft.preset : modelDraft.text.trim();
+  const modelError =
+    enabled && modelDraft.choice === "custom" && effectiveModel === ""
+      ? "请输入模型 ID。"
+      : null;
+  const [modelTooltipLine, ...profileTooltipLines] =
+    imageModelTooltipLines(effectiveModel);
   const unchanged =
     enabled === snapshot.imagesGeneration.enabled &&
     routeId === snapshot.imagesGeneration.routeId &&
-    timeoutSecs === snapshot.imagesGeneration.timeoutSecs;
+    timeoutSecs === snapshot.imagesGeneration.timeoutSecs &&
+    effectiveModel === snapshot.imagesGeneration.model;
   const persistedRouteExists =
     snapshot.imagesGeneration.routeId !== null &&
     snapshot.routes.some(
@@ -515,9 +555,31 @@ function ImageGenerationSettingsSection({
       setEnabled(next.enabled);
       if (!next.enabled) {
         setTimeoutDraft(String(snapshot.imagesGeneration.timeoutSecs));
+        setModelDraft(
+          imageModelDraftFromStored(snapshot.imagesGeneration.model),
+        );
       }
     }
     if (next.routeId !== undefined) setRouteId(next.routeId);
+    setSaved(false);
+    setError(null);
+  };
+
+  const selectModel = (value: string) => {
+    if (value === CUSTOM_IMAGE_MODEL_OPTION) {
+      customModelFocusPending.current = true;
+      setModelDraft({ choice: "custom", text: "" });
+    } else if (isImageModelPreset(value)) {
+      setModelDraft({ choice: "preset", preset: value });
+    } else {
+      return;
+    }
+    setSaved(false);
+    setError(null);
+  };
+
+  const updateCustomModel = (text: string) => {
+    setModelDraft({ choice: "custom", text });
     setSaved(false);
     setError(null);
   };
@@ -527,6 +589,7 @@ function ImageGenerationSettingsSection({
       busy ||
       unchanged ||
       timeoutSecs === null ||
+      modelError !== null ||
       (enabled && !selectedRouteExists)
     )
       return;
@@ -538,6 +601,7 @@ function ImageGenerationSettingsSection({
         enabled,
         routeId: selectedRouteExists ? routeId : null,
         timeoutSecs,
+        model: effectiveModel,
       });
       setTimeoutDraft(String(timeoutSecs));
       setSaved(true);
@@ -612,16 +676,10 @@ function ImageGenerationSettingsSection({
       titleTabIndex={focusRequested ? -1 : undefined}
       titleAccessory={
         <SettingsHelpTooltip label="图片生成说明">
-          <strong>模型：gpt-image-2</strong>
-          <span>每次生成一张 PNG。</span>
-          <span>
-            尺寸支持 auto 或 宽x高；两条边都是 16 的倍数，最长边小于
-            3,840px，比例不超过 3:1，总像素为 655,360–8,294,400。
-          </span>
-          <span>
-            超过 3,686,400
-            像素属于实验性范围。常用尺寸：1024x1024、1536x1024、1024x1536、2048x1152。
-          </span>
+          <strong>{modelTooltipLine}</strong>
+          {profileTooltipLines.map((line) => (
+            <span key={line}>{line}</span>
+          ))}
         </SettingsHelpTooltip>
       }
       status={
@@ -656,6 +714,50 @@ function ImageGenerationSettingsSection({
             </option>
           ))}
         </SettingsSelect>
+      </SettingsFieldRow>
+      <SettingsFieldRow label="生图模型" htmlFor="images-generation-model">
+        <div
+          className="images-generation-model-control"
+          data-custom={modelDraft.choice === "custom" ? "true" : "false"}
+        >
+          <SettingsSelect
+            id="images-generation-model"
+            className="images-generation-model-select"
+            aria-label="生图模型"
+            value={
+              modelDraft.choice === "custom"
+                ? CUSTOM_IMAGE_MODEL_OPTION
+                : modelDraft.preset
+            }
+            disabled={busy || !enabled}
+            onChange={(event) => selectModel(event.currentTarget.value)}
+          >
+            {IMAGE_MODEL_PRESETS.map((preset) => (
+              <option key={preset} value={preset}>
+                {preset}
+              </option>
+            ))}
+            <option value={CUSTOM_IMAGE_MODEL_OPTION}>自定义</option>
+          </SettingsSelect>
+          {modelDraft.choice === "custom" ? (
+            <SettingsTextInput
+              ref={customModelInputRef}
+              id="images-generation-model-custom"
+              type="text"
+              aria-label="自定义生图模型"
+              placeholder="输入模型 ID"
+              autoComplete="off"
+              spellCheck={false}
+              value={modelDraft.text}
+              disabled={busy || !enabled}
+              aria-invalid={modelError ? "true" : undefined}
+              aria-describedby={
+                modelError ? "images-generation-model-error" : undefined
+              }
+              onChange={(event) => updateCustomModel(event.currentTarget.value)}
+            />
+          ) : null}
+        </div>
       </SettingsFieldRow>
       <SettingsFieldRow
         label="生成等待上限"
@@ -703,6 +805,7 @@ function ImageGenerationSettingsSection({
             busy ||
             unchanged ||
             timeoutSecs === null ||
+            modelError !== null ||
             (enabled && !selectedRouteExists)
           }
           onClick={() => void apply()}
@@ -712,6 +815,15 @@ function ImageGenerationSettingsSection({
           ) : null}
           应用
         </SettingsButton>
+        {modelError ? (
+          <span
+            id="images-generation-model-error"
+            className="settings-error"
+            role="alert"
+          >
+            {modelError}
+          </span>
+        ) : null}
         {saved ? <SettingsStatus tone="success">已保存</SettingsStatus> : null}
         {error ? (
           <span className="settings-error" role="alert">
@@ -850,7 +962,7 @@ function ImageGenerationSettingsSection({
 
 function imageSettingsKey(snapshot: SettingsSnapshotDto) {
   const routeIds = snapshot.routes.map((route) => route.routeId).join(",");
-  return `${snapshot.imagesGeneration.enabled}:${snapshot.imagesGeneration.routeId ?? ""}:${snapshot.imagesGeneration.timeoutSecs}:${routeIds}`;
+  return `${snapshot.imagesGeneration.enabled}:${snapshot.imagesGeneration.routeId ?? ""}:${snapshot.imagesGeneration.timeoutSecs}:${snapshot.imagesGeneration.model}:${routeIds}`;
 }
 
 function parseImageCapacityThreshold(value: string): number | null {

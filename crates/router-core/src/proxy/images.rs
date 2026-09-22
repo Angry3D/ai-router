@@ -48,10 +48,116 @@ const MAX_IMAGES_UPSTREAM_ERROR_CODE_CHARS: usize = 128;
 const MAX_IMAGES_UPSTREAM_ERROR_MESSAGE_CHARS: usize = 240;
 const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 const IMAGE_SIZE_MULTIPLE: u64 = 16;
-const MAX_IMAGE_EDGE_EXCLUSIVE: u64 = 3_840;
+const MAX_IMAGE_EDGE: u64 = 3_840;
 const MAX_IMAGE_ASPECT_RATIO: u64 = 3;
 const MIN_IMAGE_PIXELS: u64 = 655_360;
 const MAX_IMAGE_PIXELS: u64 = 8_294_400;
+const STANDARD_IMAGE_SIZES: [&str; 4] = ["auto", "1024x1024", "1536x1024", "1024x1536"];
+const BASE_IMAGE_QUALITIES: [&str; 4] = ["auto", "low", "medium", "high"];
+const EXTENDED_IMAGE_QUALITIES: [&str; 6] = ["auto", "low", "medium", "high", "xhigh", "max"];
+const IMAGE_BACKGROUNDS: [&str; 3] = ["auto", "opaque", "transparent"];
+const FLEXIBLE_IMAGE_SIZE_DESCRIPTION: &str = "Use `auto` or WIDTHxHEIGHT. Width and height must be positive decimal integers, multiples of 16, and each edge must be at most 3,840 pixels; the long-edge to short-edge ratio must be at most 3:1, and total pixels must be from 655,360 through 8,294,400 inclusive. Common examples include 1024x1024, 1536x1024, 1024x1536, 2048x2048, 2048x1152, and 3840x2160. Sizes above 3,686,400 total pixels (2560x1440) are supported but experimental.";
+const STANDARD_IMAGE_SIZE_DESCRIPTION: &str =
+    "Use `auto`, 1024x1024, 1536x1024, or 1024x1536. This model accepts no other size.";
+const GENERATE_IMAGE_TOOL_DESCRIPTION: &str =
+    "Generate one PNG image, save it locally, and return its path and metadata as JSON.";
+
+/// Local validation and schema profile derived from the configured image model.
+///
+/// The profile decides which `size` and `quality` values are accepted before
+/// networking and which values the `generate_image` tool schema advertises.
+/// It never changes the request body beyond the validated arguments; upstream
+/// compatibility is still decided by the one real request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ImageModelProfile {
+    /// `gpt-image-2.5` family and every unknown model: arbitrary sizes plus
+    /// the `xhigh` and `max` quality levels.
+    FlexibleExtended,
+    /// `gpt-image-2` family: arbitrary sizes with the four base quality levels.
+    Flexible,
+    /// `gpt-image-1.5`, `gpt-image-1`, and `chatgpt-image-latest`: the three
+    /// fixed sizes plus `auto` with the four base quality levels.
+    Standard,
+}
+
+impl ImageModelProfile {
+    #[must_use]
+    pub(crate) fn for_model(model: &str) -> Self {
+        let model = model.trim();
+        if model_matches_family(model, "gpt-image-2.5") {
+            Self::FlexibleExtended
+        } else if model_matches_family(model, "gpt-image-2") {
+            Self::Flexible
+        } else if model_matches_family(model, "gpt-image-1.5")
+            || model_matches_family(model, "gpt-image-1")
+            || model == "chatgpt-image-latest"
+        {
+            Self::Standard
+        } else {
+            Self::FlexibleExtended
+        }
+    }
+
+    #[must_use]
+    fn size_is_supported(self, size: Option<&str>) -> bool {
+        match self {
+            Self::FlexibleExtended | Self::Flexible => flexible_image_size_is_supported(size),
+            Self::Standard => optional_argument_is_supported(size, &STANDARD_IMAGE_SIZES),
+        }
+    }
+
+    #[must_use]
+    fn quality_is_supported(self, quality: Option<&str>) -> bool {
+        optional_argument_is_supported(quality, self.qualities())
+    }
+
+    fn qualities(self) -> &'static [&'static str] {
+        match self {
+            Self::FlexibleExtended => &EXTENDED_IMAGE_QUALITIES,
+            Self::Flexible | Self::Standard => &BASE_IMAGE_QUALITIES,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn tool(self) -> Tool {
+        let size = match self {
+            Self::FlexibleExtended | Self::Flexible => json!({
+                "type": "string",
+                "pattern": "^(?:auto|[0-9]+x[0-9]+)$",
+                "description": FLEXIBLE_IMAGE_SIZE_DESCRIPTION
+            }),
+            Self::Standard => json!({
+                "type": "string",
+                "enum": STANDARD_IMAGE_SIZES,
+                "description": STANDARD_IMAGE_SIZE_DESCRIPTION
+            }),
+        };
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "minLength": 1 },
+                "size": size,
+                "quality": { "type": "string", "enum": self.qualities() },
+                "background": { "type": "string", "enum": IMAGE_BACKGROUNDS }
+            },
+            "required": ["prompt"],
+            "additionalProperties": false
+        });
+        let schema: JsonObject = schema.as_object().cloned().unwrap_or_default();
+        Tool::new(
+            Cow::Borrowed("generate_image"),
+            Cow::Borrowed(GENERATE_IMAGE_TOOL_DESCRIPTION),
+            Arc::new(schema),
+        )
+    }
+}
+
+fn model_matches_family(model: &str, family: &str) -> bool {
+    model == family
+        || model
+            .strip_prefix(family)
+            .is_some_and(|suffix| suffix.starts_with('-'))
+}
 
 pub trait ImageAssetChangeSink: Send + Sync {
     fn image_assets_changed(&self);
@@ -845,7 +951,6 @@ pub struct ImageMcpServer {
     publication_fault: PublicationFault,
     #[cfg(test)]
     source_parse_gate: Option<Arc<tests::BlockingPhaseGate>>,
-    tool: Arc<Tool>,
 }
 
 impl ImageMcpServer {
@@ -863,7 +968,6 @@ impl ImageMcpServer {
             publication_fault: PublicationFault::default(),
             #[cfg(test)]
             source_parse_gate: None,
-            tool: Arc::new(generate_image_tool()),
         }
     }
 
@@ -885,6 +989,12 @@ impl ImageMcpServer {
         self
     }
 
+    /// Builds the `generate_image` tool for the model in the current routing
+    /// snapshot so schema advertisement and runtime validation share one table.
+    fn current_tool(&self) -> Tool {
+        ImageModelProfile::for_model(&self.service.routing.load().images_generation_model).tool()
+    }
+
     async fn generate_image(&self, args: GenerateImageArgs) -> Result<CallToolResult, McpError> {
         let request_id = Uuid::new_v4().to_string();
         if args.prompt.trim().is_empty() || args.prompt.len() > MAX_PROMPT_BYTES {
@@ -893,22 +1003,18 @@ impl ImageMcpServer {
                 request_id,
             ));
         }
-        if !image_size_is_supported(args.size.as_deref())
-            || !optional_argument_is_supported(
-                args.quality.as_deref(),
-                &["auto", "low", "medium", "high"],
-            )
-            || !optional_argument_is_supported(
-                args.background.as_deref(),
-                &["auto", "opaque", "transparent"],
-            )
+        let model = Arc::clone(&self.service.routing.load().images_generation_model);
+        let profile = ImageModelProfile::for_model(&model);
+        if !profile.size_is_supported(args.size.as_deref())
+            || !profile.quality_is_supported(args.quality.as_deref())
+            || !optional_argument_is_supported(args.background.as_deref(), &IMAGE_BACKGROUNDS)
         {
             return Err(mcp_request_error(
                 ImagesGenerationFailureKind::InvalidRequest,
                 request_id,
             ));
         }
-        let body = mcp_request_body(args).map_err(|_| {
+        let body = mcp_request_body(args, &model).map_err(|_| {
             mcp_forwarding_error(&ImagesGenerationFailure::with_request_id(
                 ImagesGenerationFailureKind::RequestConstructionFailed,
                 request_id.clone(),
@@ -1038,8 +1144,8 @@ impl ServerHandler for ImageMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let tool = self.tool.clone();
-        async move { Ok(ListToolsResult::with_all_items(vec![(*tool).clone()])) }
+        let tool = self.current_tool();
+        async move { Ok(ListToolsResult::with_all_items(vec![tool])) }
     }
 
     async fn call_tool(
@@ -1077,9 +1183,9 @@ struct GenerateImageArgs {
     background: Option<String>,
 }
 
-fn mcp_request_body(args: GenerateImageArgs) -> Result<Vec<u8>, serde_json::Error> {
+fn mcp_request_body(args: GenerateImageArgs, model: &str) -> Result<Vec<u8>, serde_json::Error> {
     let mut body = serde_json::Map::new();
-    body.insert("model".to_owned(), json!("gpt-image-2"));
+    body.insert("model".to_owned(), json!(model));
     body.insert("prompt".to_owned(), json!(args.prompt));
     body.insert("n".to_owned(), json!(1));
     body.insert("output_format".to_owned(), json!("png"));
@@ -1099,7 +1205,7 @@ fn optional_argument_is_supported(value: Option<&str>, supported: &[&str]) -> bo
     value.is_none_or(|value| supported.contains(&value))
 }
 
-fn image_size_is_supported(value: Option<&str>) -> bool {
+fn flexible_image_size_is_supported(value: Option<&str>) -> bool {
     let Some(value) = value else {
         return true;
     };
@@ -1128,7 +1234,7 @@ fn image_size_is_supported(value: Option<&str>) -> bool {
     }
     let short_edge = width.min(height);
     let long_edge = width.max(height);
-    if long_edge >= MAX_IMAGE_EDGE_EXCLUSIVE
+    if long_edge > MAX_IMAGE_EDGE
         || short_edge
             .checked_mul(MAX_IMAGE_ASPECT_RATIO)
             .is_none_or(|ratio_limit| long_edge > ratio_limit)
@@ -1224,32 +1330,6 @@ fn images_mcp_error_data_with_code(
         retryable: error.retryable,
     }
     .into_value()
-}
-
-fn generate_image_tool() -> Tool {
-    let schema = json!({
-        "type": "object",
-        "properties": {
-            "prompt": { "type": "string", "minLength": 1 },
-            "size": {
-                "type": "string",
-                "pattern": "^(?:auto|[0-9]+x[0-9]+)$",
-                "description": "Use `auto` or WIDTHxHEIGHT. Width and height must be positive decimal integers, multiples of 16, and each edge must be less than 3,840 pixels; the long-edge to short-edge ratio must be at most 3:1, and total pixels must be from 655,360 through 8,294,400 inclusive. Common examples include 1024x1024, 1536x1024, 1024x1536, 2048x2048, and 2048x1152. Sizes above 3,686,400 total pixels (2560x1440) are supported but experimental."
-            },
-            "quality": { "type": "string", "enum": ["auto", "low", "medium", "high"] },
-            "background": { "type": "string", "enum": ["auto", "opaque", "transparent"] }
-        },
-        "required": ["prompt"],
-        "additionalProperties": false
-    });
-    let schema: JsonObject = schema.as_object().cloned().unwrap_or_default();
-    Tool::new(
-        Cow::Borrowed("generate_image"),
-        Cow::Borrowed(
-            "Generate one PNG image, save it locally, and return its path and metadata as JSON.",
-        ),
-        Arc::new(schema),
-    )
 }
 
 #[cfg(test)]
@@ -1965,6 +2045,27 @@ mod tests {
         images_route: Option<Arc<RouteSnapshot>>,
         images_generation_timeout: Duration,
     ) -> RoutingSnapshotStore {
+        routing_snapshot(
+            images_generation_enabled,
+            images_route,
+            images_generation_timeout,
+            "gpt-image-2",
+        )
+    }
+
+    fn routing_with_model(
+        images_route: Option<Arc<RouteSnapshot>>,
+        model: &str,
+    ) -> RoutingSnapshotStore {
+        routing_snapshot(true, images_route, Duration::from_mins(10), model)
+    }
+
+    fn routing_snapshot(
+        images_generation_enabled: bool,
+        images_route: Option<Arc<RouteSnapshot>>,
+        images_generation_timeout: Duration,
+        model: &str,
+    ) -> RoutingSnapshotStore {
         RoutingSnapshotStore::new(RoutingSnapshot {
             active: None,
             participants: Vec::new(),
@@ -1976,6 +2077,7 @@ mod tests {
             images_generation_enabled,
             images_route,
             images_generation_timeout,
+            images_generation_model: Arc::from(model),
         })
     }
 
@@ -2123,6 +2225,7 @@ mod tests {
             images_generation_enabled: true,
             images_route: Some(selected),
             images_generation_timeout: Duration::from_mins(10),
+            images_generation_model: Arc::from("gpt-image-2"),
         });
         let request_body = Bytes::from_static(
             br#"{"model":"caller-model","prompt":"private","n":3,"extension":true}"#,
@@ -2198,6 +2301,7 @@ mod tests {
             images_generation_enabled: current.images_generation_enabled,
             images_route: Some(second),
             images_generation_timeout: current.images_generation_timeout,
+            images_generation_model: Arc::clone(&current.images_generation_model),
         }));
         service
             .forward(body, &HeaderMap::new())
@@ -3352,8 +3456,11 @@ mod tests {
             Some("1024x640"),
             Some("1920x640"),
             Some("640x1920"),
+            Some("2560x1440"),
             Some("3824x2160"),
             Some("2160x3824"),
+            Some("3840x2160"),
+            Some("2160x3840"),
         ];
 
         for size in supported_sizes.iter().copied() {
@@ -3409,8 +3516,9 @@ mod tests {
             ("0x1024", "zero width"),
             ("1025x1024", "non-16-multiple edge"),
             ("3072x1008", "ratio above 3:1"),
-            ("3840x2160", "edge at exclusive 3840 limit"),
-            ("3856x2144", "edge above 3840"),
+            ("3856x2144", "edge above the inclusive 3840 limit"),
+            ("3856x2160", "edge and pixel count above the limits"),
+            ("2144x3856", "portrait edge above the inclusive 3840 limit"),
             ("1024x624", "pixel count below minimum"),
             ("3840x2176", "pixel count above maximum"),
             ("18446744073709551616x1024", "integer overflow"),
@@ -3438,36 +3546,94 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn mcp_schema_and_option_validation_are_stable() {
-        let tool = generate_image_tool();
-        assert_eq!(tool.name.as_ref(), "generate_image");
-        assert_eq!(
-            tool.description.as_deref(),
-            Some(
-                "Generate one PNG image, save it locally, and return its path and metadata as JSON."
-            )
-        );
-        assert_eq!(tool.input_schema["required"], json!(["prompt"]));
-        let size = &tool.input_schema["properties"]["size"];
-        assert!(size.get("enum").is_none());
-        assert_eq!(size["pattern"], "^(?:auto|[0-9]+x[0-9]+)$");
-        let description = size["description"].as_str().expect("size description");
-        for expected in [
-            "multiples of 16",
-            "3,840",
-            "3:1",
-            "655,360",
-            "8,294,400",
-            "1024x1024",
-            "1536x1024",
-            "1024x1536",
-            "2048x2048",
-            "2048x1152",
-            "3,686,400",
-            "experimental",
+        for profile in [
+            ImageModelProfile::FlexibleExtended,
+            ImageModelProfile::Flexible,
+            ImageModelProfile::Standard,
         ] {
-            assert!(description.contains(expected), "missing {expected}");
+            let tool = profile.tool();
+            assert_eq!(tool.name.as_ref(), "generate_image");
+            assert_eq!(
+                tool.description.as_deref(),
+                Some(
+                    "Generate one PNG image, save it locally, and return its path and metadata as JSON."
+                )
+            );
+            assert_eq!(tool.input_schema["required"], json!(["prompt"]));
+            assert_eq!(tool.input_schema["additionalProperties"], json!(false));
+            let properties = tool.input_schema["properties"]
+                .as_object()
+                .expect("tool properties");
+            assert!(
+                properties.get("model").is_none(),
+                "{profile:?} must not expose a model argument"
+            );
+            assert_eq!(
+                properties.keys().collect::<Vec<_>>(),
+                ["background", "prompt", "quality", "size"]
+            );
+            assert_eq!(
+                tool.input_schema["properties"]["background"]["enum"],
+                json!(["auto", "opaque", "transparent"])
+            );
         }
+
+        for profile in [
+            ImageModelProfile::FlexibleExtended,
+            ImageModelProfile::Flexible,
+        ] {
+            let tool = profile.tool();
+            let size = &tool.input_schema["properties"]["size"];
+            assert!(size.get("enum").is_none());
+            assert_eq!(size["pattern"], "^(?:auto|[0-9]+x[0-9]+)$");
+            let description = size["description"].as_str().expect("size description");
+            for expected in [
+                "multiples of 16",
+                "at most 3,840",
+                "3:1",
+                "655,360",
+                "8,294,400",
+                "1024x1024",
+                "1536x1024",
+                "1024x1536",
+                "2048x2048",
+                "2048x1152",
+                "3840x2160",
+                "3,686,400",
+                "experimental",
+            ] {
+                assert!(description.contains(expected), "missing {expected}");
+            }
+            assert!(!description.contains("less than 3,840"));
+        }
+        assert_eq!(
+            ImageModelProfile::FlexibleExtended.tool().input_schema["properties"]["quality"]["enum"],
+            json!(["auto", "low", "medium", "high", "xhigh", "max"])
+        );
+        assert_eq!(
+            ImageModelProfile::Flexible.tool().input_schema["properties"]["quality"]["enum"],
+            json!(["auto", "low", "medium", "high"])
+        );
+        let standard = ImageModelProfile::Standard.tool();
+        let size = &standard.input_schema["properties"]["size"];
+        assert!(size.get("pattern").is_none());
+        assert_eq!(
+            size["enum"],
+            json!(["auto", "1024x1024", "1536x1024", "1024x1536"])
+        );
+        assert!(
+            size["description"]
+                .as_str()
+                .expect("standard size description")
+                .contains("1536x1024")
+        );
+        assert_eq!(
+            standard.input_schema["properties"]["quality"]["enum"],
+            json!(["auto", "low", "medium", "high"])
+        );
+
         assert!(optional_argument_is_supported(
             Some("high"),
             &["auto", "low", "medium", "high"]
@@ -3476,6 +3642,54 @@ mod tests {
             Some("unsupported"),
             &["auto", "low", "medium", "high"]
         ));
+        for profile in [
+            ImageModelProfile::FlexibleExtended,
+            ImageModelProfile::Flexible,
+        ] {
+            for size in [None, Some("auto"), Some("1536x1024"), Some("2048x1152")] {
+                assert!(profile.size_is_supported(size), "{profile:?} {size:?}");
+            }
+            assert!(!profile.size_is_supported(Some("3856x2160")));
+        }
+        for size in [
+            None,
+            Some("auto"),
+            Some("1024x1024"),
+            Some("1536x1024"),
+            Some("1024x1536"),
+        ] {
+            assert!(ImageModelProfile::Standard.size_is_supported(size));
+        }
+        for size in [
+            Some("2048x1152"),
+            Some("2048x2048"),
+            Some("1024x1024 "),
+            Some(""),
+        ] {
+            assert!(!ImageModelProfile::Standard.size_is_supported(size));
+        }
+        for quality in ["xhigh", "max"] {
+            assert!(ImageModelProfile::FlexibleExtended.quality_is_supported(Some(quality)));
+            assert!(!ImageModelProfile::Flexible.quality_is_supported(Some(quality)));
+            assert!(!ImageModelProfile::Standard.quality_is_supported(Some(quality)));
+        }
+        for profile in [
+            ImageModelProfile::FlexibleExtended,
+            ImageModelProfile::Flexible,
+            ImageModelProfile::Standard,
+        ] {
+            assert!(profile.quality_is_supported(None));
+            assert!(profile.quality_is_supported(Some("high")));
+            assert!(!profile.quality_is_supported(Some("hd")));
+        }
+        assert!(
+            serde_json::from_value::<GenerateImageArgs>(json!({
+                "prompt": "private",
+                "model": "gpt-image-2.5-flare"
+            }))
+            .is_err(),
+            "tool arguments must keep rejecting a per-call model"
+        );
 
         let adapter = mcp_adapter(
             ImagesGenerationService::new(RoutingSnapshotStore::default()),
@@ -3494,5 +3708,328 @@ mod tests {
         assert_eq!(direct.config.response_wire_limit, DEFAULT_RESPONSE_LIMIT);
         assert_eq!(direct.config.response_decoded_limit, DEFAULT_RESPONSE_LIMIT);
         assert!(!direct.config.exact_response_capacity);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ImageModelProfileFixture {
+        model: String,
+        profile: String,
+    }
+
+    #[test]
+    fn image_model_profile_matches_the_shared_cross_layer_contract() {
+        let fixtures: Vec<ImageModelProfileFixture> = serde_json::from_str(include_str!(
+            "../../../../fixtures/image-model-profile-contract.json"
+        ))
+        .expect("image model profile fixtures");
+        assert!(fixtures.len() >= 20, "the contract table must stay broad");
+        for fixture in fixtures {
+            let expected = match fixture.profile.as_str() {
+                "flexible_extended" => ImageModelProfile::FlexibleExtended,
+                "flexible" => ImageModelProfile::Flexible,
+                "standard" => ImageModelProfile::Standard,
+                other => panic!("unknown fixture profile {other}"),
+            };
+            assert_eq!(
+                ImageModelProfile::for_model(&fixture.model),
+                expected,
+                "model: {:?}",
+                fixture.model
+            );
+        }
+        assert_eq!(
+            ImageModelProfile::for_model(crate::domain::DEFAULT_IMAGES_GENERATION_MODEL),
+            ImageModelProfile::Flexible
+        );
+        assert_eq!(
+            ImageModelProfile::for_model(
+                &RoutingSnapshotStore::default()
+                    .load()
+                    .images_generation_model
+            ),
+            ImageModelProfile::Flexible
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_sends_the_snapshot_model_with_fixed_count_and_format() {
+        let response = valid_png_response();
+        let (server, mock) = start_mock(StatusCode::OK, response).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let temporary = TempDir::new().expect("temporary app data");
+        let store = routing_with_model(Some(selected.clone()), "gpt-image-2");
+        let adapter = mcp_adapter(
+            ImagesGenerationService::new(store.clone()),
+            Some(temporary.path().join("mcp-images")),
+        );
+
+        adapter
+            .generate_image(default_generate_args())
+            .await
+            .expect("default model call");
+        let current = store.load();
+        store.store(Arc::new(RoutingSnapshot {
+            active: current.active.clone(),
+            participants: current.participants.clone(),
+            configured_participant_count: current.configured_participant_count,
+            enabled: current.enabled,
+            selection_generation: current.selection_generation,
+            health_generation: current.health_generation,
+            config_revision: current.config_revision,
+            images_generation_enabled: current.images_generation_enabled,
+            images_route: current.images_route.clone(),
+            images_generation_timeout: current.images_generation_timeout,
+            images_generation_model: Arc::from("relay-image-2.5-CUSTOM_MODEL_SENTINEL"),
+        }));
+        adapter
+            .generate_image(GenerateImageArgs {
+                prompt: "private".to_owned(),
+                size: Some("3840x2160".to_owned()),
+                quality: Some("max".to_owned()),
+                background: Some("transparent".to_owned()),
+            })
+            .await
+            .expect("custom model call");
+
+        assert_eq!(mock.calls.load(Ordering::Acquire), 2);
+        {
+            let captures = mock.captures.lock().expect("capture lock");
+            let first: Value = serde_json::from_slice(&captures[0].2).expect("first body");
+            assert_eq!(first["model"], "gpt-image-2");
+            assert_eq!(first["n"], 1);
+            assert_eq!(first["output_format"], "png");
+            assert!(first.get("response_format").is_none());
+            assert!(first.get("size").is_none());
+            let second: Value = serde_json::from_slice(&captures[1].2).expect("second body");
+            assert_eq!(second["model"], "relay-image-2.5-CUSTOM_MODEL_SENTINEL");
+            assert_eq!(second["n"], 1);
+            assert_eq!(second["output_format"], "png");
+            assert_eq!(second["size"], "3840x2160");
+            assert_eq!(second["quality"], "max");
+            assert_eq!(second["background"], "transparent");
+            assert_eq!(
+                second.as_object().map(serde_json::Map::len),
+                Some(7),
+                "the body carries exactly model, prompt, n, output_format, size, quality, background"
+            );
+        }
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn mcp_adapter_applies_model_profiles_to_quality_and_size_before_networking() {
+        let response = valid_png_response();
+        let (server, mock) = start_mock(StatusCode::OK, response).await;
+        let selected = route(
+            &format!("http://{}/openai/v1", server.address()),
+            "selected-image-key",
+        );
+        let temporary = TempDir::new().expect("temporary app data");
+        let asset_root = temporary.path().join("mcp-images");
+        let mut expected_calls = 0;
+
+        let extended = mcp_adapter(
+            ImagesGenerationService::new(routing_with_model(
+                Some(selected.clone()),
+                "gpt-image-2.5-flare",
+            )),
+            Some(asset_root.clone()),
+        );
+        for quality in ["xhigh", "max"] {
+            extended
+                .generate_image(GenerateImageArgs {
+                    prompt: "private".to_owned(),
+                    size: Some("2048x1152".to_owned()),
+                    quality: Some(quality.to_owned()),
+                    background: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("gpt-image-2.5-flare quality {quality}: {error}"));
+            expected_calls += 1;
+        }
+        assert_eq!(mock.calls.load(Ordering::Acquire), expected_calls);
+
+        let flexible = mcp_adapter(
+            ImagesGenerationService::new(routing_with_model(Some(selected.clone()), "gpt-image-2")),
+            Some(asset_root.clone()),
+        );
+        for quality in ["xhigh", "max"] {
+            let error = flexible
+                .generate_image(GenerateImageArgs {
+                    prompt: "private".to_owned(),
+                    size: None,
+                    quality: Some(quality.to_owned()),
+                    background: None,
+                })
+                .await
+                .expect_err("gpt-image-2 must reject the extended quality locally");
+            assert_eq!(error.message, "The image generation request is invalid.");
+            assert_eq!(mcp_error_field(&error, "code"), "invalid_images_request");
+            assert_eq!(mcp_error_field(&error, "stage"), "request_construction");
+            assert_eq!(mcp_error_field(&error, "upstreamStatus"), &Value::Null);
+        }
+        for size in ["2048x1152", "1536x1024"] {
+            flexible
+                .generate_image(GenerateImageArgs {
+                    prompt: "private".to_owned(),
+                    size: Some(size.to_owned()),
+                    quality: Some("high".to_owned()),
+                    background: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("gpt-image-2 size {size}: {error}"));
+            expected_calls += 1;
+        }
+        assert_eq!(mock.calls.load(Ordering::Acquire), expected_calls);
+
+        let standard = mcp_adapter(
+            ImagesGenerationService::new(routing_with_model(
+                Some(selected.clone()),
+                "gpt-image-1.5",
+            )),
+            Some(asset_root.clone()),
+        );
+        for size in ["2048x1152", "2048x2048", "3840x2160"] {
+            let error = standard
+                .generate_image(GenerateImageArgs {
+                    prompt: "private".to_owned(),
+                    size: Some(size.to_owned()),
+                    quality: None,
+                    background: None,
+                })
+                .await
+                .expect_err("gpt-image-1.5 must reject a non-standard size locally");
+            assert_eq!(mcp_error_field(&error, "code"), "invalid_images_request");
+            assert_eq!(mcp_error_field(&error, "stage"), "request_construction");
+        }
+        let error = standard
+            .generate_image(GenerateImageArgs {
+                prompt: "private".to_owned(),
+                size: None,
+                quality: Some("xhigh".to_owned()),
+                background: None,
+            })
+            .await
+            .expect_err("gpt-image-1.5 must reject the extended quality locally");
+        assert_eq!(mcp_error_field(&error, "code"), "invalid_images_request");
+        assert_eq!(mock.calls.load(Ordering::Acquire), expected_calls);
+        for size in [None, Some("auto"), Some("1536x1024"), Some("1024x1536")] {
+            standard
+                .generate_image(GenerateImageArgs {
+                    prompt: "private".to_owned(),
+                    size: size.map(str::to_owned),
+                    quality: Some("high".to_owned()),
+                    background: Some("opaque".to_owned()),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("gpt-image-1.5 size {size:?}: {error}"));
+            expected_calls += 1;
+        }
+        assert_eq!(mock.calls.load(Ordering::Acquire), expected_calls);
+
+        let unknown = mcp_adapter(
+            ImagesGenerationService::new(routing_with_model(Some(selected), "relay-image-2.5")),
+            Some(asset_root),
+        );
+        unknown
+            .generate_image(GenerateImageArgs {
+                prompt: "private".to_owned(),
+                size: Some("2160x3840".to_owned()),
+                quality: Some("xhigh".to_owned()),
+                background: None,
+            })
+            .await
+            .expect("unknown model uses the most permissive profile");
+        expected_calls += 1;
+        assert_eq!(mock.calls.load(Ordering::Acquire), expected_calls);
+
+        {
+            let captures = mock.captures.lock().expect("capture lock");
+            let models = captures
+                .iter()
+                .map(|(_, _, body)| {
+                    serde_json::from_slice::<Value>(body).expect("captured JSON")["model"]
+                        .as_str()
+                        .expect("model string")
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                models,
+                [
+                    "gpt-image-2.5-flare",
+                    "gpt-image-2.5-flare",
+                    "gpt-image-2",
+                    "gpt-image-2",
+                    "gpt-image-1.5",
+                    "gpt-image-1.5",
+                    "gpt-image-1.5",
+                    "gpt-image-1.5",
+                    "relay-image-2.5",
+                ]
+            );
+        }
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn mcp_tool_list_follows_the_configured_model_profile() {
+        for (model, expected) in [
+            ("gpt-image-2.5-flare", ImageModelProfile::FlexibleExtended),
+            (
+                "gpt-image-2.5-sunburst-2026-09-08",
+                ImageModelProfile::FlexibleExtended,
+            ),
+            ("gpt-image-2", ImageModelProfile::Flexible),
+            ("gpt-image-2-2026-04-21", ImageModelProfile::Flexible),
+            ("gpt-image-1.5", ImageModelProfile::Standard),
+            ("gpt-image-1-mini", ImageModelProfile::Standard),
+            ("chatgpt-image-latest", ImageModelProfile::Standard),
+            ("relay-image-2.5", ImageModelProfile::FlexibleExtended),
+        ] {
+            let adapter = mcp_adapter(
+                ImagesGenerationService::new(routing_with_model(None, model)),
+                None,
+            );
+            let tool = adapter.current_tool();
+            let expected_tool = expected.tool();
+            assert_eq!(tool.name, expected_tool.name, "{model}");
+            assert_eq!(tool.description, expected_tool.description, "{model}");
+            assert_eq!(tool.input_schema, expected_tool.input_schema, "{model}");
+        }
+
+        let store = routing_with_model(None, "gpt-image-2.5-flare");
+        let adapter = mcp_adapter(ImagesGenerationService::new(store.clone()), None);
+        assert_eq!(
+            adapter.current_tool().input_schema["properties"]["quality"]["enum"],
+            json!(["auto", "low", "medium", "high", "xhigh", "max"])
+        );
+        let current = store.load();
+        store.store(Arc::new(RoutingSnapshot {
+            active: current.active.clone(),
+            participants: current.participants.clone(),
+            configured_participant_count: current.configured_participant_count,
+            enabled: current.enabled,
+            selection_generation: current.selection_generation,
+            health_generation: current.health_generation,
+            config_revision: current.config_revision,
+            images_generation_enabled: current.images_generation_enabled,
+            images_route: current.images_route.clone(),
+            images_generation_timeout: current.images_generation_timeout,
+            images_generation_model: Arc::from("gpt-image-1.5"),
+        }));
+        let standard = adapter.current_tool();
+        assert_eq!(
+            standard.input_schema["properties"]["size"]["enum"],
+            json!(["auto", "1024x1024", "1536x1024", "1024x1536"])
+        );
+        assert_eq!(
+            standard.input_schema["properties"]["quality"]["enum"],
+            json!(["auto", "low", "medium", "high"])
+        );
     }
 }

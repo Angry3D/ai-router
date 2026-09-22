@@ -787,7 +787,12 @@ describe("CodexSettings interactions", () => {
   it("defaults image generation off and offers every route when enabled", async () => {
     await renderSettings({
       settings: {
-        imagesGeneration: { enabled: false, routeId: null, timeoutSecs: 600 },
+        imagesGeneration: {
+          enabled: false,
+          routeId: null,
+          timeoutSecs: 600,
+          model: "gpt-image-2",
+        },
       },
     });
     fireEvent.click(screen.getByRole("button", { name: "Codex" }));
@@ -835,9 +840,12 @@ describe("CodexSettings interactions", () => {
 
     fireEvent.mouseEnter(trigger);
     const tooltip = screen.getByRole("tooltip");
-    expect(tooltip).toHaveTextContent("gpt-image-2");
-    expect(tooltip).toHaveTextContent("最长边小于 3,840px");
-    expect(tooltip).toHaveTextContent("2048x1152");
+    expect(tooltip).toHaveTextContent("模型：gpt-image-2");
+    expect(tooltip).toHaveTextContent("最长边不超过 3,840px");
+    expect(tooltip).not.toHaveTextContent("最长边小于");
+    expect(tooltip).toHaveTextContent("2048x1152、3840x2160");
+    expect(tooltip).toHaveTextContent("质量：low、medium、high、auto。");
+    expect(tooltip).not.toHaveTextContent("xhigh");
     expect(trigger).toHaveAttribute("aria-describedby");
 
     fireEvent.mouseLeave(trigger.parentElement!);
@@ -849,6 +857,257 @@ describe("CodexSettings interactions", () => {
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
+  it("describes the profile of the drafted image model in the help tooltip", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const trigger = screen.getByRole("button", { name: "图片生成说明" });
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
+    fireEvent.change(modelSelect, { target: { value: "gpt-image-2.5-flare" } });
+    fireEvent.mouseEnter(trigger);
+    let tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("模型：gpt-image-2.5-flare");
+    expect(tooltip).toHaveTextContent("最长边不超过 3,840px");
+    expect(tooltip).toHaveTextContent(
+      "质量：low、medium、high、xhigh、max、auto。",
+    );
+    fireEvent.mouseLeave(trigger.parentElement!);
+
+    fireEvent.change(modelSelect, { target: { value: "custom" } });
+    fireEvent.mouseEnter(trigger);
+    tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("模型：—");
+    fireEvent.mouseLeave(trigger.parentElement!);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "自定义生图模型" }), {
+      target: { value: "gpt-image-1.5" },
+    });
+    fireEvent.mouseEnter(trigger);
+    tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("模型：gpt-image-1.5");
+    expect(tooltip).toHaveTextContent(
+      "尺寸仅支持 auto、1024x1024、1536x1024、1024x1536。",
+    );
+    expect(tooltip).toHaveTextContent("质量：low、medium、high、auto。");
+    expect(tooltip).not.toHaveTextContent("xhigh");
+    expect(tooltip).not.toHaveTextContent("3840x2160");
+  });
+
+  it("offers the three preset image models plus custom and shows the stored model", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
+    expect(modelSelect).toHaveAttribute("id", "images-generation-model");
+    expect(modelSelect).toHaveClass("images-generation-model-select");
+    expect(screen.getByText("生图模型")).toHaveAttribute(
+      "for",
+      "images-generation-model",
+    );
+    expect(
+      within(modelSelect)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual([
+      "gpt-image-2.5-sunburst",
+      "gpt-image-2.5-flare",
+      "gpt-image-2",
+      "自定义",
+    ]);
+    expect(modelSelect).toHaveValue("gpt-image-2");
+    expect(modelSelect).toBeEnabled();
+    expect(
+      screen.queryByRole("textbox", { name: "自定义生图模型" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("请输入模型 ID。")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "应用" })).toBeDisabled();
+
+    fireEvent.change(modelSelect, {
+      target: { value: "gpt-image-2.5-sunburst" },
+    });
+    expect(screen.getByRole("button", { name: "应用" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "应用" }));
+    await waitFor(() =>
+      expect(ipc.updateImagesGenerationSettings).toHaveBeenCalledWith({
+        enabled: true,
+        routeId: previewSettingsSnapshot.imagesGeneration.routeId,
+        timeoutSecs: previewSettingsSnapshot.imagesGeneration.timeoutSecs,
+        model: "gpt-image-2.5-sunburst",
+      }),
+    );
+  });
+
+  it("reveals a focused custom model input and blocks Apply until an ID is entered", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
+    const apply = screen.getByRole("button", { name: "应用" });
+    fireEvent.change(modelSelect, { target: { value: "custom" } });
+
+    expect(modelSelect).toHaveValue("custom");
+    const customInput = screen.getByRole("textbox", { name: "自定义生图模型" });
+    expect(customInput).toHaveAttribute("id", "images-generation-model-custom");
+    expect(customInput).toHaveAttribute("placeholder", "输入模型 ID");
+    expect(customInput).toHaveValue("");
+    expect(customInput).toHaveFocus();
+    expect(customInput).toHaveAttribute("aria-invalid", "true");
+    expect(customInput).toHaveAttribute(
+      "aria-describedby",
+      "images-generation-model-error",
+    );
+    expect(apply).toBeDisabled();
+
+    const message = screen.getByRole("alert");
+    expect(message).toHaveTextContent("请输入模型 ID。");
+    expect(message).toHaveAttribute("id", "images-generation-model-error");
+    expect(message).toHaveClass("settings-error");
+    const actionGroup = apply.closest(".settings-action-group");
+    expect(actionGroup).not.toBeNull();
+    expect(actionGroup).toContainElement(message);
+    expect(message.closest(".settings-field-row")).toBeNull();
+    const modelRow = screen
+      .getByText("生图模型")
+      .closest(".settings-field-row");
+    expect(modelRow).not.toBeNull();
+    expect(modelRow).not.toContainElement(message);
+    expect(modelRow).toContainElement(customInput);
+
+    fireEvent.change(customInput, { target: { value: "  relay-image-2.5  " } });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(customInput).not.toHaveAttribute("aria-invalid");
+    expect(customInput).not.toHaveAttribute("aria-describedby");
+    expect(apply).toBeEnabled();
+
+    fireEvent.click(apply);
+    await waitFor(() =>
+      expect(ipc.updateImagesGenerationSettings).toHaveBeenCalledWith({
+        enabled: true,
+        routeId: previewSettingsSnapshot.imagesGeneration.routeId,
+        timeoutSecs: previewSettingsSnapshot.imagesGeneration.timeoutSecs,
+        model: "relay-image-2.5",
+      }),
+    );
+  });
+
+  it("renders a stored unknown image model as custom with the input prefilled", async () => {
+    await renderSettings({
+      settings: {
+        imagesGeneration: {
+          ...previewSettingsSnapshot.imagesGeneration,
+          model: "relay-image-2.5",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
+    const customInput = screen.getByRole("textbox", { name: "自定义生图模型" });
+    const apply = screen.getByRole("button", { name: "应用" });
+    expect(modelSelect).toHaveValue("custom");
+    expect(customInput).toHaveValue("relay-image-2.5");
+    expect(customInput).not.toHaveFocus();
+    expect(customInput).not.toHaveAttribute("aria-invalid");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(apply).toBeDisabled();
+
+    fireEvent.change(customInput, { target: { value: "relay-image-3" } });
+    expect(apply).toBeEnabled();
+
+    fireEvent.change(modelSelect, { target: { value: "gpt-image-2.5-flare" } });
+    expect(
+      screen.queryByRole("textbox", { name: "自定义生图模型" }),
+    ).not.toBeInTheDocument();
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+    await waitFor(() =>
+      expect(ipc.updateImagesGenerationSettings).toHaveBeenCalledWith({
+        enabled: true,
+        routeId: previewSettingsSnapshot.imagesGeneration.routeId,
+        timeoutSecs: previewSettingsSnapshot.imagesGeneration.timeoutSecs,
+        model: "gpt-image-2.5-flare",
+      }),
+    );
+  });
+
+  it("clears the custom draft again when custom is re-selected after a preset", async () => {
+    await renderSettings({
+      settings: {
+        imagesGeneration: {
+          ...previewSettingsSnapshot.imagesGeneration,
+          model: "relay-image-2.5",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
+    fireEvent.change(modelSelect, { target: { value: "gpt-image-2" } });
+    fireEvent.change(modelSelect, { target: { value: "custom" } });
+
+    const customInput = screen.getByRole("textbox", { name: "自定义生图模型" });
+    expect(customInput).toHaveValue("");
+    expect(customInput).toHaveFocus();
+    expect(screen.getByRole("alert")).toHaveTextContent("请输入模型 ID。");
+    expect(screen.getByRole("button", { name: "应用" })).toBeDisabled();
+    expect(ipc.updateImagesGenerationSettings).not.toHaveBeenCalled();
+  });
+
+  it("disables the image model controls while image generation is off", async () => {
+    await renderSettings({
+      settings: {
+        imagesGeneration: {
+          enabled: false,
+          routeId: null,
+          timeoutSecs: 600,
+          model: "relay-image-2.5",
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
+    const customInput = screen.getByRole("textbox", { name: "自定义生图模型" });
+    expect(modelSelect).toBeDisabled();
+    expect(modelSelect).toHaveValue("custom");
+    expect(customInput).toBeDisabled();
+    expect(customInput).toHaveValue("relay-image-2.5");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("switch", { name: "启用" }));
+    expect(modelSelect).toBeEnabled();
+    expect(customInput).toBeEnabled();
+  });
+
+  it("can disable image generation after the custom model draft becomes empty", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
+    fireEvent.change(modelSelect, { target: { value: "custom" } });
+    expect(screen.getByRole("alert")).toHaveTextContent("请输入模型 ID。");
+
+    fireEvent.click(screen.getByRole("switch", { name: "启用" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(modelSelect).toBeDisabled();
+    expect(modelSelect).toHaveValue("gpt-image-2");
+    expect(
+      screen.queryByRole("textbox", { name: "自定义生图模型" }),
+    ).not.toBeInTheDocument();
+    const apply = screen.getByRole("button", { name: "应用" });
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+
+    await waitFor(() =>
+      expect(ipc.updateImagesGenerationSettings).toHaveBeenCalledWith({
+        enabled: false,
+        routeId: previewSettingsSnapshot.imagesGeneration.routeId,
+        timeoutSecs: previewSettingsSnapshot.imagesGeneration.timeoutSecs,
+        model: previewSettingsSnapshot.imagesGeneration.model,
+      }),
+    );
+  });
+
   it("applies any existing route and timeout while locking every image control", async () => {
     let resolveUpdate: ((value: { revision: number }) => void) | undefined;
     ipc.updateImagesGenerationSettings.mockReturnValueOnce(
@@ -858,18 +1117,27 @@ describe("CodexSettings interactions", () => {
     );
     await renderSettings({
       settings: {
-        imagesGeneration: { enabled: false, routeId: null, timeoutSecs: 600 },
+        imagesGeneration: {
+          enabled: false,
+          routeId: null,
+          timeoutSecs: 600,
+          model: "gpt-image-2",
+        },
       },
     });
     fireEvent.click(screen.getByRole("button", { name: "Codex" }));
 
     const toggle = screen.getByRole("switch", { name: "启用" });
     const selector = screen.getByRole("combobox", { name: "图片路由" });
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
     const timeout = screen.getByRole("spinbutton", { name: "生成等待上限" });
     const apply = screen.getByRole("button", { name: "应用" });
     const routeId = previewSettingsSnapshot.routes[2].routeId;
     fireEvent.click(toggle);
     fireEvent.change(selector, { target: { value: routeId } });
+    fireEvent.change(modelSelect, { target: { value: "custom" } });
+    const customInput = screen.getByRole("textbox", { name: "自定义生图模型" });
+    fireEvent.change(customInput, { target: { value: "relay-image-2.5" } });
     fireEvent.change(timeout, { target: { value: "900" } });
     fireEvent.click(apply);
 
@@ -877,15 +1145,22 @@ describe("CodexSettings interactions", () => {
       enabled: true,
       routeId,
       timeoutSecs: 900,
+      model: "relay-image-2.5",
     });
     expect(toggle).toBeDisabled();
     expect(selector).toBeDisabled();
+    expect(modelSelect).toBeDisabled();
+    expect(customInput).toBeDisabled();
     expect(timeout).toBeDisabled();
     expect(apply).toBeDisabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     resolveUpdate?.({ revision: 18 });
     expect(await screen.findByText("已保存")).toBeInTheDocument();
     await waitFor(() => expect(toggle).toBeEnabled());
+    expect(modelSelect).toBeEnabled();
+    expect(customInput).toBeEnabled();
+    expect(customInput).toHaveValue("relay-image-2.5");
   });
 
   it("keeps a missing-route integration enabled and can disable it safely", async () => {
@@ -895,6 +1170,7 @@ describe("CodexSettings interactions", () => {
           enabled: true,
           routeId: null,
           timeoutSecs: 600,
+          model: "gpt-image-2",
         },
       },
     });
@@ -912,6 +1188,7 @@ describe("CodexSettings interactions", () => {
         enabled: false,
         routeId: null,
         timeoutSecs: 600,
+        model: "gpt-image-2",
       }),
     );
   });
@@ -922,23 +1199,31 @@ describe("CodexSettings interactions", () => {
     );
     await renderSettings({
       settings: {
-        imagesGeneration: { enabled: false, routeId: null, timeoutSecs: 600 },
+        imagesGeneration: {
+          enabled: false,
+          routeId: null,
+          timeoutSecs: 600,
+          model: "gpt-image-2",
+        },
       },
     });
     fireEvent.click(screen.getByRole("button", { name: "Codex" }));
 
     const toggle = screen.getByRole("switch", { name: "启用" });
     const selector = screen.getByRole("combobox", { name: "图片路由" });
+    const modelSelect = screen.getByRole("combobox", { name: "生图模型" });
     const timeout = screen.getByRole("spinbutton", { name: "生成等待上限" });
     const routeId = previewSettingsSnapshot.routes[0].routeId;
     fireEvent.click(toggle);
     fireEvent.change(selector, { target: { value: routeId } });
+    fireEvent.change(modelSelect, { target: { value: "gpt-image-2.5-flare" } });
     fireEvent.change(timeout, { target: { value: "1200" } });
     fireEvent.click(screen.getByRole("button", { name: "应用" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
     expect(toggle).toBeChecked();
     expect(selector).toHaveValue(routeId);
+    expect(modelSelect).toHaveValue("gpt-image-2.5-flare");
     expect(timeout).toHaveValue(1200);
     expect(screen.getByRole("button", { name: "应用" })).toBeEnabled();
   });
@@ -985,6 +1270,7 @@ describe("CodexSettings interactions", () => {
         enabled: false,
         routeId: previewSettingsSnapshot.imagesGeneration.routeId,
         timeoutSecs: previewSettingsSnapshot.imagesGeneration.timeoutSecs,
+        model: previewSettingsSnapshot.imagesGeneration.model,
       }),
     );
   });

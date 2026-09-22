@@ -288,7 +288,12 @@ export const previewSettingsSnapshot: SettingsSnapshotDto = {
   proxyPort: 32189,
   outboundProxy: { enabled: false, url: "http://127.0.0.1:7890" },
   menuBar: { statusTextEnabled: true, activityAnimationEnabled: true },
-  imagesGeneration: { enabled: true, routeId: workRouteId, timeoutSecs: 600 },
+  imagesGeneration: {
+    enabled: true,
+    routeId: workRouteId,
+    timeoutSecs: 600,
+    model: "gpt-image-2",
+  },
   mcpImageCapacity: { ...previewMcpImageCapacity },
   codexStatus: "changed",
   baseline: {
@@ -345,7 +350,12 @@ export const previewFallbackUiSettingsSnapshot: SettingsSnapshotDto = {
 
 export const previewMissingImageRouteSettingsSnapshot: SettingsSnapshotDto = {
   ...previewSettingsSnapshot,
-  imagesGeneration: { enabled: true, routeId: null, timeoutSecs: 600 },
+  imagesGeneration: {
+    enabled: true,
+    routeId: null,
+    timeoutSecs: 600,
+    model: "gpt-image-2",
+  },
 };
 
 const previewLongRoutes = [

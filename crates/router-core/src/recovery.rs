@@ -17,8 +17,9 @@ use uuid::Uuid;
 use crate::{
     balance::BalanceQueryMode,
     domain::{
-        BalanceQueryPolicy, BalanceScriptSource, CodexModel, ImagesGenerationTimeout,
-        McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl,
+        BalanceQueryPolicy, BalanceScriptSource, CodexModel, ImagesGenerationModel,
+        ImagesGenerationTimeout, McpImageCapacityWarningThreshold, OutboundProxyConfig,
+        OutboundProxyUrl,
     },
     storage::{DatabaseExecutor, SCHEMA_VERSION, StorageError},
 };
@@ -59,6 +60,7 @@ type AppSettingsDomainRow = (
     i64,
     i64,
     Option<String>,
+    String,
 );
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1176,9 +1178,9 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         |row| row.get(0),
     )?;
     let settings: AppSettingsDomainRow = connection.query_row(
-        "SELECT proxy_port, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, outbound_proxy_enabled, outbound_proxy_url FROM app_settings WHERE singleton = 1",
+        "SELECT proxy_port, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, outbound_proxy_enabled, outbound_proxy_url, images_generation_model FROM app_settings WHERE singleton = 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?)),
     )?;
     let policy_valid = u16::try_from(settings.1)
         .ok()
@@ -1195,7 +1197,8 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
                 .unwrap_or(false)
         })
         && u16::try_from(settings.5)
-            .is_ok_and(|timeout| ImagesGenerationTimeout::parse(timeout).is_ok());
+            .is_ok_and(|timeout| ImagesGenerationTimeout::parse(timeout).is_ok())
+        && ImagesGenerationModel::parse(&settings.11).is_ok();
     let outbound_proxy_valid = match settings.9 {
         0 => settings
             .10
@@ -1585,7 +1588,7 @@ mod tests {
     use crate::{
         balance::BalanceQueryMode,
         domain::{
-            ApiKey, CompletionState, DeliveryState, ImagesGenerationTimeout,
+            ApiKey, CompletionState, DeliveryState, ImagesGenerationModel, ImagesGenerationTimeout,
             McpImageCapacityWarningThreshold, UpstreamAttemptId,
         },
         storage::{
@@ -1654,7 +1657,12 @@ mod tests {
             .expect("route");
         let timeout = ImagesGenerationTimeout::parse(900).expect("image timeout");
         database
-            .set_images_generation_settings(true, Some(route.route_id.clone()), timeout)
+            .set_images_generation_settings(
+                true,
+                Some(route.route_id.clone()),
+                timeout,
+                ImagesGenerationModel::parse("gpt-image-2.5-sunburst").expect("image model"),
+            )
             .await
             .expect("image settings");
         database
@@ -1893,6 +1901,7 @@ mod tests {
                 true,
                 Some(route.route_id),
                 ImagesGenerationTimeout::default(),
+                ImagesGenerationModel::default(),
             )
             .await
             .expect("image settings");
@@ -1917,6 +1926,46 @@ mod tests {
                     [],
                 )
                 .expect("invalidate image timeout");
+        }
+
+        let inventory = manager.scan().expect("scan corrupt point");
+        assert!(inventory.valid_points.is_empty());
+        assert_eq!(inventory.invalid_point_count, 1);
+        assert!(matches!(
+            manager
+                .classify_startup()
+                .expect("classify corrupt primary"),
+            DatabaseStartupClassification::RecoveryRequired(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_validation_rejects_control_character_image_model() {
+        let (_root, primary, database, manager) = setup();
+        database
+            .set_images_generation_settings(
+                false,
+                None,
+                ImagesGenerationTimeout::default(),
+                ImagesGenerationModel::parse("gpt-image-2.5-flare").expect("model"),
+            )
+            .await
+            .expect("image settings");
+        let point = manager.create_point(&database).await.expect("point");
+        drop(database);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        for path in [&primary, &point.path] {
+            let connection = Connection::open(path).expect("database to corrupt");
+            connection
+                .execute("UPDATE app_settings SET images_generation_model = ''", [])
+                .expect_err("length CHECK prevents an empty model");
+            connection
+                .execute(
+                    "UPDATE app_settings SET images_generation_model = 'gpt-image' || char(10) || '2'",
+                    [],
+                )
+                .expect("length CHECK cannot reject an interior control character");
         }
 
         let inventory = manager.scan().expect("scan corrupt point");
@@ -2319,6 +2368,10 @@ mod tests {
         assert!(restored_settings.images_generation_enabled);
         assert!(restored_settings.images_generation_route_id.is_some());
         assert_eq!(restored_settings.images_generation_timeout.seconds(), 900);
+        assert_eq!(
+            restored_settings.images_generation_model.as_str(),
+            "gpt-image-2.5-sunburst"
+        );
         assert!(!restored_settings.menu_bar.status_text_enabled);
         assert!(!restored_settings.menu_bar.activity_animation_enabled);
         let restored_routing = restored.routing_state().await.expect("routing state");

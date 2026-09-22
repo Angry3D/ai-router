@@ -1845,6 +1845,27 @@ body[data-view="settings"] .app-variant-badge {
   grid-template-columns: minmax(0, 200px) auto;
 }
 
+.images-generation-model-control {
+  display: grid;
+  grid-template-columns: minmax(0, 200px) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.images-generation-model-control[data-custom="false"] {
+  grid-template-columns: minmax(0, 200px);
+}
+
+.images-generation-model-control .settings-text-input {
+  min-width: 120px;
+  max-width: 320px;
+}
+
+.images-generation-model-control
+  .settings-text-input[aria-invalid="true"]:not(:focus) {
+  border-color: var(--red);
+}
+
 .mcp-image-storage-settings {
   min-width: 0;
 }

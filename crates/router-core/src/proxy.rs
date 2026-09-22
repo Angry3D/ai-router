@@ -40,8 +40,8 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ApiKey, BaseUrl, CompletionState, ImagesGenerationTimeout, ReachabilityResult,
-        ReachabilityStatus, RouteId,
+        ApiKey, BaseUrl, CompletionState, DEFAULT_IMAGES_GENERATION_MODEL, ImagesGenerationTimeout,
+        ReachabilityResult, ReachabilityStatus, RouteId,
     },
     storage::RequestHistoryRecord,
 };
@@ -108,6 +108,7 @@ pub struct RoutingSnapshot {
     pub images_generation_enabled: bool,
     pub images_route: Option<Arc<RouteSnapshot>>,
     pub images_generation_timeout: Duration,
+    pub images_generation_model: Arc<str>,
 }
 
 impl RoutingSnapshot {
@@ -153,6 +154,7 @@ impl Default for RoutingSnapshotStore {
             images_generation_enabled: false,
             images_route: None,
             images_generation_timeout: ImagesGenerationTimeout::default().duration(),
+            images_generation_model: Arc::from(DEFAULT_IMAGES_GENERATION_MODEL),
         })
     }
 }
@@ -326,6 +328,7 @@ impl ProxyIngressState {
             images_generation_enabled: false,
             images_route: None,
             images_generation_timeout: ImagesGenerationTimeout::default().duration(),
+            images_generation_model: Arc::from(DEFAULT_IMAGES_GENERATION_MODEL),
         }));
     }
 
@@ -1495,6 +1498,7 @@ mod tests {
             images_generation_enabled: true,
             images_route: Some(image_route),
             images_generation_timeout: Duration::from_mins(10),
+            images_generation_model: Arc::from(DEFAULT_IMAGES_GENERATION_MODEL),
         });
         let state = ProxyIngressState::new(TOKEN, Arc::new(RecordingUpstream::default()))
             .with_routing_store(routing)
@@ -2239,6 +2243,7 @@ mod tests {
             images_generation_enabled: true,
             images_route: Some(image_route),
             images_generation_timeout: Duration::from_mins(10),
+            images_generation_model: Arc::from(DEFAULT_IMAGES_GENERATION_MODEL),
         });
         let temporary = TempDir::new().expect("temporary app data");
         let router = build_proxy_router(
@@ -2322,6 +2327,235 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
+    async fn images_mcp_tool_list_follows_the_snapshot_model_and_rejects_caller_models() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let image_upstream = ProxyServerHandle::start(
+            0,
+            Router::new().route(
+                "/openai/v1/images/generations",
+                post(move || {
+                    let calls = Arc::clone(&handler_calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            r#"{"data":[{"b64_json":"AQ=="}]}"#,
+                        )
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("loopback image upstream");
+        let image_route = Arc::new(RouteSnapshot {
+            route_id: RouteId::new(),
+            name: "Image route".to_owned(),
+            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
+                .expect("image base URL"),
+            api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
+            fallback_excluded_models: Arc::new(HashSet::new()),
+        });
+        let routing = RoutingSnapshotStore::new(RoutingSnapshot {
+            active: None,
+            participants: Vec::new(),
+            configured_participant_count: 0,
+            enabled: false,
+            selection_generation: 0,
+            health_generation: 0,
+            config_revision: 0,
+            images_generation_enabled: true,
+            images_route: Some(Arc::clone(&image_route)),
+            images_generation_timeout: Duration::from_mins(10),
+            images_generation_model: Arc::from("gpt-image-2.5-flare"),
+        });
+        let temporary = TempDir::new().expect("temporary app data");
+        let router = build_proxy_router(
+            ProxyIngressState::new(TOKEN, Arc::new(RecordingUpstream::default()))
+                .with_routing_store(routing.clone())
+                .with_mcp_image_asset_root(temporary.path().join("mcp-images")),
+        );
+        let mcp_request = |body: &str, session: Option<&str>| {
+            let mut request = HttpRequest::builder()
+                .method(Method::POST)
+                .uri("/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::HOST, "127.0.0.1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream");
+            if let Some(session) = session {
+                request = request
+                    .header("mcp-session-id", session)
+                    .header("mcp-protocol-version", "2025-06-18");
+            }
+            request
+                .body(Body::from(body.to_owned()))
+                .expect("MCP request")
+        };
+        let initialize = router
+            .clone()
+            .oneshot(mcp_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+                None,
+            ))
+            .await
+            .expect("initialize response");
+        let session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("MCP session ID")
+            .to_owned();
+        let _ = mcp_sse_json(initialize).await;
+
+        let list = router
+            .clone()
+            .oneshot(mcp_request(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+                Some(&session_id),
+            ))
+            .await
+            .expect("list response");
+        let list_json = mcp_sse_json(list).await;
+        assert!(list_json["result"].get("resultType").is_none());
+        assert!(list_json["result"].get("ttlMs").is_none());
+        assert!(list_json["result"].get("cacheScope").is_none());
+        let tool = &list_json["result"]["tools"][0];
+        assert_eq!(tool["name"], "generate_image");
+        assert!(tool["inputSchema"]["properties"].get("model").is_none());
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            serde_json::json!(["prompt"])
+        );
+        assert_eq!(
+            tool["inputSchema"]["properties"]["quality"]["enum"],
+            serde_json::json!(["auto", "low", "medium", "high", "xhigh", "max"])
+        );
+        assert!(
+            tool["inputSchema"]["properties"]["size"]
+                .get("enum")
+                .is_none()
+        );
+        assert!(
+            tool["inputSchema"]["properties"]["size"]["description"]
+                .as_str()
+                .expect("size description")
+                .contains("3840x2160")
+        );
+
+        let caller_model = router
+            .clone()
+            .oneshot(mcp_request(
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"private","model":"gpt-image-2"}}}"#,
+                Some(&session_id),
+            ))
+            .await
+            .expect("caller model response");
+        let caller_model_json = mcp_sse_json(caller_model).await;
+        assert_eq!(caller_model_json["error"]["code"], -32602);
+        assert_eq!(
+            caller_model_json["error"]["data"]["code"],
+            "invalid_images_request"
+        );
+        assert_eq!(
+            caller_model_json["error"]["data"]["stage"],
+            "request_construction"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let current = routing.load();
+        routing.store(Arc::new(RoutingSnapshot {
+            active: current.active.clone(),
+            participants: current.participants.clone(),
+            configured_participant_count: current.configured_participant_count,
+            enabled: current.enabled,
+            selection_generation: current.selection_generation,
+            health_generation: current.health_generation,
+            config_revision: current.config_revision,
+            images_generation_enabled: current.images_generation_enabled,
+            images_route: current.images_route.clone(),
+            images_generation_timeout: current.images_generation_timeout,
+            images_generation_model: Arc::from("gpt-image-1.5"),
+        }));
+        let standard_list = router
+            .clone()
+            .oneshot(mcp_request(
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}"#,
+                Some(&session_id),
+            ))
+            .await
+            .expect("standard list response");
+        let standard_json = mcp_sse_json(standard_list).await;
+        let standard_tool = &standard_json["result"]["tools"][0];
+        assert_eq!(
+            standard_tool["inputSchema"]["properties"]["size"]["enum"],
+            serde_json::json!(["auto", "1024x1024", "1536x1024", "1024x1536"])
+        );
+        assert_eq!(
+            standard_tool["inputSchema"]["properties"]["quality"]["enum"],
+            serde_json::json!(["auto", "low", "medium", "high"])
+        );
+        assert!(
+            standard_tool["inputSchema"]["properties"]
+                .get("model")
+                .is_none()
+        );
+
+        let standard_size = router
+            .clone()
+            .oneshot(mcp_request(
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"private","size":"2048x1152"}}}"#,
+                Some(&session_id),
+            ))
+            .await
+            .expect("standard size response");
+        let standard_size_json = mcp_sse_json(standard_size).await;
+        assert_eq!(
+            standard_size_json["error"]["data"]["code"],
+            "invalid_images_request"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let current = routing.load();
+        routing.store(Arc::new(RoutingSnapshot {
+            active: current.active.clone(),
+            participants: current.participants.clone(),
+            configured_participant_count: current.configured_participant_count,
+            enabled: current.enabled,
+            selection_generation: current.selection_generation,
+            health_generation: current.health_generation,
+            config_revision: current.config_revision,
+            images_generation_enabled: current.images_generation_enabled,
+            images_route: current.images_route.clone(),
+            images_generation_timeout: current.images_generation_timeout,
+            images_generation_model: Arc::from("relay-image-unknown"),
+        }));
+        let unknown_list = router
+            .oneshot(mcp_request(
+                r#"{"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}"#,
+                Some(&session_id),
+            ))
+            .await
+            .expect("unknown model list response");
+        let unknown_json = mcp_sse_json(unknown_list).await;
+        let unknown_tool = &unknown_json["result"]["tools"][0];
+        assert_eq!(
+            unknown_tool["inputSchema"]["properties"]["quality"]["enum"],
+            serde_json::json!(["auto", "low", "medium", "high", "xhigh", "max"])
+        );
+        assert!(
+            unknown_tool["inputSchema"]["properties"]["size"]
+                .get("enum")
+                .is_none()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        image_upstream.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn images_http_and_mcp_streamable_call_returns_only_local_asset_text_json() {
         let png = valid_png_fixture();
         let png_base64 = STANDARD.encode(&png);
@@ -2368,6 +2602,7 @@ mod tests {
             images_generation_enabled: true,
             images_route: Some(image_route),
             images_generation_timeout: Duration::from_mins(10),
+            images_generation_model: Arc::from(DEFAULT_IMAGES_GENERATION_MODEL),
         });
         let temporary = TempDir::new().expect("temporary app data");
         let asset_root = temporary.path().join("mcp-images");

@@ -16,7 +16,7 @@ use axum::{
 use router_core::{
     balance::BalanceQueryMode,
     domain::{
-        ApiKey, BalanceQueryPolicy, BaseUrl, CompletionState, DeliveryState,
+        ApiKey, BalanceQueryPolicy, BaseUrl, CompletionState, DeliveryState, ImagesGenerationModel,
         ImagesGenerationTimeout, InferenceStatus, InferenceStatusKind, OutboundProxyUrl,
         UpstreamAttemptId,
     },
@@ -54,6 +54,7 @@ const IMAGE_BASE64_SUFFIX_SENTINEL: &str = "IMAGES_BASE64_SUFFIX_SENTINEL_19c3";
 const IMAGE_ROUTE_KEY_SENTINEL: &str = "IMAGES_ROUTE_KEY_SENTINEL_b5d1";
 const IMAGE_UPSTREAM_ERROR_SENTINEL: &str = "IMAGES_UPSTREAM_ERROR_SENTINEL_e26a";
 const IMAGE_MCP_PROMPT_SENTINEL: &str = "IMAGES_MCP_PROMPT_SENTINEL_719e";
+const IMAGE_MODEL_SENTINEL: &str = "relay-image-2.5-IMAGES_MODEL_SENTINEL_5c0a";
 const IMAGE_PROVIDER_CODE_SENTINEL: &str = "IMAGES_PROVIDER_CODE_SENTINEL_d524";
 const IMAGE_PROVIDER_REQUEST_ID_SENTINEL: &str = "IMAGES_PROVIDER_REQUEST_ID_SENTINEL_164b";
 const IMAGE_PROVIDER_ARBITRARY_SENTINEL: &str = "IMAGES_PROVIDER_ARBITRARY_SENTINEL_791a";
@@ -489,6 +490,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
             true,
             Some(route.route_id.clone()),
             ImagesGenerationTimeout::default(),
+            ImagesGenerationModel::parse(IMAGE_MODEL_SENTINEL).expect("image model"),
         )
         .await
         .expect("image settings");
@@ -528,6 +530,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         images_generation_enabled: true,
         images_route: Some(image_route),
         images_generation_timeout: Duration::from_mins(10),
+        images_generation_model: Arc::from(IMAGE_MODEL_SENTINEL),
     });
     let proxy_state = ProxyIngressState::new(GATEWAY_TOKEN_SENTINEL, Arc::new(forwarder))
         .with_runtime_sinks(history.clone(), diagnostics.clone())
@@ -591,11 +594,12 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         .send()
         .await
         .expect("MCP initialize");
+    let initialize_status = initialize.status();
     let session_id = initialize
         .headers()
         .get("mcp-session-id")
         .and_then(|value| value.to_str().ok())
-        .expect("MCP session ID")
+        .unwrap_or_else(|| panic!("MCP session ID (initialize status {initialize_status})"))
         .to_owned();
     let _ = mcp_sse_json(initialize).await;
     let mcp_call = client
@@ -721,8 +725,18 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
             assert!(request.headers.get("x-api-key").is_none());
             if index < 2 {
                 assert!(contains(&request.body, IMAGE_PROMPT_SENTINEL));
+                assert!(
+                    contains(&request.body, r#""model":"caller-model""#),
+                    "HTTP passthrough forwards the client model untouched"
+                );
+                assert!(!contains(&request.body, IMAGE_MODEL_SENTINEL));
             } else {
                 assert!(contains(&request.body, IMAGE_MCP_PROMPT_SENTINEL));
+                let request_json: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("MCP generation body");
+                assert_eq!(request_json["model"], IMAGE_MODEL_SENTINEL);
+                assert_eq!(request_json["n"], 1);
+                assert_eq!(request_json["output_format"], "png");
             }
             assert!(!contains(&request.body, GATEWAY_TOKEN_SENTINEL));
         }
