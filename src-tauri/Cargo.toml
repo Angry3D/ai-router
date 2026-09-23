@@ -25,12 +25,12 @@ router-core = { path = "../crates/router-core" }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "=2.11.5", features = ["macos-private-api", "image-png", "tray-icon"] }
-tauri-plugin-log = "=2.9.1"
+tauri = { version = "=2.11.6", features = ["macos-private-api", "image-png", "tray-icon"] }
+tauri-plugin-log = "=2.9.2"
 tauri-plugin-opener = "=2.5.5"
 tauri-plugin-positioner = { version = "=2.3.4", features = ["tray-icon"] }
-tauri-plugin-single-instance = "=2.4.4"
-tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["rustls-tls", "zip"] }
+tauri-plugin-single-instance = "=2.4.5"
+tauri-plugin-updater = { version = "=2.12.0", default-features = false, features = ["rustls-tls", "zip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 unicode-segmentation = "1.13"
 url = "2"
