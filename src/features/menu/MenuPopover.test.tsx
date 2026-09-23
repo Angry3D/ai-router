@@ -160,6 +160,7 @@ function usageRow(routeId: RouteId, model: string): UsageHistoryRowDto {
     routeName: "测试路由",
     requestedModel: model,
     actualModel: model,
+    modelVerdict: "matched",
     reasoningEffort: "high",
     streaming: true,
     completionState: "completed",

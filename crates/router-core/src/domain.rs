@@ -777,6 +777,35 @@ pub enum DeliveryState {
     Completed,
 }
 
+/// Classification of the client-requested model against the model the upstream
+/// response actually reported.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ModelVerdict {
+    Matched,
+    Redirected,
+    Unreported,
+}
+
+/// Classifies one request's model pair.
+///
+/// Both sides are trimmed and compared case-insensitively, so casing or
+/// surrounding whitespace noise stays `Matched` while a different identifier
+/// such as a dated snapshot suffix stays `Redirected`. A missing or blank
+/// actual model is `Unreported`; a blank requested model against a reported
+/// actual model is `Redirected`.
+#[must_use]
+pub fn model_verdict(requested: Option<&str>, actual: Option<&str>) -> ModelVerdict {
+    match actual.map(str::trim).filter(|value| !value.is_empty()) {
+        None => ModelVerdict::Unreported,
+        Some(actual) => match requested.map(str::trim) {
+            Some(requested) if requested.eq_ignore_ascii_case(actual) => ModelVerdict::Matched,
+            _ => ModelVerdict::Redirected,
+        },
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
@@ -1091,6 +1120,47 @@ mod tests {
         assert_eq!(key.expose(), b"secret");
         assert!(ApiKey::parse("secret\nvalue").is_err());
         assert!(BalanceScriptSource::parse(&"x".repeat(256 * 1024 + 1)).is_err());
+    }
+
+    #[test]
+    fn model_verdict_classifies_requested_and_actual_model_pairs() {
+        use super::{ModelVerdict, model_verdict};
+
+        let cases = [
+            (
+                Some("gpt-5.6-sol"),
+                Some("gpt-5.6-sol"),
+                ModelVerdict::Matched,
+            ),
+            (
+                Some("  gpt-5.6-SOL  "),
+                Some("gpt-5.6-sol"),
+                ModelVerdict::Matched,
+            ),
+            (
+                Some("gpt-5.6-sol"),
+                Some("gpt-5.6-luna"),
+                ModelVerdict::Redirected,
+            ),
+            (
+                Some("gpt-5.6-sol"),
+                Some("gpt-5.6-sol-2026-07-30"),
+                ModelVerdict::Redirected,
+            ),
+            (Some("gpt-5.6-sol"), None, ModelVerdict::Unreported),
+            (Some("gpt-5.6-sol"), Some("   "), ModelVerdict::Unreported),
+            (None, None, ModelVerdict::Unreported),
+            (None, Some("gpt-5.6-luna"), ModelVerdict::Redirected),
+            (Some("  "), Some("gpt-5.6-luna"), ModelVerdict::Redirected),
+        ];
+
+        for (requested, actual, expected) in cases {
+            assert_eq!(
+                model_verdict(requested, actual),
+                expected,
+                "requested {requested:?} actual {actual:?}"
+            );
+        }
     }
 
     #[test]

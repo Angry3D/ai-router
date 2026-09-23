@@ -34,6 +34,7 @@ import type {
 import { UsageRecordTable } from "../shared/UsageRecordTable";
 import { USAGE_SETTINGS_COLUMNS } from "../shared/usageRecordColumns";
 import { formatUsageDateTime } from "../shared/usageRecordFormatting";
+import { formatModelWithActual } from "../shared/modelDisplay";
 import {
   SettingsButton,
   SettingsIconButton,
@@ -726,8 +727,10 @@ function UsageDetail({
           <dd>{request.routeName ?? "-"}</dd>
         </div>
         <div>
-          <dt>实际模型</dt>
-          <dd>{request.actualModel ?? request.requestedModel ?? "-"}</dd>
+          <dt>模型</dt>
+          <dd>
+            {formatModelWithActual(request.requestedModel, request.actualModel)}
+          </dd>
         </div>
         <div>
           <dt>推理强度</dt>

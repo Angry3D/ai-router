@@ -4,4 +4,4 @@ import type { UsageStatisticsBucketDto } from "./UsageStatisticsBucketDto";
 import type { UsageStatisticsGranularityDto } from "./UsageStatisticsGranularityDto";
 import type { UsageStatisticsTokensDto } from "./UsageStatisticsTokensDto";
 
-export type UsageStatisticsDto = { matchedRequestCount: number, tokens: UsageStatisticsTokensDto, costPicoUsd: string, granularity: UsageStatisticsGranularityDto, trend: Array<UsageStatisticsBucketDto>, attribution: Array<UsageStatisticsAttributionDto>, };
+export type UsageStatisticsDto = { matchedRequestCount: number, tokens: UsageStatisticsTokensDto, costPicoUsd: string, redirectedRequestCount: number, redirectedTotalTokens: string, granularity: UsageStatisticsGranularityDto, trend: Array<UsageStatisticsBucketDto>, attribution: Array<UsageStatisticsAttributionDto>, };

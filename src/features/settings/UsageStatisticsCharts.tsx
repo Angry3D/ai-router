@@ -350,6 +350,21 @@ function boundedSharePercent(value: string) {
   return Math.min(100, Math.max(0, parsed));
 }
 
+/**
+ * Formats the legend/tooltip summary line. The redirect count rides the second
+ * line because the fixed 105px legend width cannot hold it next to a model
+ * identifier.
+ */
+function attributionSummary(
+  item: UsageStatisticsAttributionDto,
+  metric: UsageStatisticsAttributionMetricDto,
+): string {
+  const summary = `${formatStatisticsMetric(item.value, metric)} · ${item.sharePercent}%`;
+  return item.redirectedRequestCount > 0
+    ? `${summary} · 转发 ${item.redirectedRequestCount} 次`
+    : summary;
+}
+
 // eslint-disable-next-line react-refresh/only-export-components
 export function buildUsageSourceChartOption(
   attribution: UsageStatisticsAttributionDto[],
@@ -372,10 +387,7 @@ export function buildUsageSourceChartOption(
         const first = Array.isArray(params) ? params[0] : params;
         const item = attribution[first?.dataIndex ?? -1];
         return item
-          ? formatDonutTooltip(
-              item.label,
-              `${formatStatisticsMetric(item.value, metric)} · ${item.sharePercent}%`,
-            )
+          ? formatDonutTooltip(item.label, attributionSummary(item, metric))
           : "";
       },
     },
@@ -387,7 +399,7 @@ export function buildUsageSourceChartOption(
         const index = legendNames.indexOf(name);
         const item = attribution[index];
         return item
-          ? `${item.label}\n${formatStatisticsMetric(item.value, metric)} · ${item.sharePercent}%`
+          ? `${item.label}\n${attributionSummary(item, metric)}`
           : name;
       },
     },
@@ -568,6 +580,9 @@ export function UsageSourceChart({
           <li key={item.key}>
             {item.label}: {formatStatisticsMetric(item.value, metric)}，占比{" "}
             {item.sharePercent}%
+            {item.redirectedRequestCount > 0
+              ? `，转发 ${item.redirectedRequestCount} 次`
+              : ""}
           </li>
         ))}
       </ul>

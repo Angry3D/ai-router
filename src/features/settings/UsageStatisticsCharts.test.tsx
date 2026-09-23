@@ -100,6 +100,8 @@ const attribution: UsageStatisticsAttributionDto[] = [
     isOther: false,
     value: "5100000000000",
     sharePercent: "66.7",
+    redirectedRequestCount: 0,
+    redirectedTotalTokens: "0",
   },
   {
     key: "other",
@@ -107,6 +109,8 @@ const attribution: UsageStatisticsAttributionDto[] = [
     isOther: true,
     value: "2500000000000",
     sharePercent: "33.3",
+    redirectedRequestCount: 0,
+    redirectedTotalTokens: "0",
   },
 ];
 
@@ -151,6 +155,34 @@ describe("Usage statistics chart options", () => {
       option.tooltip as { formatter: (value: unknown) => string }
     ).formatter;
     expect(formatter({ dataIndex: 0 })).toBe("gpt-5\n$5.10 · 66.7%");
+  });
+
+  it("appends the redirect count to a redirected attribution summary", () => {
+    const option = buildUsageSourceChartOption(
+      [{ ...attribution[0], redirectedRequestCount: 3 }],
+      "cost",
+      colors,
+    );
+    const legendFormatter = (
+      option.legend as { formatter: (name: string) => string }
+    ).formatter;
+    expect(legendFormatter("0:gpt-5")).toBe("gpt-5\n$5.10 · 66.7% · 转发 3 次");
+    const tooltipFormatter = (
+      option.tooltip as { formatter: (value: unknown) => string }
+    ).formatter;
+    expect(tooltipFormatter({ dataIndex: 0 })).toBe(
+      "gpt-5\n$5.10 · 66.7% ·\n转发 3 次",
+    );
+
+    const withoutRedirects = buildUsageSourceChartOption(
+      [attribution[0]],
+      "cost",
+      colors,
+    );
+    const plainFormatter = (
+      withoutRedirects.legend as { formatter: (name: string) => string }
+    ).formatter;
+    expect(plainFormatter("0:gpt-5")).toBe("gpt-5\n$5.10 · 66.7%");
   });
 
   it("wraps long model names inside the rich-text tooltip", () => {

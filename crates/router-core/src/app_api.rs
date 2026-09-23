@@ -8,8 +8,8 @@ use crate::{
     balance::{BalanceDisplaySnapshot, BalanceQueryMode, BalanceRefreshBatchState},
     codex_config::CodexConfigStatus,
     domain::{
-        BalanceQueryPolicy, CompletionState, DeliveryState, OutboundProxyConfig, RouteId,
-        ValidationError,
+        BalanceQueryPolicy, CompletionState, DeliveryState, ModelVerdict, OutboundProxyConfig,
+        RouteId, ValidationError,
     },
     recovery::{DatabaseStartupIssue, RecoveryHealth, RecoveryHealthKind},
     state::{BootstrapSnapshotDto, FallbackStateDto, RouteSummaryDto},
@@ -117,6 +117,7 @@ pub struct UsageHistoryRowDto {
     pub route_name: Option<String>,
     pub requested_model: Option<String>,
     pub actual_model: Option<String>,
+    pub model_verdict: ModelVerdict,
     pub reasoning_effort: Option<String>,
     pub streaming: bool,
     pub completion_state: CompletionState,
@@ -215,6 +216,9 @@ pub struct UsageStatisticsAttributionDto {
     pub is_other: bool,
     pub value: String,
     pub share_percent: String,
+    #[ts(type = "number")]
+    pub redirected_request_count: u64,
+    pub redirected_total_tokens: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -225,6 +229,9 @@ pub struct UsageStatisticsDto {
     pub matched_request_count: u64,
     pub tokens: UsageStatisticsTokensDto,
     pub cost_pico_usd: String,
+    #[ts(type = "number")]
+    pub redirected_request_count: u64,
+    pub redirected_total_tokens: String,
     pub granularity: UsageStatisticsGranularityDto,
     pub trend: Vec<UsageStatisticsBucketDto>,
     pub attribution: Vec<UsageStatisticsAttributionDto>,
@@ -414,6 +421,8 @@ impl From<UsageStatistics> for UsageStatisticsDto {
             matched_request_count: value.matched_request_count,
             tokens: usage_statistics_tokens(&value.tokens),
             cost_pico_usd: value.cost_pico_usd.to_string(),
+            redirected_request_count: value.redirected_request_count,
+            redirected_total_tokens: value.redirected_total_tokens.to_string(),
             granularity: match value.granularity {
                 UsageStatisticsGranularity::Hour => UsageStatisticsGranularityDto::Hour,
                 UsageStatisticsGranularity::Day => UsageStatisticsGranularityDto::Day,
@@ -440,6 +449,8 @@ impl From<UsageStatistics> for UsageStatisticsDto {
                     is_other: item.is_other,
                     value: item.value.to_string(),
                     share_percent: item.share_percent,
+                    redirected_request_count: item.redirected_request_count,
+                    redirected_total_tokens: item.redirected_total_tokens.to_string(),
                 })
                 .collect(),
         }
@@ -472,6 +483,7 @@ impl From<UsageHistoryRow> for UsageHistoryRowDto {
             route_name: value.final_route_name,
             requested_model: value.requested_model,
             actual_model: value.actual_model,
+            model_verdict: value.model_verdict,
             reasoning_effort: value.reasoning_effort,
             streaming: value.streaming,
             completion_state: value.completion_state,
@@ -1194,7 +1206,10 @@ mod tests {
         UsageStatisticsDto,
     };
     use crate::{
-        domain::{BalanceQueryPolicy, CompletionState, OutboundProxyConfig, OutboundProxyUrl},
+        domain::{
+            BalanceQueryPolicy, CompletionState, ModelVerdict, OutboundProxyConfig,
+            OutboundProxyUrl,
+        },
         pricing::{CATALOG_VERSION, CostStatus, PRIORITY_CATALOG_VERSION},
         storage::{
             UsageHistoryRow, UsageRequestDetail, UsageStatistics, UsageStatisticsAttribution,
@@ -1275,6 +1290,8 @@ mod tests {
             matched_request_count: 2,
             tokens: tokens.clone(),
             cost_pico_usd: u64::MAX,
+            redirected_request_count: 1,
+            redirected_total_tokens: u64::MAX - 7,
             granularity: UsageStatisticsGranularity::Hour,
             trend: vec![UsageStatisticsBucket {
                 started_at_ms: 1,
@@ -1290,6 +1307,8 @@ mod tests {
                 is_other: false,
                 value: u64::MAX - 6,
                 share_percent: "100.0".to_owned(),
+                redirected_request_count: 1,
+                redirected_total_tokens: u64::MAX - 7,
             }],
         });
 
@@ -1298,6 +1317,13 @@ mod tests {
         assert_eq!(dto.cost_pico_usd, u64::MAX.to_string());
         assert_eq!(dto.trend[0].cost_pico_usd, (u64::MAX - 5).to_string());
         assert_eq!(dto.attribution[0].value, (u64::MAX - 6).to_string());
+        assert_eq!(dto.redirected_request_count, 1);
+        assert_eq!(dto.redirected_total_tokens, (u64::MAX - 7).to_string());
+        assert_eq!(dto.attribution[0].redirected_request_count, 1);
+        assert_eq!(
+            dto.attribution[0].redirected_total_tokens,
+            (u64::MAX - 7).to_string()
+        );
     }
 
     #[test]
@@ -1313,6 +1339,7 @@ mod tests {
             final_route_name: None,
             requested_model: Some("gpt-5.6-sol".to_owned()),
             actual_model: None,
+            model_verdict: ModelVerdict::Unreported,
             actual_service_tier: actual_service_tier.map(str::to_owned),
             reasoning_effort: None,
             streaming: true,
@@ -1337,6 +1364,7 @@ mod tests {
             Some("priority"),
         ));
         assert_eq!(priority.tokens.uncached_input, Some(878));
+        assert_eq!(priority.model_verdict, ModelVerdict::Unreported);
         assert_eq!(priority.cost.service_tier.as_deref(), Some("priority"));
         assert_eq!(
             priority.cost.fast_status,

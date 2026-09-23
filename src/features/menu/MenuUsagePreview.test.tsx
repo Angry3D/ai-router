@@ -12,6 +12,7 @@ const row: UsageHistoryRowDto = {
   routeName: "速览路由",
   requestedModel: "gpt-5.4",
   actualModel: "gpt-5.4",
+  modelVerdict: "matched",
   reasoningEffort: "high",
   streaming: true,
   completionState: "failed",
