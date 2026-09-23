@@ -5,9 +5,19 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  // `.trellis` is a local-only workspace excluded from git, so its archived
-  // task references are not repository source and must not gate `pnpm lint`.
-  { ignores: ["dist", "node_modules", "src/generated", "**/target/**", ".trellis"] },
+  // `.trellis` and `.omp` are local-only workspaces excluded from git, so
+  // their archived task references and generated harness extension are not
+  // repository source and must not gate `pnpm lint`.
+  {
+    ignores: [
+      "dist",
+      "node_modules",
+      "src/generated",
+      "**/target/**",
+      ".trellis",
+      ".omp",
+    ],
+  },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
