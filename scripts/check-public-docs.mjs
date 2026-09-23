@@ -346,7 +346,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
     "22.22.3",
     "10.33.2",
     "1.97.1",
-    "codex-cli 0.153.4",
+    "codex-cli 0.155.1",
     "官方 DMG",
     "ad-hoc",
     "Apple 公证",
@@ -374,7 +374,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
     "应用内更新",
     "macOS 13",
     "Apple Silicon",
-    "codex-cli 0.153.4",
+    "codex-cli 0.155.1",
   ]) {
     assertContains(support, value, "SUPPORT.md");
   }
