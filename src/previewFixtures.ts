@@ -762,9 +762,9 @@ export function previewUsageHistoryForQuery(
     )
     .filter((row) => {
       if (modelContains === null) return true;
-      return (row.actualModel ?? row.requestedModel ?? "")
-        .toLocaleLowerCase()
-        .includes(modelContains);
+      return [row.requestedModel, row.actualModel].some((model) =>
+        (model ?? "").toLocaleLowerCase().includes(modelContains),
+      );
     });
   const cursorRows = matchingRows.filter((row) => {
     if (query.cursor === null || row.finishedAtMs === null) return true;

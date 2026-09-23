@@ -313,6 +313,7 @@ async fn seed_usage_history(
         let has_attempt = completion_state != CompletionState::NoUpstream;
         let streaming = index.is_multiple_of(2);
         let model = SYNTHETIC_MODELS[index % SYNTHETIC_MODELS.len()];
+        let reported_model = completed.then(|| synthetic_reported_model(index, model));
         let SyntheticTokens {
             input: input_tokens,
             output: output_tokens,
@@ -339,7 +340,7 @@ async fn seed_usage_history(
                 http_status,
                 error_category: error_category.clone(),
                 delivery_state,
-                actual_model: completed.then(|| model.to_owned()),
+                actual_model: reported_model.clone(),
                 forwarded_service_tier: service_tier.map(str::to_owned),
                 actual_service_tier: service_tier.map(str::to_owned),
                 input_tokens,
@@ -361,7 +362,7 @@ async fn seed_usage_history(
                     [index % SYNTHETIC_REASONING_EFFORTS.len()]
                 .map(str::to_owned),
                 requested_service_tier: service_tier.map(str::to_owned),
-                actual_model: completed.then(|| model.to_owned()),
+                actual_model: reported_model,
                 actual_service_tier: service_tier.map(str::to_owned),
                 final_route_id: (completion_state != CompletionState::NoUpstream)
                     .then(|| route_id.clone()),
@@ -387,6 +388,22 @@ async fn seed_usage_history(
             .await?;
     }
     Ok(())
+}
+
+/// Upstream-reported model for one completed synthetic request.
+///
+/// Most relay responses echo the requested identifier, but some rewrite it, so
+/// QA history also exercises the redirect rendering: one arm reports a sibling
+/// model three entries away (never the requested one) and one arm reports a
+/// dated snapshot of the requested model. The arm is keyed on `index / 2` so
+/// both arms hit even and odd indices, which the seed maps onto different
+/// routes.
+fn synthetic_reported_model(index: usize, model: &str) -> String {
+    match (index / 2) % 12 {
+        5 => SYNTHETIC_MODELS[(index + 3) % SYNTHETIC_MODELS.len()].to_owned(),
+        9 => format!("{model}-2026-07-30"),
+        _ => model.to_owned(),
+    }
 }
 
 fn synthetic_service_tier(completed: bool, model: &str) -> Option<&'static str> {

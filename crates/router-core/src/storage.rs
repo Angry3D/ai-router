@@ -2689,7 +2689,8 @@ impl DatabaseExecutor {
                    AND finished_at_ms <= ?2
                    AND (?3 IS NULL OR completion_state = ?3)
                    AND (?4 IS NULL OR final_route_id = ?4)
-                   AND (?5 IS NULL OR COALESCE(actual_model, requested_model) LIKE ?5 ESCAPE '\\' COLLATE NOCASE)",
+                   AND (?5 IS NULL OR requested_model LIKE ?5 ESCAPE '\\' COLLATE NOCASE
+                        OR actual_model LIKE ?5 ESCAPE '\\' COLLATE NOCASE)",
                 params![
                     query.finished_at_or_after_ms,
                     query.finished_at_or_before_ms,
@@ -2713,7 +2714,8 @@ impl DatabaseExecutor {
                    AND finished_at_ms <= ?2
                    AND (?3 IS NULL OR completion_state = ?3)
                    AND (?4 IS NULL OR final_route_id = ?4)
-                   AND (?5 IS NULL OR COALESCE(actual_model, requested_model) LIKE ?5 ESCAPE '\\' COLLATE NOCASE)
+                   AND (?5 IS NULL OR requested_model LIKE ?5 ESCAPE '\\' COLLATE NOCASE
+                        OR actual_model LIKE ?5 ESCAPE '\\' COLLATE NOCASE)
                    AND (?6 IS NULL OR finished_at_ms < ?6 OR (finished_at_ms = ?6 AND request_id < ?7))
                  ORDER BY finished_at_ms DESC, request_id DESC LIMIT ?8",
             )?;
@@ -2789,7 +2791,8 @@ impl DatabaseExecutor {
                    AND (?1 IS NULL OR finished_at_ms >= ?1)
                    AND finished_at_ms <= ?2
                    AND (?3 IS NULL OR final_route_id = ?3)
-                   AND (?4 IS NULL OR COALESCE(actual_model, requested_model) LIKE ?4 ESCAPE '\\' COLLATE NOCASE)
+                   AND (?4 IS NULL OR requested_model LIKE ?4 ESCAPE '\\' COLLATE NOCASE
+                        OR actual_model LIKE ?4 ESCAPE '\\' COLLATE NOCASE)
                  ORDER BY finished_at_ms DESC, request_id DESC",
             )?;
             let mut rows = statement.query(params![
@@ -2846,7 +2849,8 @@ impl DatabaseExecutor {
                 attribution
                     .entry(identity.key)
                     .and_modify(|aggregate| {
-                        if aggregate.label.starts_with("未知") && !identity.label.starts_with("未知")
+                        if aggregate.label.starts_with("未知")
+                            && !identity.label.starts_with("未知")
                         {
                             aggregate.label.clone_from(&identity.label);
                         }
@@ -2870,11 +2874,8 @@ impl DatabaseExecutor {
                     cost_pico_usd: totals.cost_pico_usd,
                 })
                 .collect();
-            let attribution = statistics_attribution(
-                attribution,
-                query.attribution_metric,
-                &totals,
-            )?;
+            let attribution =
+                statistics_attribution(attribution, query.attribution_metric, &totals)?;
             Ok(UsageStatistics {
                 matched_request_count: totals.request_count,
                 tokens: totals.tokens,
@@ -5447,8 +5448,8 @@ mod tests {
         balance::{BalanceQueryMode, BalanceRouteSource, LEGACY_GENERAL_V1_SOURCE},
         domain::{
             ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationModel,
-            ImagesGenerationTimeout, McpImageCapacityWarningThreshold, OutboundProxyUrl, RouteId,
-            RouteMoveDirection,
+            ImagesGenerationTimeout, McpImageCapacityWarningThreshold, ModelVerdict,
+            OutboundProxyUrl, RouteId, RouteMoveDirection,
         },
         recovery::{
             NoopRecoveryEventSink, RecoveryCoordinator, RecoveryFailureCode, RecoveryHealthKind,
@@ -10620,6 +10621,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_contains_matches_either_the_requested_or_the_reported_model() {
+        let (_directory, database) = database();
+        database
+            .test_execute(|connection| {
+                connection.execute(
+                    "INSERT INTO proxy_requests (
+                        request_id, started_at_ms, finished_at_ms, requested_model, actual_model,
+                        streaming, completion_state, metadata_complete
+                     ) VALUES ('redirected', 100, 100, 'requested-only-model',
+                               'reported-sibling-model', 0, 'completed', 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed a redirected request");
+
+        for fragment in ["requested-only", "REPORTED-SIBLING"] {
+            let page = database
+                .usage_history(super::UsageHistoryQuery {
+                    finished_at_or_after_ms: None,
+                    finished_at_or_before_ms: 100,
+                    completion_state: None,
+                    route_id: None,
+                    model_contains: Some(fragment.to_owned()),
+                    cursor: None,
+                    limit: 50,
+                })
+                .await
+                .expect("redirected model search");
+            assert_eq!(page.total_rows, 1, "fragment {fragment}");
+            assert_eq!(page.rows[0].request_id, "redirected");
+            assert_eq!(page.rows[0].model_verdict, ModelVerdict::Redirected);
+
+            let mut query = statistics_query(None, 100, "UTC");
+            query.model_contains = Some(fragment.to_owned());
+            let statistics = database
+                .usage_statistics(query)
+                .await
+                .expect("redirected statistics search");
+            assert_eq!(statistics.matched_request_count, 1, "fragment {fragment}");
+        }
+    }
+
+    #[tokio::test]
     async fn usage_history_rejects_invalid_bounds_models_and_limits() {
         let (_directory, database) = database();
         for query in [
@@ -10918,7 +10964,17 @@ mod tests {
             .usage_statistics(filtered_query)
             .await
             .expect("filtered statistics");
-        assert_eq!(filtered.matched_request_count, 1);
+        // The model filter matches either identifier, so the redirected row
+        // counts for its requested model as well as for its reported model.
+        assert_eq!(filtered.matched_request_count, 2);
+
+        let mut reported_query = statistics_query(Some(3_600_000), 10_800_000, "UTC");
+        reported_query.model_contains = Some("model-z".to_owned());
+        let reported = database
+            .usage_statistics(reported_query)
+            .await
+            .expect("reported model statistics");
+        assert_eq!(reported.matched_request_count, 1);
 
         let mut literal_query = statistics_query(Some(3_600_000), 10_800_000, "UTC");
         literal_query.model_contains = Some("%".to_owned());

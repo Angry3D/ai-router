@@ -556,6 +556,44 @@ describe("UsageSettings interactions", () => {
     }
   });
 
+  it("renders the request-detail model pair only when the upstream redirected it", async () => {
+    ipc.getUsageRequestDetail.mockResolvedValue(
+      structuredClone(
+        previewUsageRequestDetails.find(
+          (item) => item.request.requestId === "request-preview-unconfirmed-fast",
+        )!,
+      ),
+    );
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "用量" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^查看请求/ }));
+
+    expect(
+      await screen.findByText("gpt-5.6-sol（gpt-5.6-luna）"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("实际模型")).not.toBeInTheDocument();
+  });
+
+  it("renders only the requested model in detail when the upstream reported none", async () => {
+    ipc.getUsageRequestDetail.mockResolvedValue(
+      structuredClone(
+        previewUsageRequestDetails.find(
+          (item) => item.request.requestId === "request-preview-legacy",
+        )!,
+      ),
+    );
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "用量" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^查看请求/ }));
+
+    expect(
+      await screen.findByText("legacy-preview-model-with-a-long-exact-identifier"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/（gpt-5\.6/u)).not.toBeInTheDocument();
+  });
+
   it("renders unknown 403 attempt status as access denied without provider text", async () => {
     const detail = structuredClone(previewUsageRequestDetails[0]);
     detail.attempts = [
