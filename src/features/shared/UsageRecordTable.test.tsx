@@ -19,6 +19,7 @@ function usageRow(
     routeName: "测试路由",
     requestedModel: "gpt-5.4",
     actualModel: "gpt-5.4",
+    modelVerdict: "matched",
     reasoningEffort: "high",
     streaming: true,
     completionState: "completed",
@@ -184,6 +185,43 @@ describe("UsageRecordTable", () => {
       "is-warning",
     );
     expect(within(latency as HTMLElement).queryByText("-")).toBeNull();
+  });
+
+  it("shows a redirected model on a red second line in both presets", () => {
+    const rows = [
+      usageRow({
+        requestedModel: "gpt-5.6-sol",
+        actualModel: "gpt-5.6-luna",
+        modelVerdict: "redirected",
+      }),
+      usageRow({ requestId: "request-2" }),
+    ];
+    const settings = render(
+      <UsageRecordTable rows={rows} columns={USAGE_SETTINGS_COLUMNS} />,
+    );
+
+    expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
+    expect(screen.getByText("→gpt-5.6-luna")).toHaveClass(
+      "usage-model-redirect",
+    );
+    expect(
+      screen.getByTitle("gpt-5.6-sol →gpt-5.6-luna 推理 high"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("→gpt-5.4")).not.toBeInTheDocument();
+    expect(screen.getByTitle("gpt-5.4 推理 high")).toBeInTheDocument();
+    settings.unmount();
+
+    render(<UsageRecordTable rows={rows} columns={USAGE_PREVIEW_COLUMNS} />);
+
+    expect(screen.getByText("gpt-5.6-sol")).toHaveClass(
+      "usage-preview-request-model",
+    );
+    expect(screen.getByText("→gpt-5.6-luna")).toHaveClass(
+      "usage-preview-request-redirect",
+    );
+    expect(
+      screen.getByTitle("gpt-5.6-sol · →gpt-5.6-luna · high"),
+    ).toBeInTheDocument();
   });
 
   it("renders missing total Token and first output without restoring breakdown rows", () => {

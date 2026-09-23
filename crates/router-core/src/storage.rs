@@ -27,8 +27,8 @@ use crate::domain::{
     ApiKey, AppearancePreference, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
     CodexModelValidationError, CompletionState, DeliveryState,
     FallbackExcludedModelValidationError, ImagesGenerationModel, ImagesGenerationTimeout,
-    McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl, RouteId,
-    RouteMoveDirection, RouteName, SecretId, UpstreamAttemptId, ValidationError,
+    McpImageCapacityWarningThreshold, ModelVerdict, OutboundProxyConfig, OutboundProxyUrl, RouteId,
+    RouteMoveDirection, RouteName, SecretId, UpstreamAttemptId, ValidationError, model_verdict,
 };
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
@@ -424,6 +424,7 @@ pub struct UsageHistoryRow {
     pub final_route_name: Option<String>,
     pub requested_model: Option<String>,
     pub actual_model: Option<String>,
+    pub model_verdict: ModelVerdict,
     pub actual_service_tier: Option<String>,
     pub reasoning_effort: Option<String>,
     pub streaming: bool,
@@ -505,6 +506,8 @@ pub struct UsageStatisticsAttribution {
     pub is_other: bool,
     pub value: u64,
     pub share_percent: String,
+    pub redirected_request_count: u64,
+    pub redirected_total_tokens: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -512,6 +515,8 @@ pub struct UsageStatistics {
     pub matched_request_count: u64,
     pub tokens: UsageStatisticsTokens,
     pub cost_pico_usd: u64,
+    pub redirected_request_count: u64,
+    pub redirected_total_tokens: u64,
     pub granularity: UsageStatisticsGranularity,
     pub trend: Vec<UsageStatisticsBucket>,
     pub attribution: Vec<UsageStatisticsAttribution>,
@@ -2810,6 +2815,10 @@ impl DatabaseExecutor {
                     )?;
                     bucket_totals.resize(bucket_windows.len(), StatisticsTotals::default());
                 }
+                let requested_model = row.get::<_, Option<String>>(4)?;
+                let actual_model = row.get::<_, Option<String>>(5)?;
+                let redirected = model_verdict(requested_model.as_deref(), actual_model.as_deref())
+                    == ModelVerdict::Redirected;
                 let observation = StatisticsObservation {
                     input_tokens: row.get(6)?,
                     cached_input_tokens: row.get(7)?,
@@ -2818,21 +2827,21 @@ impl DatabaseExecutor {
                     total_tokens: row.get(10)?,
                     cost_pico_usd: row.get(11)?,
                 };
-                totals.add(&observation)?;
+                totals.add(&observation, redirected)?;
                 if let Some(index) = bucket_windows.iter().position(|window| {
                     finished_at_ms >= window.started_at_ms
                         && (finished_at_ms < window.finished_at_ms
                             || (window.finished_at_ms == query.finished_at_or_before_ms
                                 && finished_at_ms == window.finished_at_ms))
                 }) {
-                    bucket_totals[index].add(&observation)?;
+                    bucket_totals[index].add(&observation, redirected)?;
                 }
                 let identity = attribution_identity(
                     query.attribution_dimension,
                     row.get(2)?,
                     row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
+                    requested_model,
+                    actual_model,
                 );
                 attribution
                     .entry(identity.key)
@@ -2847,7 +2856,7 @@ impl DatabaseExecutor {
                         totals: StatisticsTotals::default(),
                     })
                     .totals
-                    .add(&observation)?;
+                    .add(&observation, redirected)?;
             }
             let trend = bucket_windows
                 .into_iter()
@@ -2870,6 +2879,8 @@ impl DatabaseExecutor {
                 matched_request_count: totals.request_count,
                 tokens: totals.tokens,
                 cost_pico_usd: totals.cost_pico_usd,
+                redirected_request_count: totals.redirected_request_count,
+                redirected_total_tokens: totals.redirected_total_tokens,
                 granularity,
                 trend,
                 attribution,
@@ -4953,10 +4964,16 @@ struct StatisticsTotals {
     request_count: u64,
     tokens: UsageStatisticsTokens,
     cost_pico_usd: u64,
+    redirected_request_count: u64,
+    redirected_total_tokens: u64,
 }
 
 impl StatisticsTotals {
-    fn add(&mut self, observation: &StatisticsObservation) -> Result<(), StorageError> {
+    fn add(
+        &mut self,
+        observation: &StatisticsObservation,
+        redirected: bool,
+    ) -> Result<(), StorageError> {
         self.request_count = self
             .request_count
             .checked_add(1)
@@ -4976,6 +4993,13 @@ impl StatisticsTotals {
         )?;
         checked_statistics_add(&mut self.tokens.output, observation.output_tokens)?;
         checked_statistics_add(&mut self.cost_pico_usd, observation.cost_pico_usd)?;
+        if redirected {
+            self.redirected_request_count = self
+                .redirected_request_count
+                .checked_add(1)
+                .ok_or(StorageError::UsageStatisticsOverflow)?;
+            checked_statistics_add(&mut self.redirected_total_tokens, observation.total_tokens)?;
+        }
         Ok(())
     }
 
@@ -5118,6 +5142,8 @@ fn statistics_attribution(
                 key,
                 aggregate.label,
                 aggregate.totals.selected_value(metric),
+                aggregate.totals.redirected_request_count,
+                aggregate.totals.redirected_total_tokens,
             )
         })
         .collect::<Vec<_>>();
@@ -5130,34 +5156,49 @@ fn statistics_attribution(
     });
     let other = if values.len() > 5 {
         let remainder = values.split_off(5);
-        Some(
-            remainder
-                .into_iter()
-                .try_fold(0_u64, |sum, (_, _, value)| {
+        Some(remainder.into_iter().try_fold(
+            (0_u64, 0_u64, 0_u64),
+            |(sum, redirected, redirected_tokens), (_, _, value, item_redirected, item_tokens)| {
+                Ok::<_, StorageError>((
                     sum.checked_add(value)
-                        .ok_or(StorageError::UsageStatisticsOverflow)
-                })?,
-        )
+                        .ok_or(StorageError::UsageStatisticsOverflow)?,
+                    redirected
+                        .checked_add(item_redirected)
+                        .ok_or(StorageError::UsageStatisticsOverflow)?,
+                    redirected_tokens
+                        .checked_add(item_tokens)
+                        .ok_or(StorageError::UsageStatisticsOverflow)?,
+                ))
+            },
+        )?)
     } else {
         None
     };
     let mut result = values
         .into_iter()
-        .map(|(key, label, value)| UsageStatisticsAttribution {
-            key,
-            label,
-            is_other: false,
-            value,
-            share_percent: statistics_share_percent(value, total),
-        })
+        .map(
+            |(key, label, value, redirected_request_count, redirected_total_tokens)| {
+                UsageStatisticsAttribution {
+                    key,
+                    label,
+                    is_other: false,
+                    value,
+                    share_percent: statistics_share_percent(value, total),
+                    redirected_request_count,
+                    redirected_total_tokens,
+                }
+            },
+        )
         .collect::<Vec<_>>();
-    if let Some(value) = other {
+    if let Some((value, redirected_request_count, redirected_total_tokens)) = other {
         result.push(UsageStatisticsAttribution {
             key: "other".to_owned(),
             label: "其他".to_owned(),
             is_other: true,
             value,
             share_percent: statistics_share_percent(value, total),
+            redirected_request_count,
+            redirected_total_tokens,
         });
     }
     Ok(result)
@@ -5342,14 +5383,18 @@ fn usage_history_row(
     row: &rusqlite::Row<'_>,
     actual_service_tier: Option<String>,
 ) -> rusqlite::Result<UsageHistoryRow> {
+    let requested_model: Option<String> = row.get(5)?;
+    let actual_model: Option<String> = row.get(6)?;
+    let model_verdict = model_verdict(requested_model.as_deref(), actual_model.as_deref());
     Ok(UsageHistoryRow {
         request_id: row.get(0)?,
         started_at_ms: row.get(1)?,
         finished_at_ms: row.get(2)?,
         final_route_id: row.get::<_, Option<String>>(3)?.map(RouteId::from_string),
         final_route_name: row.get(4)?,
-        requested_model: row.get(5)?,
-        actual_model: row.get(6)?,
+        requested_model,
+        actual_model,
+        model_verdict,
         actual_service_tier,
         reasoning_effort: row.get(7)?,
         streaming: row.get(8)?,
@@ -10804,6 +10849,8 @@ mod tests {
                          'completed', 10, 4, 14, 2, 3, 'unavailable', 123, 1),
                         ('completed-b', 1000, 7200000, 'model-b', 'model-b', 'route-b', 'Route B', 1,
                          'completed', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1),
+                        ('completed-redirect', 1000, 5400000, 'model-a', 'model-z', 'route-a', 'Route A', 0,
+                         'completed', 10, 0, 10, 0, 0, 'unavailable', 0, 1),
                         ('failed', 1000, 10800000, 'model-a', 'model-a', 'route-a', 'Route A', 0,
                          'failed', 100, 100, 200, 10, 0, 'exact', 999, 1),
                         ('cancelled', 1000, 10800000, 'model-a', 'model-a', 'route-a', 'Route A', 0,
@@ -10822,21 +10869,27 @@ mod tests {
             .await
             .expect("statistics");
 
-        assert_eq!(result.matched_request_count, 2);
-        assert_eq!(result.tokens.total, 14);
-        assert_eq!(result.tokens.uncached_input, 8);
+        assert_eq!(result.matched_request_count, 3);
+        assert_eq!(result.tokens.total, 24);
+        assert_eq!(result.tokens.uncached_input, 18);
         assert_eq!(result.tokens.cached_input, 2);
         assert_eq!(result.tokens.cache_write_input, 3);
         assert_eq!(result.tokens.output, 4);
         assert_eq!(result.cost_pico_usd, 123);
+        assert_eq!(result.redirected_request_count, 1);
+        assert_eq!(result.redirected_total_tokens, 10);
         assert_eq!(result.trend.len(), 2);
-        assert_eq!(result.trend[0].request_count, 1);
+        assert_eq!(result.trend[0].request_count, 2);
         assert_eq!(result.trend[1].request_count, 1);
         assert_eq!(result.attribution.len(), 2);
         assert_eq!(result.attribution[0].label, "Route A");
-        assert_eq!(result.attribution[0].share_percent, "50.0");
+        assert_eq!(result.attribution[0].share_percent, "66.7");
+        assert_eq!(result.attribution[0].redirected_request_count, 1);
+        assert_eq!(result.attribution[0].redirected_total_tokens, 10);
         assert_eq!(result.attribution[1].label, "Route B");
-        assert_eq!(result.attribution[1].share_percent, "50.0");
+        assert_eq!(result.attribution[1].share_percent, "33.3");
+        assert_eq!(result.attribution[1].redirected_request_count, 0);
+        assert_eq!(result.attribution[1].redirected_total_tokens, 0);
 
         let mut model_query = statistics_query(Some(3_600_000), 10_800_000, "UTC");
         model_query.attribution_dimension = UsageStatisticsAttributionDimension::Model;
@@ -10847,10 +10900,16 @@ mod tests {
             .expect("model statistics");
         assert_eq!(model_result.attribution[0].label, "model-a");
         assert_eq!(model_result.attribution[0].value, 14);
-        assert_eq!(model_result.attribution[0].share_percent, "100.0");
-        assert_eq!(model_result.attribution[1].label, "model-b");
-        assert_eq!(model_result.attribution[1].value, 0);
-        assert_eq!(model_result.attribution[1].share_percent, "0.0");
+        assert_eq!(model_result.attribution[0].share_percent, "58.3");
+        assert_eq!(model_result.attribution[0].redirected_request_count, 0);
+        assert_eq!(model_result.attribution[1].label, "model-z");
+        assert_eq!(model_result.attribution[1].value, 10);
+        assert_eq!(model_result.attribution[1].share_percent, "41.7");
+        assert_eq!(model_result.attribution[1].redirected_request_count, 1);
+        assert_eq!(model_result.attribution[1].redirected_total_tokens, 10);
+        assert_eq!(model_result.attribution[2].label, "model-b");
+        assert_eq!(model_result.attribution[2].value, 0);
+        assert_eq!(model_result.attribution[2].share_percent, "0.0");
 
         let mut filtered_query = statistics_query(Some(3_600_000), 10_800_000, "UTC");
         filtered_query.route_id = Some(RouteId::from_string("route-a".to_owned()));
@@ -11015,16 +11074,18 @@ mod tests {
     #[test]
     fn usage_statistics_attribution_is_top_five_plus_other_with_stable_ties() {
         let mut aggregates = BTreeMap::new();
-        for (key, label, count) in [
-            ("route:a", "A", 1),
-            ("route:b", "B", 1),
-            ("route:c", "C", 1),
-            ("route:d", "D", 1),
-            ("route:e", "E", 1),
-            ("route:f", "F", 1),
+        for (key, label, count, redirected, redirected_tokens) in [
+            ("route:a", "A", 1, 1, 10),
+            ("route:b", "B", 1, 2, 20),
+            ("route:c", "C", 1, 3, 30),
+            ("route:d", "D", 1, 4, 40),
+            ("route:e", "E", 1, 5, 50),
+            ("route:f", "F", 1, 6, 60),
         ] {
             let totals = StatisticsTotals {
                 request_count: count,
+                redirected_request_count: redirected,
+                redirected_total_tokens: redirected_tokens,
                 ..StatisticsTotals::default()
             };
             aggregates.insert(
@@ -11050,8 +11111,12 @@ mod tests {
         assert_eq!(result.len(), 6);
         assert_eq!(result[0].label, "A");
         assert_eq!(result[4].label, "E");
+        assert_eq!(result[4].redirected_request_count, 5);
+        assert_eq!(result[4].redirected_total_tokens, 50);
         assert!(result[5].is_other);
         assert_eq!(result[5].value, "1".parse::<u64>().unwrap());
+        assert_eq!(result[5].redirected_request_count, 6);
+        assert_eq!(result[5].redirected_total_tokens, 60);
     }
 
     #[test]

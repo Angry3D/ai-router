@@ -50,6 +50,7 @@ export type { McpImageCapacityDto } from "./McpImageCapacityDto";
 export type { MenuBarSettingsDto } from "./MenuBarSettingsDto";
 export type { MenuSnapshotDto } from "./MenuSnapshotDto";
 export type { MetadataFailureDto } from "./MetadataFailureDto";
+export type { ModelVerdict } from "./ModelVerdict";
 export type { MutationResultDto } from "./MutationResultDto";
 export type { OutboundProxySettingsDto } from "./OutboundProxySettingsDto";
 export type { ProxyRequestId } from "./ProxyRequestId";

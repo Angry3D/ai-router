@@ -3454,6 +3454,14 @@ body[data-view="settings"] .app-variant-badge {
   font-size: 11px;
 }
 
+.usage-model-redirect,
+.usage-preview-request-redirect {
+  overflow: hidden;
+  color: var(--red);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .usage-request-state > span:first-child {
   color: var(--text-secondary);
 }

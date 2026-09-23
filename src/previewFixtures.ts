@@ -550,6 +550,7 @@ export const previewUsageHistoryPage: UsageHistoryPageDto = {
       routeName: "演示备用路由",
       requestedModel: "gpt-5.6-terra",
       actualModel: "gpt-5.6-terra",
+      modelVerdict: "matched",
       reasoningEffort: "high",
       streaming: true,
       completionState: "completed",
@@ -581,6 +582,7 @@ export const previewUsageHistoryPage: UsageHistoryPageDto = {
       routeName: "演示主路由",
       requestedModel: "gpt-5.6-luna",
       actualModel: "gpt-5.6-luna",
+      modelVerdict: "matched",
       reasoningEffort: "minimal",
       streaming: false,
       completionState: "completed",
@@ -611,7 +613,8 @@ export const previewUsageHistoryPage: UsageHistoryPageDto = {
       routeId: workRouteId,
       routeName: "演示主路由",
       requestedModel: "gpt-5.6-sol",
-      actualModel: "gpt-5.6-sol",
+      actualModel: "gpt-5.6-luna",
+      modelVerdict: "redirected",
       reasoningEffort: "high",
       streaming: true,
       completionState: "completed",
@@ -643,6 +646,7 @@ export const previewUsageHistoryPage: UsageHistoryPageDto = {
       routeName: "历史演示路由",
       requestedModel: "legacy-preview-model-with-a-long-exact-identifier",
       actualModel: null,
+      modelVerdict: "unreported",
       reasoningEffort: null,
       streaming: true,
       completionState: "failed",
@@ -674,6 +678,7 @@ export const previewUsageHistoryPage: UsageHistoryPageDto = {
       routeName: "一个用于验证表格截断行为的超长演示路由名称",
       requestedModel: "preview-model-with-unavailable-official-pricing",
       actualModel: null,
+      modelVerdict: "unreported",
       reasoningEffort: "a-very-long-preview-reasoning-effort-value",
       streaming: false,
       completionState: "cancelled",
@@ -705,6 +710,7 @@ export const previewUsageHistoryPage: UsageHistoryPageDto = {
       routeName: null,
       requestedModel: "preview-no-upstream-model",
       actualModel: null,
+      modelVerdict: "unreported",
       reasoningEffort: null,
       streaming: true,
       completionState: "no_upstream",
@@ -795,6 +801,8 @@ export const previewUsageStatistics: UsageStatisticsDto = {
     output: "204",
   },
   costPicoUsd: "73916000000",
+  redirectedRequestCount: 1,
+  redirectedTotalTokens: "60054",
   granularity: "hour",
   trend: [
     {
@@ -833,6 +841,8 @@ export const previewUsageStatistics: UsageStatisticsDto = {
       isOther: false,
       value: "2",
       sharePercent: "66.7",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
     {
       key: `route:${workRouteId}`,
@@ -840,6 +850,8 @@ export const previewUsageStatistics: UsageStatisticsDto = {
       isOther: false,
       value: "1",
       sharePercent: "33.3",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
   ],
 };
@@ -856,6 +868,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "60054",
       sharePercent: "50.0",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
     {
       key: `route:${workRouteId}`,
@@ -863,6 +877,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "60054",
       sharePercent: "50.0",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
   ],
   "route:cost": [
@@ -872,6 +888,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "38158000000",
       sharePercent: "51.6",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
     {
       key: `route:${workRouteId}`,
@@ -879,6 +897,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "35758000000",
       sharePercent: "48.4",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
   ],
   "model:requests": [
@@ -888,6 +908,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "2",
       sharePercent: "66.7",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
     {
       key: "model:gpt-5.6-luna",
@@ -895,6 +917,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "1",
       sharePercent: "33.3",
+      redirectedRequestCount: 1,
+      redirectedTotalTokens: "60054",
     },
   ],
   "model:tokens": [
@@ -904,6 +928,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "120000",
       sharePercent: "99.9",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
     {
       key: "model:gpt-5.6-luna",
@@ -911,6 +937,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "108",
       sharePercent: "0.1",
+      redirectedRequestCount: 1,
+      redirectedTotalTokens: "60054",
     },
   ],
   "model:cost": [
@@ -920,6 +948,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "70316000000",
       sharePercent: "95.1",
+      redirectedRequestCount: 0,
+      redirectedTotalTokens: "0",
     },
     {
       key: "model:gpt-5.6-luna",
@@ -927,6 +957,8 @@ const previewStatisticsAttribution = {
       isOther: false,
       value: "3600000000",
       sharePercent: "4.9",
+      redirectedRequestCount: 1,
+      redirectedTotalTokens: "60054",
     },
   ],
 } satisfies Record<

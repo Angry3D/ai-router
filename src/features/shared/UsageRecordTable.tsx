@@ -9,6 +9,7 @@ import type {
   UsageTokensDto,
 } from "../../generated";
 import type { UsageRecordColumn } from "./usageRecordColumns";
+import { isRedirectedModel } from "./modelDisplay";
 import {
   compactToken,
   formatCompactLatency,
@@ -199,20 +200,30 @@ export function UsageLatencyCell({
 }
 
 function UsageModelCell({ row }: { row: UsageHistoryRowDto }) {
-  const model = row.actualModel ?? row.requestedModel ?? "-";
+  const requested = row.requestedModel ?? "-";
+  const redirected = isRedirectedModel(row.requestedModel, row.actualModel);
+  const reasoningEffort = row.reasoningEffort ?? "-";
   return (
     <div
       className="usage-model-cell"
-      title={`${model}\n推理 ${row.reasoningEffort ?? "-"}`}
+      title={
+        redirected
+          ? `${requested}\n→${row.actualModel}\n推理 ${reasoningEffort}`
+          : `${requested}\n推理 ${reasoningEffort}`
+      }
     >
-      <span>{model}</span>
-      <span>推理 {row.reasoningEffort ?? "-"}</span>
+      <span>{requested}</span>
+      {redirected ? (
+        <span className="usage-model-redirect">→{row.actualModel}</span>
+      ) : null}
+      <span>推理 {reasoningEffort}</span>
     </div>
   );
 }
 
 function UsagePreviewRequestCell({ row }: { row: UsageHistoryRowDto }) {
-  const model = row.actualModel ?? row.requestedModel ?? "-";
+  const requested = row.requestedModel ?? "-";
+  const redirected = isRedirectedModel(row.requestedModel, row.actualModel);
   const reasoningEffort = row.reasoningEffort ?? "-";
   const timestamp =
     row.finishedAtMs === null ? "-" : formatUsagePreviewTime(row.finishedAtMs);
@@ -220,9 +231,16 @@ function UsagePreviewRequestCell({ row }: { row: UsageHistoryRowDto }) {
   return (
     <div
       className="usage-preview-request-cell"
-      title={`${model} · ${reasoningEffort}`}
+      title={
+        redirected
+          ? `${requested} · →${row.actualModel} · ${reasoningEffort}`
+          : `${requested} · ${reasoningEffort}`
+      }
     >
-      <span className="usage-preview-request-model">{model}</span>
+      <span className="usage-preview-request-model">{requested}</span>
+      {redirected ? (
+        <span className="usage-preview-request-redirect">→{row.actualModel}</span>
+      ) : null}
       <span className="usage-preview-request-time">
         {reasoningEffort} · {timestamp}
       </span>
