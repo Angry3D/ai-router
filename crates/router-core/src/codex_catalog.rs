@@ -142,7 +142,7 @@ pub fn generate_codex_model_catalog(
                 max_context_window: context_window,
                 effective_context_window_percent: 95,
                 supported_reasoning_levels: reasoning_levels(),
-                default_reasoning_level: "high",
+                default_reasoning_level: "max",
                 default_reasoning_summary: "none",
                 support_verbosity: true,
                 default_verbosity: "medium",
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(entries[1]["context_window"], 256_000);
         assert_eq!(entries[0]["priority"], 1);
         assert_eq!(entries[1]["priority"], 2);
-        assert_eq!(entries[0]["default_reasoning_level"], "high");
+        assert_eq!(entries[0]["default_reasoning_level"], "max");
         assert_eq!(entries[0]["default_reasoning_summary"], "none");
         assert_eq!(entries[0]["effective_context_window_percent"], 95);
         assert_eq!(entries[0]["supports_reasoning_summary_parameter"], true);
