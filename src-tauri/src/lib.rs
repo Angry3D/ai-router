@@ -931,6 +931,7 @@ fn setup_application(
         app.handle().clone(),
         runtime_state.clone(),
         acceptance_root.is_some() && profile.is_isolated(),
+        services.outbound_proxy(),
     );
     app.manage(update_coordinator.clone());
     let coordinator = AppCoordinator::new(services.clone(), runtime_state);
