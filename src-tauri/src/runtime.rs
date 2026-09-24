@@ -435,6 +435,14 @@ impl DesktopLifecycleServices {
         self.database.lock().await.clone()
     }
 
+    /// Returns the shared outbound proxy snapshot handle. Every consumer reads
+    /// the current endpoint while it builds a request client, so a settings
+    /// change reaches the next operation without a notification path.
+    #[must_use]
+    pub fn outbound_proxy(&self) -> OutboundProxyTransport {
+        self.outbound_proxy.clone()
+    }
+
     async fn recovery_for_ipc(&self) -> Result<Arc<RecoveryCoordinator>, IpcErrorDto> {
         self.recovery
             .lock()

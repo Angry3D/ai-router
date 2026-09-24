@@ -13,6 +13,7 @@ use router_core::{
         ApplicationUpdateFailureDto, ApplicationUpdateNotesDto, ApplicationUpdateOperationDto,
         ApplicationUpdateProgressDto, ApplicationUpdateReleaseDto, ApplicationUpdateSnapshotDto,
     },
+    proxy::OutboundProxyTransport,
     state::{AppRuntimeState, IpcErrorDto, StateArea},
 };
 use semver::Version;
@@ -82,6 +83,10 @@ pub struct ApplicationUpdateCoordinator {
     runtime_state: Arc<AppRuntimeState>,
     allow_qa_override: bool,
     official_updates_enabled: bool,
+    /// Snapshot handle for the user-selected global outbound proxy. Every check
+    /// and download builds its own client through the updater plugin, so the
+    /// latest endpoint is read per operation and needs no hot replacement.
+    outbound_proxy: OutboundProxyTransport,
     operation_gate: tokio::sync::Mutex<()>,
     generation: AtomicU64,
     scheduler_started: AtomicBool,
@@ -94,6 +99,7 @@ impl ApplicationUpdateCoordinator {
         app: AppHandle,
         runtime_state: Arc<AppRuntimeState>,
         allow_qa_override: bool,
+        outbound_proxy: OutboundProxyTransport,
     ) -> Arc<Self> {
         let official_updates_enabled = app
             .config()
@@ -120,6 +126,7 @@ impl ApplicationUpdateCoordinator {
             runtime_state,
             allow_qa_override,
             official_updates_enabled,
+            outbound_proxy,
             operation_gate: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
             scheduler_started: AtomicBool::new(false),
@@ -389,7 +396,20 @@ impl ApplicationUpdateCoordinator {
             .target("darwin-aarch64")
             // The coordinator, not the plugin's availability shortcut, must
             // validate current, forward, and downgrade metadata uniformly.
-            .version_comparator(|_, _| true);
+            .version_comparator(|_, _| true)
+            // The plugin clones this closure into the `Update` it returns, so
+            // one injection point covers the check and the download phase.
+            // Enabled proxy: non-loopback destinations (including the release
+            // CDN) go through it and an unreachable proxy fails the operation
+            // instead of falling back to a direct connection. Loopback
+            // destinations always stay direct, which keeps the QA
+            // `AI_ROUTER_QA_UPDATER_ENDPOINT` endpoint reachable. Direct mode
+            // builds no proxy at all, matching the global setting's refusal to
+            // consult macOS system/PAC or environment proxies.
+            .configure_client({
+                let outbound_proxy = self.outbound_proxy.clone();
+                move |builder| outbound_proxy.configure_current_client(builder)
+            });
         if self.allow_qa_override {
             let endpoint = env::var(QA_ENDPOINT_ENV).ok();
             let public_key = env::var(QA_PUBLIC_KEY_ENV).ok();
