@@ -188,6 +188,7 @@ fn reasoning_levels() -> Vec<ReasoningLevel> {
         ),
         ("high", "Greater reasoning depth for complex problems"),
         ("xhigh", "Extra high reasoning depth for complex problems"),
+        ("max", "Maximum reasoning depth for the hardest problems"),
     ]
     .into_iter()
     .map(|(effort, description)| ReasoningLevel {
@@ -408,7 +409,7 @@ mod tests {
                 .iter()
                 .map(|level| level["effort"].as_str().expect("effort"))
                 .collect::<Vec<_>>(),
-            vec!["low", "medium", "high", "xhigh"]
+            vec!["low", "medium", "high", "xhigh", "max"]
         );
         assert!(
             entries[0]["base_instructions"].as_str().is_some_and(
