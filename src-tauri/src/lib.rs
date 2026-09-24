@@ -2,6 +2,7 @@ mod application_update;
 mod popover;
 mod runtime;
 
+use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
@@ -19,14 +20,14 @@ use router_core::lifecycle::{AppCoordinator, AppLifecycleIssue, AppLifecyclePhas
 use router_core::proxy::{
     LogicalRequestActivityPhase, LogicalRequestActivitySink, LogicalRequestActivityTransition,
 };
-use router_core::qa_acceptance::QaAcceptanceRoot;
+use router_core::qa_acceptance::{PRODUCTION_APP_IDENTIFIER, QaAcceptanceRoot};
 use router_core::state::{
     AppRuntimeState, BootstrapSnapshotDto, IpcErrorDto, StateArea, StateChangedEventDto,
     StateEventError, StateEventSink,
 };
 use runtime::{
-    DesktopLifecycleServices, DesktopRuntimeProfile, RuntimeLogController,
-    SafeRuntimeDiagnosticSink, activate_existing_instance, apply_proxy_port,
+    DesktopLifecycleServices, DesktopRecoveryWiring, DesktopRuntimeProfile, RecoveryIdleWindow,
+    RuntimeLogController, SafeRuntimeDiagnosticSink, activate_existing_instance, apply_proxy_port,
     check_route_reachability, clear_mcp_images, clear_request_history, clear_runtime_logs,
     confirm_codex_images_mcp_repair, confirm_reset_codex_recovery_to_baseline,
     confirm_route_activation, confirm_update_codex_recovery, connect_codex, create_recovery_point,
@@ -433,10 +434,36 @@ impl StateEventSink for TauriStateEventSink {
 struct TauriLogicalRequestActivitySink {
     app_handle: AppHandle,
     tray_refresh: Arc<TrayRefreshCoordinator>,
+    idle_window: RecoveryIdleWindow,
+}
+
+/// Builds the activity sink and the recovery inputs the lifecycle services need.
+///
+/// The tray activity sink stamps the shared idle window that the runtime
+/// integrity self-check reads before it may run, and the recovery wiring points
+/// incident records at the runtime log directory and at the running build.
+fn desktop_activity_and_recovery(
+    app_handle: AppHandle,
+    tray_refresh: Arc<TrayRefreshCoordinator>,
+    log_directory: PathBuf,
+    app_version: String,
+) -> (Arc<dyn LogicalRequestActivitySink>, DesktopRecoveryWiring) {
+    let idle_window = RecoveryIdleWindow::new();
+    let activity_sink: Arc<dyn LogicalRequestActivitySink> =
+        Arc::new(TauriLogicalRequestActivitySink {
+            app_handle,
+            tray_refresh,
+            idle_window: idle_window.clone(),
+        });
+    (
+        activity_sink,
+        DesktopRecoveryWiring::new(log_directory, app_version, idle_window),
+    )
 }
 
 impl LogicalRequestActivitySink for TauriLogicalRequestActivitySink {
     fn activity_changed(&self, transition: LogicalRequestActivityTransition) {
+        self.idle_window.observe(transition);
         if self.tray_refresh.apply_activity_transition(transition) {
             if !schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh)) {
                 return;
@@ -829,7 +856,7 @@ pub fn run() {
             hide_settings_window
         ])
         .build(context)
-        .expect("failed to build AI Router");
+        .unwrap_or_else(|error| panic!("failed to build AI Router: {error}"));
     run_event_loop(app);
 }
 
@@ -863,10 +890,30 @@ fn run_event_loop(app: tauri::App) {
     });
 }
 
+/// Refuses to start a debug build with the production bundle identity.
+///
+/// A debug build that reuses the production bundle identity would resolve the production
+/// application data directory and the real `~/.codex` configuration, so development must go
+/// through the isolated QA identity instead. Release builds keep the production identity.
+#[must_use]
+fn dev_build_must_refuse_identifier(identifier: &str, debug_build: bool) -> bool {
+    debug_build && identifier == PRODUCTION_APP_IDENTIFIER
+}
+
+fn dev_build_identifier_error(identifier: &str) -> String {
+    format!(
+        "debug 构建不允许使用生产标识符 {identifier}：会读写生产数据目录与真实 Codex 配置；\
+         请使用 `pnpm tauri:dev`（QA 标识 + 独立数据目录）启动开发环境"
+    )
+}
+
 fn setup_application(
     app: &mut tauri::App,
     acceptance_root: Option<&QaAcceptanceRoot>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if dev_build_must_refuse_identifier(&app.config().identifier, cfg!(debug_assertions)) {
+        return Err(dev_build_identifier_error(&app.config().identifier).into());
+    }
     #[cfg(target_os = "macos")]
     {
         app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -911,13 +958,15 @@ fn setup_application(
     app.manage(runtime_state.clone());
     app.manage(MenuPopoverController::new());
     let logs = app.state::<RuntimeLogController>();
+    let log_directory = logs.directory().to_path_buf();
     let diagnostics = Arc::new(SafeRuntimeDiagnosticSink::new(&logs));
     let user_home = app.path().home_dir()?;
-    let activity_sink: Arc<dyn LogicalRequestActivitySink> =
-        Arc::new(TauriLogicalRequestActivitySink {
-            app_handle: app.handle().clone(),
-            tray_refresh,
-        });
+    let (activity_sink, recovery_wiring) = desktop_activity_and_recovery(
+        app.handle().clone(),
+        tray_refresh,
+        log_directory,
+        app.package_info().version.to_string(),
+    );
     let services = DesktopLifecycleServices::new_with_activity_sink(
         app_data_dir,
         &user_home,
@@ -925,6 +974,7 @@ fn setup_application(
         runtime_state.clone(),
         diagnostics,
         activity_sink,
+        recovery_wiring,
     );
     app.manage(services.clone());
     let update_coordinator = ApplicationUpdateCoordinator::new(
@@ -977,6 +1027,35 @@ mod tests {
             count: usize::from(phase != LogicalRequestActivityPhase::Idle),
             revision,
         }
+    }
+
+    #[test]
+    fn dev_build_must_refuse_identifier_for_production_identity_in_debug_build() {
+        assert!(dev_build_must_refuse_identifier(
+            PRODUCTION_APP_IDENTIFIER,
+            true
+        ));
+    }
+
+    #[test]
+    fn dev_build_must_refuse_identifier_is_false_for_qa_identity_in_debug_build() {
+        let qa_identifier = router_core::qa_acceptance::QA_APP_IDENTIFIER;
+        assert!(!dev_build_must_refuse_identifier(qa_identifier, true));
+    }
+
+    #[test]
+    fn dev_build_must_refuse_identifier_is_false_for_production_identity_in_release_build() {
+        assert!(!dev_build_must_refuse_identifier(
+            PRODUCTION_APP_IDENTIFIER,
+            false
+        ));
+    }
+
+    #[test]
+    fn dev_build_refusal_message_names_the_identifier_and_the_isolated_entry() {
+        let message = dev_build_identifier_error(PRODUCTION_APP_IDENTIFIER);
+        assert!(message.contains(PRODUCTION_APP_IDENTIFIER));
+        assert!(message.contains("pnpm tauri:dev"));
     }
 
     #[test]

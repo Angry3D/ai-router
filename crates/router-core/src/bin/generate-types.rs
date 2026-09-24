@@ -11,17 +11,17 @@ use router_core::{
         CodexRecoveryUpdatePreviewDto, CodexRestartNoticeDto, FallbackStopReasonDto,
         HistorySummaryDto, ImagesGenerationSettingsDto, McpImageCapacityDto, MenuBarSettingsDto,
         MenuSnapshotDto, MetadataFailureDto, OutboundProxySettingsDto, RecoveryCandidateDto,
-        RecoveryHealthDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
-        ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
-        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto,
-        RoutingSkippedRouteDto, SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
-        UpdateOutboundProxySettingsInputDto, UsageAttemptDto, UsageCostDto, UsageCostStateDto,
-        UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto,
-        UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
-        UsageStatisticsAttributionDimensionDto, UsageStatisticsAttributionDto,
-        UsageStatisticsAttributionMetricDto, UsageStatisticsBucketDto, UsageStatisticsDto,
-        UsageStatisticsGranularityDto, UsageStatisticsQueryDto, UsageStatisticsTokensDto,
-        UsageTokensDto,
+        RecoveryHealthDto, RecoveryIncidentAction, RecoveryIncidentDto, RecoverySnapshotDto,
+        ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
+        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
+        RouteSaveResultDto, RoutingDecisionDto, RoutingSkippedRouteDto, SettingsSnapshotDto,
+        UpdateImagesGenerationSettingsInputDto, UpdateOutboundProxySettingsInputDto,
+        UsageAttemptDto, UsageCostDto, UsageCostStateDto, UsageFastStatusDto,
+        UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto, UsageHistoryRowDto,
+        UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsAttributionDimensionDto,
+        UsageStatisticsAttributionDto, UsageStatisticsAttributionMetricDto,
+        UsageStatisticsBucketDto, UsageStatisticsDto, UsageStatisticsGranularityDto,
+        UsageStatisticsQueryDto, UsageStatisticsTokensDto, UsageTokensDto,
     },
     balance::{
         BalanceBatchPhase, BalanceDisplaySnapshot, BalanceDisplayStatus, BalanceError,
@@ -84,6 +84,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     MetadataFailureDto::export_all_to(&output)?;
     RecoveryCandidateDto::export_all_to(&output)?;
     RecoveryHealthDto::export_all_to(&output)?;
+    RecoveryIncidentAction::export_all_to(&output)?;
+    RecoveryIncidentDto::export_all_to(&output)?;
     RecoverySnapshotDto::export_all_to(&output)?;
     ReplaceCodexModelsResult::export_all_to(&output)?;
     ReorderRoutesAndFallbackInputDto::export_all_to(&output)?;

@@ -4,7 +4,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -21,6 +21,7 @@ use crate::{
         ImagesGenerationTimeout, McpImageCapacityWarningThreshold, OutboundProxyConfig,
         OutboundProxyUrl,
     },
+    incident::{self, IncidentAction, IncidentKind, IncidentRecheck, IncidentRecord},
     storage::{DatabaseExecutor, SCHEMA_VERSION, StorageError},
 };
 
@@ -28,6 +29,14 @@ pub const RECOVERY_FORMAT_VERSION: i64 = 1;
 pub const MAX_VALID_POINTS: usize = 5;
 pub const RECOVERY_RETENTION: Duration = Duration::from_hours(720);
 pub const RECOVERY_QUIET_PERIOD: Duration = Duration::from_millis(250);
+/// Delay between runtime integrity self-checks.
+pub const RECOVERY_SELF_CHECK_INTERVAL: Duration = Duration::from_hours(6);
+/// Delay before the first runtime integrity self-check after startup.
+pub const RECOVERY_SELF_CHECK_INITIAL_DELAY: Duration = Duration::from_mins(10);
+/// Traffic-free window the activity probe must observe before a self-check runs.
+pub const RECOVERY_SELF_CHECK_IDLE_MINIMUM: Duration = Duration::from_mins(5);
+/// Name of the exclusive data-directory lock file beside the primary database.
+pub const DIRECTORY_LOCK_FILE_NAME_SUFFIX: &str = ".lock";
 
 const APPLICATION_TABLES: [&str; 16] = [
     "app_settings",
@@ -111,6 +120,113 @@ pub struct RecoveryInventory {
     pub invalid_point_count: usize,
 }
 
+/// Classification of one `pragma integrity_check` output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegrityClassification {
+    /// The database reported `ok`.
+    Ok,
+    /// Every reported message describes an index membership inconsistency.
+    IndexOnly,
+    /// Any other or unclassifiable message; never eligible for automatic repair.
+    Unrecoverable,
+}
+
+/// Bounded `pragma integrity_check` messages with their classification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegrityReport {
+    pub messages: Vec<String>,
+    pub classification: IntegrityClassification,
+}
+
+/// Classifies collected `pragma integrity_check` messages.
+///
+/// An empty report and the healthy `ok` row are [`IntegrityClassification::Ok`].
+/// A report whose every message is an index membership inconsistency is
+/// [`IntegrityClassification::IndexOnly`]; every other shape fails closed as
+/// [`IntegrityClassification::Unrecoverable`].
+#[must_use]
+pub fn classify_integrity_output(messages: &[String]) -> IntegrityClassification {
+    let mut index_only = false;
+    for message in messages {
+        let message = message.trim();
+        if message.is_empty() || message.eq_ignore_ascii_case("ok") {
+            continue;
+        }
+        if !is_index_only_message(message) {
+            return IntegrityClassification::Unrecoverable;
+        }
+        index_only = true;
+    }
+    if index_only {
+        IntegrityClassification::IndexOnly
+    } else {
+        IntegrityClassification::Ok
+    }
+}
+
+/// Reads every bounded `pragma integrity_check` message of one connection.
+///
+/// A malformed database can abort the pragma after reporting the pages it
+/// already examined. Those messages are kept as evidence and the aborted check
+/// fails closed as [`IntegrityClassification::Unrecoverable`].
+///
+/// # Errors
+///
+/// Returns the `SQLite` error when the pragma cannot be evaluated at all.
+pub fn read_integrity_report(connection: &Connection) -> Result<IntegrityReport, rusqlite::Error> {
+    let mut messages = Vec::new();
+    let query = connection.pragma_query(None, "integrity_check", |row| {
+        messages.push(row.get::<_, String>(0)?);
+        Ok(())
+    });
+    if let Err(error) = query {
+        if messages.is_empty() {
+            return Err(error);
+        }
+        return Ok(IntegrityReport {
+            messages: incident::bound_integrity_messages(&messages),
+            classification: IntegrityClassification::Unrecoverable,
+        });
+    }
+    let messages = incident::bound_integrity_messages(&messages);
+    let classification = classify_integrity_output(&messages);
+    Ok(IntegrityReport {
+        messages,
+        classification,
+    })
+}
+
+fn is_index_only_message(message: &str) -> bool {
+    if let Some(rest) = message.strip_prefix("row ") {
+        let Some((row, index)) = rest.split_once(" missing from index ") else {
+            return false;
+        };
+        return is_row_id(row) && is_index_name(index);
+    }
+    if let Some(index) = message.strip_prefix("wrong # of entries in index ") {
+        return is_index_name(index);
+    }
+    // SQLite 3.53 reports a rebuildable index-cell mismatch this way; the
+    // message names one index and one row, so `REINDEX` can rebuild the cell.
+    if let Some(rest) = message.strip_prefix("index ") {
+        let Some((index, row)) =
+            rest.split_once(" stores an imprecise floating-point value for row ")
+        else {
+            return false;
+        };
+        return is_index_name(index) && is_row_id(row);
+    }
+    false
+}
+
+fn is_row_id(row: &str) -> bool {
+    !row.is_empty() && row.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_index_name(index: &str) -> bool {
+    !index.is_empty() && !index.chars().any(char::is_whitespace)
+}
+
 #[derive(Debug, Error)]
 pub enum RecoveryError {
     #[error("invalid recovery point identifier")]
@@ -125,6 +241,8 @@ pub enum RecoveryError {
     UnknownTable,
     #[error("recovery database domain validation failed")]
     DomainValidation,
+    #[error("database directory is already in use")]
+    DirectoryInUse,
     #[error("recovery filesystem operation failed")]
     Filesystem(#[from] io::Error),
     #[error("recovery sqlite operation failed")]
@@ -150,12 +268,15 @@ pub struct RecoveryHealth {
     pub live_critical_revision: u64,
     pub covered_critical_revision: Option<u64>,
     pub last_failure: Option<RecoveryFailureCode>,
+    /// Newest persisted corruption incident, when incident recording is enabled.
+    pub last_incident: Option<IncidentRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryFailureCode {
     PublicationFailed,
     InventoryUnavailable,
+    IntegrityUnrecoverable,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -167,6 +288,7 @@ pub enum DatabaseStartupIssue {
     FutureSchema,
     UnsafePath,
     Unavailable,
+    DirectoryInUse,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,6 +296,9 @@ pub enum DatabaseStartupClassification {
     NewInstall,
     Ready,
     RecoveryRequired(RecoveryInventory),
+    /// The primary exists and its only integrity failures are index
+    /// inconsistencies, so a repair attempt may run before recovery.
+    Repairable(RecoveryInventory, IntegrityReport),
     Fatal(DatabaseStartupIssue),
 }
 
@@ -203,6 +328,7 @@ pub fn classify_recovery_startup_error(error: &RecoveryError) -> Option<Database
     match error {
         RecoveryError::UnsafeFilesystemObject => Some(DatabaseStartupIssue::UnsafePath),
         RecoveryError::FutureSchema => Some(DatabaseStartupIssue::FutureSchema),
+        RecoveryError::DirectoryInUse => Some(DatabaseStartupIssue::DirectoryInUse),
         RecoveryError::Filesystem(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             Some(DatabaseStartupIssue::Permission)
         }
@@ -243,9 +369,51 @@ impl RecoveryEventSink for NoopRecoveryEventSink {
     fn diagnostic(&self, _code: RecoveryFailureCode) {}
 }
 
+/// Reports whether the proxy has been free of in-flight work for a duration.
+///
+/// The runtime injects this probe so an integrity self-check and its repair
+/// only run while the desktop is idle.
+pub trait RecoveryActivityProbe: Send + Sync {
+    fn idle_for(&self, minimum: Duration) -> bool;
+}
+
+/// Default probe used by [`RecoveryCoordinator::start`].
+///
+/// Without an injected probe the coordinator never claims idleness, so the
+/// existing start path keeps its behavior and never starts a self-check.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NeverIdleRecoveryActivityProbe;
+
+impl RecoveryActivityProbe for NeverIdleRecoveryActivityProbe {
+    fn idle_for(&self, _minimum: Duration) -> bool {
+        false
+    }
+}
+
+/// Cadence of the runtime integrity self-check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoverySelfCheckSchedule {
+    /// Delay between coordinator start and the first self-check.
+    pub initial_delay: Duration,
+    /// Delay between the end of one self-check and the next.
+    pub interval: Duration,
+    /// Traffic-free window the probe must observe before a self-check runs.
+    pub idle_minimum: Duration,
+}
+
+impl Default for RecoverySelfCheckSchedule {
+    fn default() -> Self {
+        Self {
+            initial_delay: RECOVERY_SELF_CHECK_INITIAL_DELAY,
+            interval: RECOVERY_SELF_CHECK_INTERVAL,
+            idle_minimum: RECOVERY_SELF_CHECK_IDLE_MINIMUM,
+        }
+    }
+}
+
 pub struct RecoveryCoordinator {
     context: RecoveryWorkerContext,
-    worker: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    worker: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     shutdown_sender: watch::Sender<bool>,
 }
 
@@ -267,13 +435,44 @@ impl RecoveryCoordinator {
         database: DatabaseExecutor,
         sink: Arc<dyn RecoveryEventSink>,
     ) -> Arc<Self> {
-        Self::start_with_quiet_period(manager, database, sink, RECOVERY_QUIET_PERIOD).await
+        Self::start_with_activity(
+            manager,
+            database,
+            sink,
+            Arc::new(NeverIdleRecoveryActivityProbe),
+        )
+        .await
     }
 
-    async fn start_with_quiet_period(
+    /// Starts publication and the low-frequency integrity self-check.
+    ///
+    /// The self-check runs the full `pragma integrity_check` outside the
+    /// database thread, and only while the supplied probe reports idleness for
+    /// the schedule's minimum window.
+    pub async fn start_with_activity(
         manager: RecoveryManager,
         database: DatabaseExecutor,
         sink: Arc<dyn RecoveryEventSink>,
+        activity: Arc<dyn RecoveryActivityProbe>,
+    ) -> Arc<Self> {
+        Self::start_with_schedule(
+            manager,
+            database,
+            sink,
+            activity,
+            RecoverySelfCheckSchedule::default(),
+            RECOVERY_QUIET_PERIOD,
+        )
+        .await
+    }
+
+    /// Starts both workers with an explicit schedule and quiet period.
+    pub async fn start_with_schedule(
+        manager: RecoveryManager,
+        database: DatabaseExecutor,
+        sink: Arc<dyn RecoveryEventSink>,
+        activity: Arc<dyn RecoveryActivityProbe>,
+        schedule: RecoverySelfCheckSchedule,
         quiet_period: Duration,
     ) -> Arc<Self> {
         let initial = derive_health(&manager, &database, None).await;
@@ -296,11 +495,20 @@ impl RecoveryCoordinator {
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
         let coordinator = Arc::new(Self {
             context: context.clone(),
-            worker: tokio::sync::Mutex::new(None),
+            worker: tokio::sync::Mutex::new(Vec::new()),
             shutdown_sender,
         });
-        let worker = tokio::spawn(run_recovery_worker(context, shutdown_receiver));
-        *coordinator.worker.lock().await = Some(worker);
+        let worker = tokio::spawn(run_recovery_worker(
+            context.clone(),
+            shutdown_receiver.clone(),
+        ));
+        let self_check = tokio::spawn(run_recovery_self_check(
+            context,
+            shutdown_receiver,
+            schedule,
+            activity,
+        ));
+        *coordinator.worker.lock().await = vec![worker, self_check];
         coordinator
     }
 
@@ -320,18 +528,21 @@ impl RecoveryCoordinator {
 
     /// Stops notification intake and waits up to the supplied desktop budget.
     ///
-    /// Returns `true` when the worker completed within the bound.
+    /// Returns `true` when every worker completed within the bound.
     pub async fn shutdown(&self, timeout: Duration) -> bool {
         self.shutdown_sender.send_replace(true);
-        let Some(mut worker) = self.worker.lock().await.take() else {
-            return true;
+        let workers = {
+            let mut guard = self.worker.lock().await;
+            std::mem::take(&mut *guard)
         };
-        if tokio::time::timeout(timeout, &mut worker).await.is_ok() {
-            true
-        } else {
-            worker.abort();
-            false
+        let mut completed = true;
+        for mut worker in workers {
+            if tokio::time::timeout(timeout, &mut worker).await.is_err() {
+                worker.abort();
+                completed = false;
+            }
         }
+        completed
     }
 }
 
@@ -402,6 +613,96 @@ impl RecoveryWorkerContext {
             }
         }
     }
+
+    /// Runs one full integrity self-check and applies its recovery action.
+    async fn run_self_check(&self) {
+        let manager = self.manager.clone();
+        let report = tokio::task::spawn_blocking(move || manager.inspect_primary_integrity()).await;
+        let Ok(Ok(report)) = report else {
+            return;
+        };
+        match report.classification {
+            IntegrityClassification::Ok => {}
+            IntegrityClassification::IndexOnly => {
+                let manager = self.manager.clone();
+                let database = self.database.clone();
+                let outcome =
+                    tokio::task::spawn_blocking(move || manager.repair_primary(&database)).await;
+                if matches!(
+                    outcome,
+                    Ok(Ok(RepairOutcome {
+                        recheck: RepairRecheck::Failed,
+                        ..
+                    }))
+                ) {
+                    let health = derive_health(
+                        &self.manager,
+                        &self.database,
+                        Some(RecoveryFailureCode::IntegrityUnrecoverable),
+                    )
+                    .await;
+                    self.set_health(&health);
+                    self.sink
+                        .diagnostic(RecoveryFailureCode::IntegrityUnrecoverable);
+                    return;
+                }
+                let health = derive_health(&self.manager, &self.database, None).await;
+                self.set_health(&health);
+            }
+            IntegrityClassification::Unrecoverable => {
+                let manager = self.manager.clone();
+                let messages = report.messages.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = manager.record_incident(
+                        IncidentKind::Unrecoverable,
+                        &messages,
+                        IncidentAction::RecoveryRequired,
+                        IncidentRecheck::Failed,
+                        0,
+                    );
+                })
+                .await;
+                let health = derive_health(
+                    &self.manager,
+                    &self.database,
+                    Some(RecoveryFailureCode::IntegrityUnrecoverable),
+                )
+                .await;
+                self.set_health(&health);
+                self.sink
+                    .diagnostic(RecoveryFailureCode::IntegrityUnrecoverable);
+            }
+        }
+    }
+}
+
+async fn run_recovery_self_check(
+    context: RecoveryWorkerContext,
+    mut shutdown: watch::Receiver<bool>,
+    schedule: RecoverySelfCheckSchedule,
+    activity: Arc<dyn RecoveryActivityProbe>,
+) {
+    if wait_for_shutdown(&mut shutdown, schedule.initial_delay).await {
+        return;
+    }
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        if activity.idle_for(schedule.idle_minimum) {
+            context.run_self_check().await;
+        }
+        if wait_for_shutdown(&mut shutdown, schedule.interval).await {
+            return;
+        }
+    }
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>, duration: Duration) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(duration) => false,
+        result = shutdown.changed() => result.is_err() || *shutdown.borrow(),
+    }
 }
 
 async fn run_recovery_worker(context: RecoveryWorkerContext, mut shutdown: watch::Receiver<bool>) {
@@ -449,6 +750,7 @@ async fn derive_health(
     failure: Option<RecoveryFailureCode>,
 ) -> RecoveryHealth {
     let live_revision = database.critical_revision().await.unwrap_or_default();
+    let last_incident = manager.latest_incident();
     match manager.scan() {
         Ok(inventory) => {
             let newest = inventory.valid_points.first();
@@ -464,6 +766,7 @@ async fn derive_health(
                 live_critical_revision: live_revision,
                 covered_critical_revision: covered,
                 last_failure: failure,
+                last_incident,
             }
         }
         Err(_) => RecoveryHealth {
@@ -473,7 +776,80 @@ async fn derive_health(
             live_critical_revision: live_revision,
             covered_critical_revision: None,
             last_failure: Some(failure.unwrap_or(RecoveryFailureCode::InventoryUnavailable)),
+            last_incident,
         },
+    }
+}
+
+/// Incident recording target for self-heal, quarantine, and recovery actions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecoveryIncidentRecorder {
+    directory: PathBuf,
+    app_version: String,
+}
+
+/// Integrity facts captured before the primary is modified.
+#[derive(Clone, Debug)]
+struct PrimaryCorruptionEvidence {
+    detected_at_ms: i64,
+    kind: IncidentKind,
+    messages: Vec<String>,
+    db_bytes: u64,
+    db_sha256: String,
+}
+
+/// One repair statement attempted on the primary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepairAttempt {
+    Reindex,
+    Vacuum,
+}
+
+impl RepairAttempt {
+    const fn statement(self) -> &'static str {
+        match self {
+            Self::Reindex => "REINDEX;",
+            Self::Vacuum => "VACUUM;",
+        }
+    }
+}
+
+/// Result of the full validation that follows the last repair attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepairRecheck {
+    Ok,
+    Failed,
+}
+
+/// Outcome of one repair entry point.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairOutcome {
+    /// Attempts actually executed, in order.
+    pub attempts: Vec<RepairAttempt>,
+    pub recheck: RepairRecheck,
+    /// Pre-repair byte-for-byte copy kept as evidence, when one was staged.
+    pub quarantine: Option<PathBuf>,
+}
+
+/// Exclusive advisory lock over one data directory.
+///
+/// The lock is released when this value is dropped or the process exits.
+#[derive(Debug)]
+pub struct RecoveryDirectoryLock {
+    file: File,
+    path: PathBuf,
+}
+
+impl RecoveryDirectoryLock {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for RecoveryDirectoryLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -481,6 +857,7 @@ async fn derive_health(
 pub struct RecoveryManager {
     primary_path: PathBuf,
     recovery_dir: PathBuf,
+    incident_recorder: Option<RecoveryIncidentRecorder>,
     #[cfg(test)]
     injected_failures: Arc<std::sync::Mutex<BTreeSet<RecoveryFailurePoint>>>,
 }
@@ -505,6 +882,7 @@ impl RecoveryManager {
         Self {
             primary_path,
             recovery_dir,
+            incident_recorder: None,
             #[cfg(test)]
             injected_failures: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
         }
@@ -513,6 +891,119 @@ impl RecoveryManager {
     #[must_use]
     pub fn recovery_dir(&self) -> &Path {
         &self.recovery_dir
+    }
+
+    #[must_use]
+    pub fn primary_path(&self) -> &Path {
+        &self.primary_path
+    }
+
+    /// Enables persisted incident recording in the runtime log directory.
+    ///
+    /// `app_version` is stored verbatim in every record so a later occurrence
+    /// can be attributed to the build that wrote it.
+    #[must_use]
+    pub fn with_incident_recording(
+        mut self,
+        directory: impl Into<PathBuf>,
+        app_version: impl Into<String>,
+    ) -> Self {
+        self.incident_recorder = Some(RecoveryIncidentRecorder {
+            directory: directory.into(),
+            app_version: app_version.into(),
+        });
+        self
+    }
+
+    /// Returns the configured incident directory, when recording is enabled.
+    #[must_use]
+    pub fn incident_directory(&self) -> Option<&Path> {
+        self.incident_recorder
+            .as_ref()
+            .map(|recorder| recorder.directory.as_path())
+    }
+
+    /// Returns the newest persisted incident record, when one exists.
+    ///
+    /// Recording errors and unparsable records are treated as "no record" so
+    /// the diagnostic projection never fails.
+    #[must_use]
+    pub fn latest_incident(&self) -> Option<IncidentRecord> {
+        let recorder = self.incident_recorder.as_ref()?;
+        incident::read_latest_incident(&recorder.directory)
+            .ok()
+            .flatten()
+    }
+
+    /// Acquires the exclusive data-directory lock held for the process lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError::DirectoryInUse`] when another process already
+    /// holds the lock, a filesystem error when the lock file cannot be created,
+    /// or [`RecoveryError::UnsafeFilesystemObject`] for an unsafe path.
+    pub fn acquire_directory_lock(&self) -> Result<RecoveryDirectoryLock, RecoveryError> {
+        let parent = self
+            .primary_path
+            .parent()
+            .ok_or(RecoveryError::UnsafeFilesystemObject)?;
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(RecoveryError::UnsafeFilesystemObject);
+            }
+            Ok(_) => {
+                set_private_directory_mode(parent)?;
+                ensure_private_directory(parent)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(parent)?;
+                set_private_directory_mode(parent)?;
+                ensure_private_directory(parent)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let name = self
+            .primary_path
+            .file_name()
+            .ok_or(RecoveryError::UnsafeFilesystemObject)?
+            .to_string_lossy()
+            .into_owned();
+        let path = parent.join(format!("{name}{DIRECTORY_LOCK_FILE_NAME_SUFFIX}"));
+        match fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() =>
+            {
+                return Err(RecoveryError::UnsafeFilesystemObject);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        set_private_file_mode(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(RecoveryDirectoryLock { file, path }),
+            Err(fs::TryLockError::WouldBlock) => Err(RecoveryError::DirectoryInUse),
+            Err(fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
+    /// Reads the primary integrity report without mutating the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns a filesystem error for an unsafe or missing primary, or a
+    /// database error when the pragma cannot be evaluated.
+    pub fn inspect_primary_integrity(&self) -> Result<IntegrityReport, RecoveryError> {
+        ensure_private_regular_file(&self.primary_path)?;
+        let connection = open_read_only_no_follow(&self.primary_path)?;
+        configure_connection(&connection)?;
+        read_integrity_report(&connection).map_err(RecoveryError::from)
     }
 
     /// Classifies startup without creating, migrating, or mutating the primary.
@@ -554,9 +1045,255 @@ impl RecoveryManager {
                         ));
                     }
                 }
-                Ok(classify_existing_primary(&self.primary_path, inventory))
+                let started = Instant::now();
+                let inspection = classify_existing_primary(&self.primary_path, inventory);
+                if matches!(
+                    inspection.classification,
+                    DatabaseStartupClassification::RecoveryRequired(_)
+                ) {
+                    let _ = self.record_incident(
+                        inspection.kind,
+                        &inspection.messages,
+                        IncidentAction::RecoveryRequired,
+                        IncidentRecheck::Failed,
+                        duration_millis(started.elapsed()),
+                    );
+                }
+                Ok(inspection.classification)
             }
         }
+    }
+
+    /// Repairs an index-only corrupted primary that a database executor owns.
+    ///
+    /// The evidence copy, every attempt, and the post-repair recheck run on the
+    /// executor's serialized connection, so no second writer touches the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed filesystem, database, or storage error for preconditions
+    /// that must fall back to the existing recovery classification, such as an
+    /// unsafe path, wrong permissions, a future schema, or a full disk.
+    pub fn repair_primary(
+        &self,
+        database: &DatabaseExecutor,
+    ) -> Result<RepairOutcome, RecoveryError> {
+        self.repair_primary_with(
+            |destination| {
+                ensure_private_regular_file(&self.primary_path)?;
+                let primary = self.primary_path.clone();
+                let destination = destination.to_path_buf();
+                database
+                    .blocking_maintenance(move |_connection| {
+                        Ok(copy_private_file_bytes(&primary, &destination)?)
+                    })
+                    .map_err(RecoveryError::from)
+            },
+            |attempt| {
+                let statement = attempt.statement();
+                database
+                    .blocking_maintenance(move |connection| {
+                        connection.execute_batch(statement)?;
+                        Ok(())
+                    })
+                    .map_err(RecoveryError::from)
+            },
+        )
+    }
+
+    /// Repairs an index-only corrupted primary that no process has open.
+    ///
+    /// Used by startup classification, where `DatabaseExecutor::open` cannot
+    /// succeed until the index inconsistency is resolved.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed filesystem, database, or storage error for preconditions
+    /// that must fall back to the existing recovery classification.
+    pub fn repair_primary_closed(&self) -> Result<RepairOutcome, RecoveryError> {
+        self.repair_primary_with(
+            |destination| copy_private_file(&self.primary_path, destination),
+            |attempt| {
+                let connection = open_read_write_no_follow(&self.primary_path)?;
+                connection.busy_timeout(Duration::from_secs(5))?;
+                connection.execute_batch(attempt.statement())?;
+                Ok(())
+            },
+        )
+    }
+
+    fn repair_primary_with(
+        &self,
+        evidence: impl Fn(&Path) -> Result<(), RecoveryError>,
+        mutate: impl Fn(RepairAttempt) -> Result<(), RecoveryError>,
+    ) -> Result<RepairOutcome, RecoveryError> {
+        ensure_private_regular_file(&self.primary_path)?;
+        let started = Instant::now();
+        let detected_at_ms = now_millis();
+        let report = self.inspect_primary_integrity()?;
+        let captured =
+            self.capture_evidence(detected_at_ms, incident_kind(&report), &report.messages);
+        if report.classification != IntegrityClassification::IndexOnly {
+            if let Some(evidence) = &captured {
+                self.write_incident_record(
+                    evidence,
+                    IncidentAction::RecoveryRequired,
+                    IncidentRecheck::Failed,
+                    duration_millis(started.elapsed()),
+                );
+            }
+            return Ok(RepairOutcome {
+                attempts: Vec::new(),
+                recheck: RepairRecheck::Failed,
+                quarantine: None,
+            });
+        }
+        let quarantine = self.stage_repair_quarantine(&evidence)?;
+        let mut attempts = Vec::new();
+        let mut recheck = RepairRecheck::Failed;
+        for attempt in [RepairAttempt::Reindex, RepairAttempt::Vacuum] {
+            mutate(attempt)?;
+            attempts.push(attempt);
+            if self.recheck_primary().is_ok() {
+                recheck = RepairRecheck::Ok;
+                break;
+            }
+        }
+        if recheck == RepairRecheck::Ok {
+            self.apply_quarantine_retention(now_millis(), Some(&quarantine))?;
+        }
+        if let Some(evidence) = &captured {
+            let (action, recheck_result) = match recheck {
+                RepairRecheck::Ok => (IncidentAction::Repaired, IncidentRecheck::Ok),
+                RepairRecheck::Failed => {
+                    (IncidentAction::RecoveryRequired, IncidentRecheck::Failed)
+                }
+            };
+            self.write_incident_record(
+                evidence,
+                action,
+                recheck_result,
+                duration_millis(started.elapsed()),
+            );
+        }
+        Ok(RepairOutcome {
+            attempts,
+            recheck,
+            quarantine: Some(quarantine),
+        })
+    }
+
+    fn stage_repair_quarantine(
+        &self,
+        evidence: &impl Fn(&Path) -> Result<(), RecoveryError>,
+    ) -> Result<PathBuf, RecoveryError> {
+        self.ensure_recovery_dir()?;
+        let quarantine = self.recovery_dir.join(format!(
+            "quarantine-{}-{}.sqlite3",
+            now_millis(),
+            Uuid::new_v4()
+        ));
+        if let Err(error) = evidence(&quarantine) {
+            let _ = fs::remove_file(&quarantine);
+            return Err(error);
+        }
+        sync_directory(&self.recovery_dir)?;
+        Ok(quarantine)
+    }
+
+    /// Runs the post-repair validation the open path can accept.
+    ///
+    /// A current-schema primary must satisfy the complete live-open contract.
+    /// An older primary is checked for a non-future schema, integrity, and
+    /// foreign keys only: the open path migrates it and re-runs the full
+    /// contract, and a migration failure keeps the existing recovery flow.
+    fn recheck_primary(&self) -> Result<(), RecoveryError> {
+        ensure_private_regular_file(&self.primary_path)?;
+        let connection = open_read_only_no_follow(&self.primary_path)?;
+        configure_connection(&connection)?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(RecoveryError::FutureSchema);
+        }
+        let integrity: String =
+            connection.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
+        let foreign_key_violation: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+            [],
+            |row| row.get(0),
+        )?;
+        if integrity != "ok" || foreign_key_violation {
+            return Err(RecoveryError::DomainValidation);
+        }
+        if version == SCHEMA_VERSION {
+            crate::storage::verify_connection(&connection)?;
+            ensure_table_inventory(&connection)?;
+            verify_domain(&connection)?;
+        }
+        Ok(())
+    }
+
+    fn capture_evidence(
+        &self,
+        detected_at_ms: i64,
+        kind: IncidentKind,
+        messages: &[String],
+    ) -> Option<PrimaryCorruptionEvidence> {
+        self.incident_recorder.as_ref()?;
+        let metadata = fs::metadata(&self.primary_path).ok()?;
+        let db_sha256 = incident::file_sha256(&self.primary_path).ok()?;
+        Some(PrimaryCorruptionEvidence {
+            detected_at_ms,
+            kind,
+            messages: messages.to_vec(),
+            db_bytes: metadata.len(),
+            db_sha256,
+        })
+    }
+
+    /// Records one corruption incident for the primary, when recording is on.
+    ///
+    /// Returns the written path, or `None` when recording is disabled, the
+    /// evidence cannot be read, or an identical record already exists.
+    #[must_use]
+    pub fn record_incident(
+        &self,
+        kind: IncidentKind,
+        messages: &[String],
+        action: IncidentAction,
+        recheck: IncidentRecheck,
+        duration_ms: i64,
+    ) -> Option<PathBuf> {
+        let evidence = self.capture_evidence(now_millis(), kind, messages)?;
+        self.write_incident_record(&evidence, action, recheck, duration_ms)
+    }
+
+    fn write_incident_record(
+        &self,
+        evidence: &PrimaryCorruptionEvidence,
+        action: IncidentAction,
+        recheck: IncidentRecheck,
+        duration_ms: i64,
+    ) -> Option<PathBuf> {
+        let recorder = self.incident_recorder.as_ref()?;
+        let record = IncidentRecord {
+            detected_at_ms: evidence.detected_at_ms,
+            kind: evidence.kind,
+            integrity_messages: evidence.messages.clone(),
+            app_version: recorder.app_version.clone(),
+            db_bytes: evidence.db_bytes,
+            db_sha256: evidence.db_sha256.clone(),
+            action,
+            recheck,
+            duration_ms,
+        };
+        if self
+            .latest_incident()
+            .is_some_and(|latest| same_incident(&latest, &record))
+        {
+            return None;
+        }
+        incident::write_incident(&recorder.directory, &record).ok()
     }
 
     /// Publishes a sanitized point from the existing single database executor.
@@ -670,8 +1407,18 @@ impl RecoveryManager {
     ///
     /// Returns an error when the primary is unsafe or publication cannot be synced.
     pub fn quarantine_primary(&self) -> Result<Option<PathBuf>, RecoveryError> {
+        let started = Instant::now();
+        let evidence = self.capture_evidence(now_millis(), IncidentKind::Unrecoverable, &[]);
         let quarantine = self.stage_quarantine_primary()?;
         if let Some(quarantine) = quarantine.as_deref() {
+            if let Some(evidence) = &evidence {
+                self.write_incident_record(
+                    evidence,
+                    IncidentAction::Quarantined,
+                    IncidentRecheck::Failed,
+                    duration_millis(started.elapsed()),
+                );
+            }
             self.apply_quarantine_retention(now_millis(), Some(quarantine))?;
         }
         Ok(quarantine)
@@ -732,7 +1479,18 @@ impl RecoveryManager {
         if !self.scan()?.valid_points.is_empty() {
             return Err(RecoveryError::InvalidPoint);
         }
-        self.publish_primary(None)
+        let started = Instant::now();
+        let evidence = self.capture_evidence(now_millis(), IncidentKind::Unrecoverable, &[]);
+        self.publish_primary(None)?;
+        if let Some(evidence) = &evidence {
+            self.write_incident_record(
+                evidence,
+                IncidentAction::StartOver,
+                IncidentRecheck::Failed,
+                duration_millis(started.elapsed()),
+            );
+        }
+        Ok(())
     }
 
     fn publish_primary(&self, source: Option<&Path>) -> Result<(), RecoveryError> {
@@ -908,20 +1666,66 @@ impl RecoveryManager {
     }
 }
 
-fn classify_existing_primary(
-    path: &Path,
-    inventory: RecoveryInventory,
-) -> DatabaseStartupClassification {
-    match open_read_only_no_follow(path).and_then(|connection| {
-        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > SCHEMA_VERSION {
-            return Err(RecoveryError::FutureSchema);
+/// Classification of one existing primary with its corruption evidence.
+struct PrimaryInspection {
+    classification: DatabaseStartupClassification,
+    kind: IncidentKind,
+    messages: Vec<String>,
+}
+
+fn classify_existing_primary(path: &Path, inventory: RecoveryInventory) -> PrimaryInspection {
+    let connection = match open_read_only_no_follow(path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return PrimaryInspection {
+                classification: classify_primary_error(error, inventory),
+                kind: IncidentKind::Unrecoverable,
+                messages: Vec::new(),
+            };
         }
-        let integrity: String =
-            connection.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
-        if integrity != "ok" {
-            return Err(RecoveryError::InvalidPoint);
+    };
+    let version: i64 = match connection.pragma_query_value(None, "user_version", |row| row.get(0)) {
+        Ok(version) => version,
+        Err(error) => {
+            return PrimaryInspection {
+                classification: classify_primary_error(error.into(), inventory),
+                kind: IncidentKind::Unrecoverable,
+                messages: Vec::new(),
+            };
         }
+    };
+    if version > SCHEMA_VERSION {
+        return PrimaryInspection {
+            classification: DatabaseStartupClassification::Fatal(
+                DatabaseStartupIssue::FutureSchema,
+            ),
+            kind: IncidentKind::Unrecoverable,
+            messages: Vec::new(),
+        };
+    }
+    let report = match read_integrity_report(&connection) {
+        Ok(report) => report,
+        Err(error) => {
+            return PrimaryInspection {
+                classification: classify_primary_error(error.into(), inventory),
+                kind: IncidentKind::Unrecoverable,
+                messages: Vec::new(),
+            };
+        }
+    };
+    if report.classification != IntegrityClassification::Ok {
+        let classification = if report.classification == IntegrityClassification::IndexOnly {
+            DatabaseStartupClassification::Repairable(inventory, report.clone())
+        } else {
+            DatabaseStartupClassification::RecoveryRequired(inventory)
+        };
+        return PrimaryInspection {
+            classification,
+            kind: incident_kind(&report),
+            messages: report.messages,
+        };
+    }
+    let outcome = (|| -> Result<(), RecoveryError> {
         if version == SCHEMA_VERSION {
             configure_connection(&connection)?;
             ensure_table_inventory(&connection)?;
@@ -936,20 +1740,32 @@ fn classify_existing_primary(
             verify_domain(&connection)?;
         }
         Ok(())
-    }) {
-        Ok(()) => DatabaseStartupClassification::Ready,
-        Err(RecoveryError::FutureSchema) => {
+    })();
+    PrimaryInspection {
+        classification: match outcome {
+            Ok(()) => DatabaseStartupClassification::Ready,
+            Err(error) => classify_primary_error(error, inventory),
+        },
+        kind: IncidentKind::Unrecoverable,
+        messages: report.messages,
+    }
+}
+
+fn classify_primary_error(
+    error: RecoveryError,
+    inventory: RecoveryInventory,
+) -> DatabaseStartupClassification {
+    match error {
+        RecoveryError::FutureSchema => {
             DatabaseStartupClassification::Fatal(DatabaseStartupIssue::FutureSchema)
         }
-        Err(RecoveryError::UnsafeFilesystemObject) => {
+        RecoveryError::UnsafeFilesystemObject => {
             DatabaseStartupClassification::Fatal(DatabaseStartupIssue::UnsafePath)
         }
-        Err(RecoveryError::Filesystem(error))
-            if error.kind() == io::ErrorKind::PermissionDenied =>
-        {
+        RecoveryError::Filesystem(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             DatabaseStartupClassification::Fatal(DatabaseStartupIssue::Permission)
         }
-        Err(RecoveryError::Database(rusqlite::Error::SqliteFailure(error, _))) => {
+        RecoveryError::Database(rusqlite::Error::SqliteFailure(error, _)) => {
             use rusqlite::ErrorCode;
             match error.code {
                 ErrorCode::PermissionDenied | ErrorCode::ReadOnly => {
@@ -964,13 +1780,11 @@ fn classify_existing_primary(
                 _ => DatabaseStartupClassification::Fatal(DatabaseStartupIssue::Unavailable),
             }
         }
-        Err(
-            RecoveryError::InvalidPoint
-            | RecoveryError::UnknownTable
-            | RecoveryError::DomainValidation
-            | RecoveryError::Database(_),
-        ) => DatabaseStartupClassification::RecoveryRequired(inventory),
-        Err(_) => DatabaseStartupClassification::Fatal(DatabaseStartupIssue::Unavailable),
+        RecoveryError::InvalidPoint
+        | RecoveryError::UnknownTable
+        | RecoveryError::DomainValidation
+        | RecoveryError::Database(_) => DatabaseStartupClassification::RecoveryRequired(inventory),
+        _ => DatabaseStartupClassification::Fatal(DatabaseStartupIssue::Unavailable),
     }
 }
 
@@ -980,20 +1794,24 @@ fn validate_live_database(path: &Path) -> Result<(), RecoveryError> {
     configure_connection(&connection)?;
     ensure_schema_version(&connection)?;
     ensure_table_inventory(&connection)?;
-    let integrity: String =
-        connection.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
+    let report = read_integrity_report(&connection)?;
     let foreign_key_violation: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
         [],
         |row| row.get(0),
     )?;
-    if integrity != "ok" || foreign_key_violation {
+    if report.classification != IntegrityClassification::Ok || foreign_key_violation {
         return Err(RecoveryError::DomainValidation);
     }
     verify_domain(&connection)
 }
 
 fn copy_private_file(source: &Path, destination: &Path) -> Result<(), RecoveryError> {
+    copy_private_file_bytes(source, destination)?;
+    Ok(())
+}
+
+fn copy_private_file_bytes(source: &Path, destination: &Path) -> io::Result<()> {
     let mut input = OpenOptions::new().read(true).open(source)?;
     let mut output = OpenOptions::new()
         .write(true)
@@ -1001,8 +1819,7 @@ fn copy_private_file(source: &Path, destination: &Path) -> Result<(), RecoveryEr
         .open(destination)?;
     io::copy(&mut input, &mut output)?;
     set_private_file_mode(destination)?;
-    output.sync_all()?;
-    Ok(())
+    output.sync_all()
 }
 
 fn sanitize_point(
@@ -1090,8 +1907,7 @@ fn validate_point_contents(
 }
 
 fn verify_database(connection: &Connection) -> Result<(), RecoveryError> {
-    let integrity: String =
-        connection.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
+    let report = read_integrity_report(connection)?;
     let foreign_key_violation: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
         [],
@@ -1102,7 +1918,10 @@ fn verify_database(connection: &Connection) -> Result<(), RecoveryError> {
         [],
         |row| row.get(0),
     )?;
-    if integrity != "ok" || foreign_key_violation || history_count != 0 {
+    if report.classification != IntegrityClassification::Ok
+        || foreign_key_violation
+        || history_count != 0
+    {
         return Err(RecoveryError::DomainValidation);
     }
     Ok(())
@@ -1559,11 +2378,27 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(i64::MAX)
+        .unwrap_or_default()
 }
 
 fn duration_millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+fn incident_kind(report: &IntegrityReport) -> IncidentKind {
+    match report.classification {
+        IntegrityClassification::IndexOnly => IncidentKind::IndexOnly,
+        IntegrityClassification::Ok | IntegrityClassification::Unrecoverable => {
+            IncidentKind::Unrecoverable
+        }
+    }
+}
+
+fn same_incident(latest: &IncidentRecord, candidate: &IncidentRecord) -> bool {
+    latest.kind == candidate.kind
+        && latest.action == candidate.action
+        && latest.recheck == candidate.recheck
+        && latest.db_sha256 == candidate.db_sha256
 }
 
 #[cfg(test)]
@@ -1571,18 +2406,20 @@ mod tests {
     use std::{
         fs,
         fs::OpenOptions,
-        io::Write,
+        io::{Read, Seek, SeekFrom, Write},
         sync::{Arc, Mutex},
         time::Duration,
     };
 
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OpenFlags};
     use tempfile::TempDir;
 
     use super::{
-        DatabaseStartupClassification, DatabaseStartupIssue, MAX_VALID_POINTS, RecoveryCoordinator,
-        RecoveryError, RecoveryEventSink, RecoveryFailureCode, RecoveryFailurePoint,
-        RecoveryHealth, RecoveryHealthKind, RecoveryManager, RecoveryPointId,
+        DatabaseStartupClassification, DatabaseStartupIssue, IntegrityClassification,
+        MAX_VALID_POINTS, NeverIdleRecoveryActivityProbe, RECOVERY_QUIET_PERIOD,
+        RecoveryActivityProbe, RecoveryCoordinator, RecoveryError, RecoveryEventSink,
+        RecoveryFailureCode, RecoveryFailurePoint, RecoveryHealth, RecoveryHealthKind,
+        RecoveryManager, RecoveryPointId, RecoverySelfCheckSchedule, RepairAttempt, RepairRecheck,
         classify_recovery_startup_error, create_private_file, sanitize_point,
     };
     use crate::{
@@ -1591,6 +2428,7 @@ mod tests {
             ApiKey, CompletionState, DeliveryState, ImagesGenerationModel, ImagesGenerationTimeout,
             McpImageCapacityWarningThreshold, UpstreamAttemptId,
         },
+        incident::{IncidentAction, IncidentKind, IncidentRecheck},
         storage::{
             AttemptHistoryRecord, BalanceQueryInput, CodexModelRecord, CreateRouteInput,
             DatabaseExecutor, RequestHistoryRecord, SCHEMA_VERSION,
@@ -1763,11 +2601,28 @@ mod tests {
         .expect("coordinator becomes protected");
     }
 
+    async fn start_test_coordinator(
+        manager: RecoveryManager,
+        database: DatabaseExecutor,
+        sink: Arc<RecordingRecoverySink>,
+        quiet_period: Duration,
+    ) -> Arc<RecoveryCoordinator> {
+        RecoveryCoordinator::start_with_schedule(
+            manager,
+            database,
+            sink,
+            Arc::new(NeverIdleRecoveryActivityProbe),
+            RecoverySelfCheckSchedule::default(),
+            quiet_period,
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn coordinator_attempts_initial_point_and_coalesces_latest_revision() {
         let (_root, _primary, database, manager) = setup();
         let sink = Arc::new(RecordingRecoverySink::default());
-        let coordinator = RecoveryCoordinator::start_with_quiet_period(
+        let coordinator = start_test_coordinator(
             manager.clone(),
             database.clone(),
             sink.clone(),
@@ -1822,7 +2677,7 @@ mod tests {
         assert!(before.valid_points.is_empty());
         assert_eq!(before.invalid_point_count, 1);
 
-        let coordinator = RecoveryCoordinator::start_with_quiet_period(
+        let coordinator = start_test_coordinator(
             manager.clone(),
             database,
             Arc::new(RecordingRecoverySink::default()),
@@ -2197,7 +3052,7 @@ mod tests {
             .expect("second");
         database.set_fallback_enabled(true).await.expect("fallback");
         let captured = database.routing_state().await.expect("routing state");
-        let coordinator = RecoveryCoordinator::start_with_quiet_period(
+        let coordinator = start_test_coordinator(
             manager.clone(),
             database.clone(),
             Arc::new(RecordingRecoverySink::default()),
@@ -2857,5 +3712,572 @@ mod tests {
             manager.scan(),
             Err(RecoveryError::UnsafeFilesystemObject)
         ));
+    }
+
+    const KEYSET_INDEX: &str = "proxy_requests_keyset_idx";
+
+    struct FixedActivityProbe(bool);
+
+    impl RecoveryActivityProbe for FixedActivityProbe {
+        fn idle_for(&self, _minimum: Duration) -> bool {
+            self.0
+        }
+    }
+
+    async fn record_synthetic_request(database: &DatabaseExecutor, index: i64) {
+        database
+            .record_request_history(RequestHistoryRecord {
+                request_id: format!("synthetic-request-{index}"),
+                started_at_ms: 1_700_000_000_000 + index,
+                finished_at_ms: 1_700_000_001_000 + index,
+                turn_id: None,
+                requested_model: Some("synthetic-model".to_owned()),
+                reasoning_effort: None,
+                requested_service_tier: None,
+                actual_model: None,
+                actual_service_tier: None,
+                final_route_id: None,
+                final_route_name: None,
+                streaming: false,
+                completion_state: CompletionState::Completed,
+                http_status: Some(200),
+                error_category: None,
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                total_tokens: Some(2),
+                cached_input_tokens: None,
+                cache_write_input_tokens: None,
+                total_latency_ms: Some(10),
+                first_output_latency_ms: Some(5),
+                metadata_complete: true,
+                fallback_stop_reason: None,
+                fallback_stop_target_route_id: None,
+                fallback_stop_target_route_name: None,
+                attempts: Vec::new(),
+            })
+            .await
+            .expect("history");
+    }
+
+    fn request_count(path: &std::path::Path) -> i64 {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("read-only connection");
+        connection
+            .query_row("SELECT COUNT(*) FROM proxy_requests", [], |row| row.get(0))
+            .expect("request count")
+    }
+
+    fn page_geometry(path: &std::path::Path, object: &str, name: &str) -> (u64, usize) {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("read-only connection");
+        let page_size: i64 = connection
+            .pragma_query_value(None, "page_size", |row| row.get(0))
+            .expect("page size");
+        let root_page: i64 = connection
+            .query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+                [object, name],
+                |row| row.get(0),
+            )
+            .expect("root page");
+        (
+            u64::try_from((root_page - 1) * page_size).expect("page offset"),
+            usize::try_from(page_size).expect("page size"),
+        )
+    }
+
+    /// Splices one b-tree root page from an older snapshot of the same database.
+    ///
+    /// This reproduces the 2026-09-07 shape: the index page is internally valid
+    /// but comes from a previous generation, so cells for newer rows are absent
+    /// while the table, file header, and page count stay intact.
+    fn splice_root_page(primary: &std::path::Path, snapshot: &std::path::Path, index: &str) {
+        let (offset, length) = page_geometry(snapshot, "index", index);
+        let mut page = vec![0_u8; length];
+        {
+            let mut file = fs::File::open(snapshot).expect("snapshot file");
+            file.seek(SeekFrom::Start(offset)).expect("snapshot seek");
+            file.read_exact(&mut page).expect("snapshot page");
+        }
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .open(primary)
+                .expect("primary file");
+            file.seek(SeekFrom::Start(offset)).expect("primary seek");
+            file.write_all(&page).expect("primary page");
+            file.sync_all().expect("primary sync");
+        }
+    }
+
+    /// Overwrites the first bytes of one b-tree root page with an invalid type.
+    fn damage_root_page_header(primary: &std::path::Path, object: &str, name: &str) {
+        let (offset, _) = page_geometry(primary, object, name);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(primary)
+            .expect("primary file");
+        file.seek(SeekFrom::Start(offset)).expect("page seek");
+        file.write_all(&[0x7f_u8; 16]).expect("damage page");
+        file.sync_all().expect("primary sync");
+    }
+
+    /// Builds a closed primary whose keyset index root page comes from one row
+    /// earlier, so the newest row is missing from that index.
+    async fn build_index_only_corruption(root: &std::path::Path) -> std::path::PathBuf {
+        let primary = root.join("data/router.sqlite3");
+        let snapshot = root.join("snapshot.sqlite3");
+        let database = DatabaseExecutor::open(&primary).expect("database");
+        for index in 0..4 {
+            record_synthetic_request(&database, index).await;
+        }
+        drop(database);
+        fs::copy(&primary, &snapshot).expect("snapshot copy");
+        let database = DatabaseExecutor::open(&primary).expect("database");
+        record_synthetic_request(&database, 4).await;
+        drop(database);
+        splice_root_page(&primary, &snapshot, KEYSET_INDEX);
+        primary
+    }
+
+    #[test]
+    fn integrity_classification_allows_only_index_membership_messages() {
+        let incident = vec![
+            "index proxy_requests_model_keyset_idx stores an imprecise floating-point value for row 5195"
+                .to_owned(),
+            "row 5195 missing from index proxy_requests_model_keyset_idx".to_owned(),
+            "row 5477 missing from index proxy_requests_model_keyset_idx".to_owned(),
+            "row 118113 missing from index proxy_requests_keyset_idx".to_owned(),
+            "wrong # of entries in index proxy_requests_route_keyset_idx".to_owned(),
+        ];
+        assert_eq!(
+            super::classify_integrity_output(&incident),
+            IntegrityClassification::IndexOnly
+        );
+        assert_eq!(
+            super::classify_integrity_output(&["ok".to_owned()]),
+            IntegrityClassification::Ok
+        );
+        assert_eq!(
+            super::classify_integrity_output(&[]),
+            IntegrityClassification::Ok
+        );
+        assert_eq!(
+            super::classify_integrity_output(&[
+                "ok".to_owned(),
+                "row 1 missing from index any_idx".to_owned()
+            ]),
+            IntegrityClassification::IndexOnly
+        );
+        for message in [
+            "Page 2: btreeInitPage() returns error code 11",
+            "Page 5 is never used",
+            "free space corruption at offset 100",
+            "unable to get page 5 of 9",
+            "database disk image is malformed",
+            "row 5 missing from index",
+            "row five missing from index any_idx",
+            "row 5 missing from index any idx",
+            "index any_idx stores an imprecise floating-point value for row",
+            "index any idx stores an imprecise floating-point value for row 5",
+            "integers any_idx stores an imprecise floating-point value for row 5",
+            "<4 more messages truncated>",
+        ] {
+            assert_eq!(
+                super::classify_integrity_output(&[message.to_owned()]),
+                IntegrityClassification::Unrecoverable,
+                "{message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_classification_marks_index_only_corruption_repairable() {
+        let root = tempfile::tempdir().expect("root");
+        let primary = build_index_only_corruption(root.path()).await;
+        let manager = RecoveryManager::new(&primary);
+        match manager.classify_startup().expect("classification") {
+            DatabaseStartupClassification::Repairable(inventory, report) => {
+                assert_eq!(report.classification, IntegrityClassification::IndexOnly);
+                assert!(!report.messages.is_empty());
+                assert!(inventory.valid_points.is_empty());
+            }
+            other => panic!("expected a repairable primary, got {other:?}"),
+        }
+        assert!(
+            DatabaseExecutor::open(&primary).is_err(),
+            "the open path must still reject an index-inconsistent primary"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_repair_rebuilds_index_only_corruption_and_keeps_every_row() {
+        let root = tempfile::tempdir().expect("root");
+        let log_directory = root.path().join("logs");
+        let primary = build_index_only_corruption(root.path()).await;
+
+        let report = RecoveryManager::new(&primary)
+            .inspect_primary_integrity()
+            .expect("integrity report");
+        assert_eq!(report.classification, IntegrityClassification::IndexOnly);
+        assert!(
+            report
+                .messages
+                .iter()
+                .all(|message| message.contains("missing from index")),
+            "{:?}",
+            report.messages
+        );
+
+        let rows_before = request_count(&primary);
+        assert_eq!(rows_before, 5);
+        let bytes_before = fs::metadata(&primary).expect("metadata").len();
+        let sha_before = crate::incident::file_sha256(&primary).expect("sha256");
+
+        let manager =
+            RecoveryManager::new(&primary).with_incident_recording(&log_directory, "0.4.2-test");
+        let outcome = manager.repair_primary_closed().expect("repair outcome");
+        assert_eq!(outcome.attempts, vec![RepairAttempt::Reindex]);
+        assert_eq!(outcome.recheck, RepairRecheck::Ok);
+        let quarantine = outcome.quarantine.expect("quarantine evidence");
+        assert!(quarantine.exists());
+        assert_eq!(
+            fs::metadata(&quarantine)
+                .expect("quarantine metadata")
+                .len(),
+            bytes_before
+        );
+        assert_eq!(
+            crate::incident::file_sha256(&quarantine).expect("quarantine sha256"),
+            sha_before
+        );
+        assert_eq!(request_count(&primary), rows_before);
+
+        let recheck = manager
+            .inspect_primary_integrity()
+            .expect("recheck integrity");
+        assert_eq!(recheck.classification, IntegrityClassification::Ok);
+
+        let record = crate::incident::read_latest_incident(&log_directory)
+            .expect("incident read")
+            .expect("incident record");
+        assert_eq!(record.kind, IncidentKind::IndexOnly);
+        assert_eq!(record.action, IncidentAction::Repaired);
+        assert_eq!(record.recheck, IncidentRecheck::Ok);
+        assert_eq!(record.db_bytes, bytes_before);
+        assert_eq!(record.db_sha256, sha_before);
+        assert_eq!(record.app_version, "0.4.2-test");
+        assert!(record.detected_at_ms > 0);
+        assert!(!record.integrity_messages.is_empty());
+
+        let quarantines = fs::read_dir(manager.recovery_dir())
+            .expect("recovery dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("quarantine-")
+            })
+            .count();
+        assert_eq!(quarantines, 1);
+    }
+
+    #[tokio::test]
+    async fn closed_repair_accepts_an_upgrade_pending_primary() {
+        let root = tempfile::tempdir().expect("root");
+        let primary = build_index_only_corruption(root.path()).await;
+        // A primary that this binary must still migrate: the recheck may not
+        // demand the current schema or its domain surface.
+        let connection = Connection::open(&primary).expect("database");
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .expect("pending upgrade version");
+        drop(connection);
+
+        let manager = RecoveryManager::new(&primary);
+        assert!(matches!(
+            manager.classify_startup().expect("classification"),
+            DatabaseStartupClassification::Repairable(_, _)
+        ));
+        let outcome = manager.repair_primary_closed().expect("repair outcome");
+        assert_eq!(outcome.attempts, vec![RepairAttempt::Reindex]);
+        assert_eq!(outcome.recheck, RepairRecheck::Ok);
+
+        let connection = Connection::open(&primary).expect("database");
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION - 1, "repair must not migrate");
+    }
+
+    #[tokio::test]
+    async fn repair_refuses_page_level_damage_without_modifying_the_primary() {
+        let root = tempfile::tempdir().expect("root");
+        let log_directory = root.path().join("logs");
+        let primary = root.path().join("data/router.sqlite3");
+        let database = DatabaseExecutor::open(&primary).expect("database");
+        for index in 0..3 {
+            record_synthetic_request(&database, index).await;
+        }
+        drop(database);
+        damage_root_page_header(&primary, "table", "proxy_requests");
+        let bytes_before = fs::read(&primary).expect("primary bytes");
+        let sha_before = crate::incident::file_sha256(&primary).expect("sha256");
+
+        let manager =
+            RecoveryManager::new(&primary).with_incident_recording(&log_directory, "0.4.2-test");
+        let report = manager
+            .inspect_primary_integrity()
+            .expect("integrity report");
+        assert_eq!(
+            report.classification,
+            IntegrityClassification::Unrecoverable,
+            "{:?}",
+            report.messages
+        );
+        assert!(matches!(
+            manager.classify_startup().expect("classification"),
+            DatabaseStartupClassification::RecoveryRequired(_)
+        ));
+
+        let outcome = manager.repair_primary_closed().expect("repair outcome");
+        assert!(outcome.attempts.is_empty());
+        assert_eq!(outcome.recheck, RepairRecheck::Failed);
+        assert_eq!(outcome.quarantine, None);
+        assert_eq!(fs::read(&primary).expect("primary bytes"), bytes_before);
+        assert_eq!(
+            crate::incident::file_sha256(&primary).expect("sha256"),
+            sha_before
+        );
+        assert!(!manager.recovery_dir().exists());
+    }
+
+    #[tokio::test]
+    async fn startup_records_unrecoverable_corruption_once() {
+        let root = tempfile::tempdir().expect("root");
+        let log_directory = root.path().join("logs");
+        let primary = root.path().join("data/router.sqlite3");
+        let database = DatabaseExecutor::open(&primary).expect("database");
+        record_synthetic_request(&database, 0).await;
+        drop(database);
+        damage_root_page_header(&primary, "table", "proxy_requests");
+
+        let manager =
+            RecoveryManager::new(&primary).with_incident_recording(&log_directory, "0.4.2-test");
+        assert!(matches!(
+            manager.classify_startup().expect("first classification"),
+            DatabaseStartupClassification::RecoveryRequired(_)
+        ));
+        assert!(matches!(
+            manager.classify_startup().expect("second classification"),
+            DatabaseStartupClassification::RecoveryRequired(_)
+        ));
+        let records = fs::read_dir(&log_directory)
+            .expect("log directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("incident-"))
+            .count();
+        assert_eq!(records, 1, "an unchanged corruption records exactly once");
+        let record = crate::incident::read_latest_incident(&log_directory)
+            .expect("incident read")
+            .expect("incident record");
+        assert_eq!(record.kind, IncidentKind::Unrecoverable);
+        assert_eq!(record.action, IncidentAction::RecoveryRequired);
+        assert_eq!(record.recheck, IncidentRecheck::Failed);
+    }
+
+    #[tokio::test]
+    async fn runtime_self_check_repairs_index_corruption_only_while_idle() {
+        let root = tempfile::tempdir().expect("root");
+        let log_directory = root.path().join("logs");
+        let primary = root.path().join("data/router.sqlite3");
+        let snapshot = root.path().join("snapshot.sqlite3");
+        let database = DatabaseExecutor::open(&primary).expect("database");
+        for index in 0..4 {
+            record_synthetic_request(&database, index).await;
+        }
+        fs::copy(&primary, &snapshot).expect("snapshot copy");
+        record_synthetic_request(&database, 4).await;
+        splice_root_page(&primary, &snapshot, KEYSET_INDEX);
+
+        let manager =
+            RecoveryManager::new(&primary).with_incident_recording(&log_directory, "0.4.2-test");
+        let sink = Arc::new(RecordingRecoverySink::default());
+        let schedule = RecoverySelfCheckSchedule {
+            initial_delay: Duration::from_millis(1),
+            interval: Duration::from_millis(20),
+            idle_minimum: Duration::from_millis(0),
+        };
+        let coordinator = RecoveryCoordinator::start_with_schedule(
+            manager.clone(),
+            database.clone(),
+            sink,
+            Arc::new(FixedActivityProbe(true)),
+            schedule,
+            RECOVERY_QUIET_PERIOD,
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let projected = coordinator
+                    .health()
+                    .last_incident
+                    .is_some_and(|incident| incident.action == IncidentAction::Repaired);
+                if projected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("self-check repairs runtime corruption");
+        assert_eq!(request_count(&primary), 5);
+        assert_eq!(
+            manager
+                .inspect_primary_integrity()
+                .expect("integrity report")
+                .classification,
+            IntegrityClassification::Ok
+        );
+        let record = crate::incident::read_latest_incident(&log_directory)
+            .expect("incident read")
+            .expect("incident record");
+        assert_eq!(record.action, IncidentAction::Repaired);
+        assert_eq!(record.recheck, IncidentRecheck::Ok);
+        assert_eq!(
+            coordinator
+                .health()
+                .last_incident
+                .expect("health carries the incident")
+                .action,
+            IncidentAction::Repaired
+        );
+        assert!(coordinator.shutdown(Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test]
+    async fn runtime_self_check_skips_while_the_activity_probe_reports_work() {
+        let root = tempfile::tempdir().expect("root");
+        let log_directory = root.path().join("logs");
+        let primary = root.path().join("data/router.sqlite3");
+        let snapshot = root.path().join("snapshot.sqlite3");
+        let database = DatabaseExecutor::open(&primary).expect("database");
+        for index in 0..4 {
+            record_synthetic_request(&database, index).await;
+        }
+        fs::copy(&primary, &snapshot).expect("snapshot copy");
+        record_synthetic_request(&database, 4).await;
+        splice_root_page(&primary, &snapshot, KEYSET_INDEX);
+
+        let manager =
+            RecoveryManager::new(&primary).with_incident_recording(&log_directory, "0.4.2-test");
+        let schedule = RecoverySelfCheckSchedule {
+            initial_delay: Duration::from_millis(1),
+            interval: Duration::from_millis(20),
+            idle_minimum: Duration::from_millis(0),
+        };
+        let coordinator = RecoveryCoordinator::start_with_schedule(
+            manager.clone(),
+            database.clone(),
+            Arc::new(RecordingRecoverySink::default()),
+            Arc::new(FixedActivityProbe(false)),
+            schedule,
+            RECOVERY_QUIET_PERIOD,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            manager
+                .inspect_primary_integrity()
+                .expect("integrity report")
+                .classification,
+            IntegrityClassification::IndexOnly
+        );
+        assert_eq!(request_count(&primary), 5);
+        assert_eq!(
+            crate::incident::read_latest_incident(&log_directory).expect("incident read"),
+            None
+        );
+        let quarantines = fs::read_dir(manager.recovery_dir())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("quarantine-")
+                    })
+                    .count()
+            })
+            .unwrap_or_default();
+        assert_eq!(quarantines, 0);
+        assert!(coordinator.shutdown(Duration::from_secs(2)).await);
+    }
+
+    #[test]
+    fn directory_lock_is_exclusive_and_reusable() {
+        let root = tempfile::tempdir().expect("root");
+        let primary = root.path().join("data/router.sqlite3");
+        let manager = RecoveryManager::new(&primary);
+        let lock = manager.acquire_directory_lock().expect("first lock");
+        let lock_path = lock.path().to_path_buf();
+        assert_eq!(
+            lock_path.file_name().and_then(|name| name.to_str()),
+            Some("router.sqlite3.lock")
+        );
+        assert!(matches!(
+            manager.acquire_directory_lock(),
+            Err(RecoveryError::DirectoryInUse)
+        ));
+        assert_eq!(
+            classify_recovery_startup_error(&RecoveryError::DirectoryInUse),
+            Some(DatabaseStartupIssue::DirectoryInUse)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&lock_path)
+                    .expect("lock metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        drop(lock);
+        let again = manager
+            .acquire_directory_lock()
+            .expect("lock after release");
+        assert_eq!(again.path(), lock_path.as_path());
+    }
+
+    #[test]
+    fn recovery_scan_preserves_the_directory_lock_and_unknown_files() {
+        let root = tempfile::tempdir().expect("root");
+        let primary = root.path().join("data/router.sqlite3");
+        fs::create_dir_all(primary.parent().expect("parent")).expect("parent");
+        let manager = RecoveryManager::new(&primary);
+        let lock = manager.acquire_directory_lock().expect("lock");
+        manager.ensure_recovery_dir().expect("recovery dir");
+        let unknown = manager.recovery_dir().join("notes.txt");
+        fs::write(&unknown, b"leave intact").expect("unknown file");
+        manager.scan().expect("scan");
+        manager
+            .cleanup_recognized_temporaries()
+            .expect("cleanup temporaries");
+        manager
+            .apply_point_retention(super::now_millis())
+            .expect("point retention");
+        assert!(lock.path().exists());
+        assert!(unknown.exists());
     }
 }

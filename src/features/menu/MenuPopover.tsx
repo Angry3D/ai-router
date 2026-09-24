@@ -80,6 +80,7 @@ const databaseIssueMenuLabels: Record<DatabaseStartupIssue, string> = {
   future_schema: "数据库版本过新",
   unsafe_path: "数据库路径不安全",
   unavailable: "数据库不可用",
+  directory_in_use: "数据目录被占用",
 };
 
 function databaseIssueLabel(snapshot: BootstrapSnapshotDto) {

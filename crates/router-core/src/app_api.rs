@@ -11,6 +11,7 @@ use crate::{
         BalanceQueryPolicy, CompletionState, DeliveryState, ModelVerdict, OutboundProxyConfig,
         RouteId, ValidationError,
     },
+    incident::{IncidentAction, IncidentRecord},
     recovery::{DatabaseStartupIssue, RecoveryHealth, RecoveryHealthKind},
     state::{BootstrapSnapshotDto, FallbackStateDto, RouteSummaryDto},
     storage::{
@@ -1164,6 +1165,7 @@ pub struct RecoveryHealthDto {
     pub latest_success_at_ms: Option<i64>,
     #[ts(type = "number")]
     pub valid_point_count: usize,
+    pub last_incident: Option<RecoveryIncidentDto>,
 }
 
 impl From<&RecoveryHealth> for RecoveryHealthDto {
@@ -1172,6 +1174,50 @@ impl From<&RecoveryHealth> for RecoveryHealthDto {
             kind: health.kind,
             latest_success_at_ms: health.latest_success_at_ms,
             valid_point_count: health.valid_point_count,
+            last_incident: health.last_incident.as_ref().map(RecoveryIncidentDto::from),
+        }
+    }
+}
+
+/// Recovery action persisted by the newest corruption incident.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum RecoveryIncidentAction {
+    Repaired,
+    Quarantined,
+    RecoveryRequired,
+    StartOver,
+}
+
+impl From<IncidentAction> for RecoveryIncidentAction {
+    fn from(action: IncidentAction) -> Self {
+        match action {
+            IncidentAction::Repaired => Self::Repaired,
+            IncidentAction::Quarantined => Self::Quarantined,
+            IncidentAction::RecoveryRequired => Self::RecoveryRequired,
+            IncidentAction::StartOver => Self::StartOver,
+        }
+    }
+}
+
+/// Newest corruption incident projected for the settings surface.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct RecoveryIncidentDto {
+    #[ts(type = "number")]
+    pub detected_at_ms: i64,
+    pub action: RecoveryIncidentAction,
+    pub repaired: bool,
+}
+
+impl From<&IncidentRecord> for RecoveryIncidentDto {
+    fn from(record: &IncidentRecord) -> Self {
+        Self {
+            detected_at_ms: record.detected_at_ms,
+            action: RecoveryIncidentAction::from(record.action),
+            repaired: record.action == IncidentAction::Repaired,
         }
     }
 }
@@ -1324,6 +1370,63 @@ mod tests {
             dto.attribution[0].redirected_total_tokens,
             (u64::MAX - 7).to_string()
         );
+    }
+
+    #[test]
+    fn recovery_health_dto_projects_the_newest_incident() {
+        use super::{RecoveryHealthDto, RecoveryIncidentAction};
+        use crate::{
+            incident::{IncidentAction, IncidentKind, IncidentRecheck, IncidentRecord},
+            recovery::{RecoveryHealth, RecoveryHealthKind},
+        };
+
+        let health = RecoveryHealth {
+            kind: RecoveryHealthKind::Protected,
+            latest_success_at_ms: Some(1_000),
+            valid_point_count: 2,
+            live_critical_revision: 7,
+            covered_critical_revision: Some(7),
+            last_failure: None,
+            last_incident: None,
+        };
+        let empty = serde_json::to_value(RecoveryHealthDto::from(&health)).expect("health JSON");
+        assert_eq!(empty["lastIncident"], json!(null));
+
+        let incident = |action: IncidentAction| IncidentRecord {
+            detected_at_ms: 1_788_744_560_303,
+            kind: IncidentKind::IndexOnly,
+            integrity_messages: vec!["row 5 missing from index any_idx".to_owned()],
+            app_version: "0.4.2-test".to_owned(),
+            db_bytes: 1,
+            db_sha256: "0".repeat(64),
+            action,
+            recheck: IncidentRecheck::Ok,
+            duration_ms: 10,
+        };
+        let repaired = serde_json::to_value(RecoveryHealthDto::from(&RecoveryHealth {
+            last_incident: Some(incident(IncidentAction::Repaired)),
+            ..health.clone()
+        }))
+        .expect("health JSON");
+        assert_eq!(
+            repaired["lastIncident"],
+            json!({
+                "detectedAtMs": 1_788_744_560_303_i64,
+                "action": "repaired",
+                "repaired": true,
+            })
+        );
+        assert_eq!(repaired["kind"], json!("protected"));
+        assert_eq!(repaired["validPointCount"], json!(2));
+
+        let required = RecoveryHealthDto::from(&RecoveryHealth {
+            last_incident: Some(incident(IncidentAction::RecoveryRequired)),
+            ..health
+        });
+        let last = required.last_incident.expect("incident");
+        assert_eq!(last.action, RecoveryIncidentAction::RecoveryRequired);
+        assert!(!last.repaired);
+        assert_eq!(last.detected_at_ms, 1_788_744_560_303);
     }
 
     #[test]

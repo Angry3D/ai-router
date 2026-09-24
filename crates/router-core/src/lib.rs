@@ -6,6 +6,7 @@ pub mod balance;
 pub mod codex_catalog;
 pub mod codex_config;
 pub mod domain;
+pub mod incident;
 pub mod lifecycle;
 pub mod pricing;
 pub mod proxy;

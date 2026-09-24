@@ -870,6 +870,38 @@ impl DatabaseExecutor {
         self.critical_revision_sender.subscribe()
     }
 
+    /// Runs one job on the dedicated database thread and blocks until it ends.
+    ///
+    /// Recovery uses this for file maintenance that must not introduce a second
+    /// writer while the executor keeps the only database connection open. The
+    /// caller must already run on a blocking thread: a job that cannot be
+    /// queued immediately and a job that never returns would otherwise block an
+    /// asynchronous worker.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called from an asynchronous execution context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::ExecutorClosed`] when the database thread has
+    /// stopped, or the job's own storage error.
+    pub fn blocking_maintenance<T, F>(&self, operation: F) -> Result<T, StorageError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, StorageError> + Send + 'static,
+    {
+        let (reply_sender, reply_receiver) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .blocking_send(Box::new(move |connection| {
+                let _ = reply_sender.send(operation(connection));
+            }))
+            .map_err(|_| StorageError::ExecutorClosed)?;
+        reply_receiver
+            .recv()
+            .map_err(|_| StorageError::ExecutorClosed)?
+    }
+
     /// Returns the durable revision represented by the current live database.
     ///
     /// # Errors
@@ -4852,15 +4884,25 @@ fn current_critical_revision(connection: &Connection) -> Result<u64, StorageErro
     u64::try_from(revision).map_err(|_| StorageError::Initialization)
 }
 
-fn verify_connection(connection: &Connection) -> Result<(), StorageError> {
+/// Verifies the complete live-database contract on an open connection.
+///
+/// Recovery reuses this helper so a post-repair recheck has exactly the same
+/// PRAGMA, integrity, foreign-key, and domain-entry contract as the executor
+/// open path.
+///
+/// # Errors
+///
+/// Returns [`StorageError::Initialization`] when any required PRAGMA, the
+/// `pragma integrity_check` report, the foreign-key check, or the persisted
+/// fallback configuration is not exactly as required.
+pub(crate) fn verify_connection(connection: &Connection) -> Result<(), StorageError> {
     let journal_mode: String =
         connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     let synchronous: i64 = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
     let foreign_keys: i64 =
         connection.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
     let auto_vacuum: i64 = connection.pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
-    let integrity: String =
-        connection.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
+    let integrity = crate::recovery::read_integrity_report(connection)?;
     let foreign_key_violation: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
         [],
@@ -4872,7 +4914,7 @@ fn verify_connection(connection: &Connection) -> Result<(), StorageError> {
         || synchronous != 2
         || foreign_keys != 1
         || auto_vacuum != 2
-        || integrity != "ok"
+        || integrity.classification != crate::recovery::IntegrityClassification::Ok
         || foreign_key_violation
     {
         return Err(StorageError::Initialization);

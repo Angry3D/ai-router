@@ -87,6 +87,7 @@ function renderWithData(view: "menu" | "settings") {
       kind: "protected",
       latestSuccessAtMs: null,
       validPointCount: 1,
+      lastIncident: null,
     },
   });
   return render(

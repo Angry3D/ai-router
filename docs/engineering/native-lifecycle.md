@@ -35,10 +35,15 @@ AI Router 是 `Accessory` 激活策略的菜单栏应用。`menu` WebView 启动
 ## 构建
 
 ```sh
+pnpm tauri:dev
 pnpm tauri:qa:dev
 pnpm tauri:qa:build
 pnpm tauri:prod:build
 ```
+
+`pnpm tauri:dev` 与 `pnpm tauri:qa:dev` 都使用 QA 标识；debug 构建若使用生产标识
+（`com.relax.airouter`）会在 setup 阶段 fail closed，避免开发进程触碰生产数据目录和真实 Codex
+配置。原生破坏性验收只用 QA bundle 与合成数据。
 
 普通生产、QA 和 CI source 构建统一使用根 `target/`，只生成 `.app`，且不消费 release secret。
 生产和 QA 构建分别检查名称、identifier、图标和最低 macOS 版本。受保护的 tag workflow 使用独立

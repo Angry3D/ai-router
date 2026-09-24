@@ -34,7 +34,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.11"
 subtle = "2"
 thiserror = "2"
-time = { version = "0.3", features = ["parsing"] }
+time = { version = "0.3", features = ["parsing", "formatting", "local-offset"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 ts-rs = { version = "11", features = ["serde-compat"] }
