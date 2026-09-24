@@ -295,6 +295,34 @@ fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
     value
 }
 
+/// Formats one runtime-log timestamp with an explicit UTC offset.
+///
+/// The value is local time when the platform can report an offset and UTC
+/// otherwise, so a diagnostic line is still placeable on a timeline after the
+/// ordinary logs have rotated. It carries no request, route, or credential
+/// content, so it stays inside the existing bounded-log contract.
+#[must_use]
+pub fn format_log_timestamp(now: SystemTime) -> String {
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    time::OffsetDateTime::from(now)
+        .to_offset(offset)
+        .format(log_timestamp_format())
+        .ok()
+        .filter(|stamp| !stamp.is_empty())
+        .unwrap_or_else(|| "unknown-time".to_owned())
+}
+
+fn log_timestamp_format() -> &'static [time::format_description::BorrowedFormatItem<'static>] {
+    static FORMAT: std::sync::LazyLock<Vec<time::format_description::BorrowedFormatItem<'static>>> =
+        std::sync::LazyLock::new(|| {
+            time::format_description::parse_borrowed::<1>(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3][offset_hour sign:mandatory]:[offset_minute]",
+            )
+            .unwrap_or_default()
+        });
+    FORMAT.as_slice()
+}
+
 #[cfg(unix)]
 fn set_directory_permissions(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -335,6 +363,34 @@ mod tests {
         file.set_len(size).expect("size fixture log");
         file.set_times(FileTimes::new().set_modified(modified))
             .expect("set fixture timestamp");
+    }
+
+    #[test]
+    fn log_timestamp_keeps_second_precision_and_an_explicit_offset() {
+        let stamp =
+            format_log_timestamp(SystemTime::UNIX_EPOCH + Duration::from_millis(1_788_744_560_303));
+        assert_eq!(stamp.len(), 29, "{stamp}");
+        assert_eq!(stamp.as_bytes()[4], b'-', "{stamp}");
+        assert_eq!(stamp.as_bytes()[10], b'T', "{stamp}");
+        assert_eq!(stamp.as_bytes()[19], b'.', "{stamp}");
+        assert!(matches!(stamp.as_bytes()[23], b'+' | b'-'), "{stamp}");
+        assert_eq!(stamp.as_bytes()[26], b':', "{stamp}");
+        for digits in [
+            0..4,
+            5..7,
+            8..10,
+            11..13,
+            14..16,
+            17..19,
+            20..23,
+            24..26,
+            27..29,
+        ] {
+            assert!(
+                stamp[digits].bytes().all(|byte| byte.is_ascii_digit()),
+                "{stamp}"
+            );
+        }
     }
 
     #[test]

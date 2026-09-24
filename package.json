@@ -62,6 +62,7 @@
     "release:prepare": "node scripts/manage-release.mjs prepare",
     "release:publish": "node scripts/manage-release.mjs publish",
     "tauri": "tauri",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.qa.conf.json",
     "tauri:qa:dev": "tauri dev --config src-tauri/tauri.qa.conf.json",
     "tauri:prod:build": "node scripts/manage-build-artifacts.mjs build production",
     "tauri:qa:build": "node scripts/manage-build-artifacts.mjs build qa",

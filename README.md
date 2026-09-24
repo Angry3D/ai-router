@@ -164,11 +164,12 @@ Gatekeeper 的步骤，也不暗示源码产物经过 Apple 验证。
 普通界面开发使用隔离的 QA 标识和数据目录：
 
 ```sh
-pnpm tauri:qa:dev
+pnpm tauri:dev
 ```
 
-QA 模式不会接管生产 Codex 配置，并使用系统分配的临时代理端口。`pnpm tauri dev` 使用生产
-标识和数据边界；只有确实需要验证真实 Codex 集成且已备份配置时，才应手动运行。
+`pnpm tauri:dev` 与 `pnpm tauri:qa:dev` 等价，使用 QA 标识和独立数据目录，不会接管生产 Codex
+配置，并使用系统分配的临时代理端口。debug 构建使用生产标识（`com.relax.airouter`）时会拒绝启动，
+以免开发进程读写生产数据目录和真实 Codex 配置。
 
 常用的其他检查命令：
 

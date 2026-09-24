@@ -759,4 +759,65 @@ describe("SystemSettings interactions", () => {
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  it("hides the latest incident row when no incident has been recorded", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+
+    expect(recoveryRowLabels()).toEqual([
+      "恢复状态",
+      "最近恢复点",
+      "有效恢复点",
+    ]);
+  });
+
+  it.each([
+    ["repaired" as const, true, /^检测到数据库索引损坏，已于 .+ 自动修复$/],
+    [
+      "quarantined" as const,
+      false,
+      /^检测到数据库损坏，已于 .+ 进入恢复流程$/,
+    ],
+    [
+      "recovery_required" as const,
+      false,
+      /^检测到数据库损坏，已于 .+ 进入恢复流程$/,
+    ],
+    ["start_over" as const, false, /^数据库已重新开始，时间 .+$/],
+  ])(
+    "renders the latest %s incident after the existing recovery rows",
+    async (action, repaired, expected) => {
+      await renderSettings({
+        settings: {
+          recovery: {
+            ...previewSettingsSnapshot.recovery,
+            lastIncident: {
+              detectedAtMs: 1_700_000_000_000,
+              action,
+              repaired,
+            },
+          },
+        },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "系统" }));
+
+      expect(recoveryRowLabels()).toEqual([
+        "恢复状态",
+        "最近恢复点",
+        "有效恢复点",
+        "最近自动修复",
+      ]);
+      expect(screen.getByText(expected)).toBeInTheDocument();
+    },
+  );
 });
+
+function recoveryRowLabels() {
+  const section = screen
+    .getByRole("heading", { name: "数据库恢复", level: 3 })
+    .closest("section");
+  if (!section) throw new Error("database recovery section not found");
+  return [...section.querySelectorAll(".settings-field-label")].map(
+    (node) => node.textContent,
+  );
+}

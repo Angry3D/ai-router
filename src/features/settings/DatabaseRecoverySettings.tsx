@@ -53,6 +53,11 @@ const databaseIssuePresentation: Record<
     body: "AI Router 无法安全打开数据库。代理仍保持停止状态。",
     retryable: true,
   },
+  directory_in_use: {
+    title: "数据目录正在被占用",
+    body: "另一个 AI Router 进程正在使用该数据目录。请退出那个进程后重试。",
+    retryable: true,
+  },
 };
 
 function lifecycleDatabaseIssue(

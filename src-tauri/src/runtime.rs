@@ -48,7 +48,8 @@ use router_core::{
     proxy::{
         ActivatedSkipHealth, AsyncHistoryRecorder, FallbackActivationError, FallbackActivationMode,
         FallbackActivationRequest, FallbackActivator, HealthActivationProof, ImageAssetChangeSink,
-        InferenceStatusService, LogicalRequestActivitySink, LogicalRequestActivityTracker,
+        InferenceStatusService, LogicalRequestActivityPhase, LogicalRequestActivitySink,
+        LogicalRequestActivityTracker, LogicalRequestActivityTransition,
         McpImageAssetMaintenanceError, McpImageAssetManager, OutboundProxyTransport,
         ProxyIngressState, ProxyPortError, ProxyPortStore, ProxyServerHandle, ReachabilityProbe,
         RequestTransitionSink, ResponsesForwarder, RouteHealthRegistry, RouteSnapshot,
@@ -57,13 +58,15 @@ use router_core::{
     },
     qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     recovery::{
-        DatabaseStartupClassification, DatabaseStartupIssue, RecoveryCoordinator, RecoveryError,
-        RecoveryEventSink, RecoveryFailureCode, RecoveryHealth, RecoveryManager, RecoveryPointId,
+        DatabaseStartupClassification, DatabaseStartupIssue, RecoveryActivityProbe,
+        RecoveryCoordinator, RecoveryDirectoryLock, RecoveryError, RecoveryEventSink,
+        RecoveryFailureCode, RecoveryHealth, RecoveryManager, RecoveryPointId, RepairRecheck,
         classify_recovery_startup_error, classify_storage_startup_error,
     },
     runtime_log::{
         LOG_FILE_PREFIX, LOG_MAINTENANCE_INTERVAL, MAX_LOG_FILE_BYTES, MAX_LOG_FILES,
-        RuntimeLogMaintenance, format_runtime_diagnostic, truncate_log_record,
+        RuntimeLogMaintenance, format_log_timestamp, format_runtime_diagnostic,
+        truncate_log_record,
     },
     state::{
         AppRuntimeState, FallbackStateDto, IpcErrorDto, MutationResultDto, RouteSummaryDto,
@@ -185,7 +188,7 @@ impl RuntimeLogController {
         Ok(())
     }
 
-    fn directory(&self) -> &std::path::Path {
+    pub(crate) fn directory(&self) -> &std::path::Path {
         self.maintenance.directory()
     }
 
@@ -222,6 +225,99 @@ impl RuntimeDiagnosticSink for SafeRuntimeDiagnosticSink {
     }
 }
 
+/// Shared observation of when the proxy last became idle.
+///
+/// The tray activity sink stamps the instant on every activity transition and
+/// the runtime integrity self-check reads it. A process that never sees traffic
+/// starts idle, so a quiet install still runs its first self-check.
+#[derive(Clone)]
+pub struct RecoveryIdleWindow {
+    last_idle_at: Arc<Mutex<Option<Instant>>>,
+}
+
+impl RecoveryIdleWindow {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            last_idle_at: Arc::new(Mutex::new(Some(Instant::now()))),
+        }
+    }
+
+    /// Records the phase of one logical-request activity transition.
+    pub fn observe(&self, transition: LogicalRequestActivityTransition) {
+        let mut last_idle_at = self
+            .last_idle_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *last_idle_at = match transition.phase {
+            LogicalRequestActivityPhase::Idle => Some(Instant::now()),
+            LogicalRequestActivityPhase::Live | LogicalRequestActivityPhase::Waiting => None,
+        };
+    }
+
+    fn idle_for(&self, minimum: Duration) -> bool {
+        self.last_idle_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|idle_since| idle_since.elapsed() >= minimum)
+    }
+}
+
+impl Default for RecoveryIdleWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Process-wide recovery inputs the desktop lifecycle services need.
+///
+/// The runtime log directory also holds the persisted corruption-incident
+/// records, `app_version` attributes every record to the running build, and the
+/// idle window is stamped by the tray activity sink in `lib.rs`.
+#[derive(Clone)]
+pub struct DesktopRecoveryWiring {
+    log_directory: PathBuf,
+    app_version: String,
+    idle_window: RecoveryIdleWindow,
+}
+
+impl DesktopRecoveryWiring {
+    #[must_use]
+    pub fn new(
+        log_directory: PathBuf,
+        app_version: impl Into<String>,
+        idle_window: RecoveryIdleWindow,
+    ) -> Self {
+        Self {
+            log_directory,
+            app_version: app_version.into(),
+            idle_window,
+        }
+    }
+
+    /// Points one recovery manager at the persisted-incident destination.
+    fn attach_incident_recording(&self, manager: RecoveryManager) -> RecoveryManager {
+        manager.with_incident_recording(self.log_directory.clone(), self.app_version.clone())
+    }
+
+    fn idle_window(&self) -> RecoveryIdleWindow {
+        self.idle_window.clone()
+    }
+}
+
+/// Reports idleness for the runtime integrity self-check.
+struct DesktopRecoveryActivityProbe {
+    activity: LogicalRequestActivityTracker,
+    idle_window: RecoveryIdleWindow,
+}
+
+impl RecoveryActivityProbe for DesktopRecoveryActivityProbe {
+    fn idle_for(&self, minimum: Duration) -> bool {
+        self.activity.phase() == LogicalRequestActivityPhase::Idle
+            && self.idle_window.idle_for(minimum)
+    }
+}
+
 struct DesktopRecoveryEventSink {
     runtime_state: Arc<AppRuntimeState>,
 }
@@ -247,6 +343,7 @@ impl RecoveryEventSink for DesktopRecoveryEventSink {
         let code = match code {
             RecoveryFailureCode::PublicationFailed => "recovery_publish_failed",
             RecoveryFailureCode::InventoryUnavailable => "recovery_inventory_unavailable",
+            RecoveryFailureCode::IntegrityUnrecoverable => "recovery_integrity_unrecoverable",
         };
         log::error!(target: "ai_router::recovery", "code={code}");
     }
@@ -260,6 +357,9 @@ pub struct DesktopLifecycleServices {
     diagnostics: Arc<dyn RuntimeDiagnosticSink>,
     mcp_image_assets: McpImageAssetManager,
     activity: LogicalRequestActivityTracker,
+    recovery_wiring: DesktopRecoveryWiring,
+    /// Exclusive lock over the data directory, held until the process exits.
+    directory_lock: std::sync::Mutex<Option<RecoveryDirectoryLock>>,
     database: tokio::sync::Mutex<Option<DatabaseExecutor>>,
     recovery: tokio::sync::Mutex<Option<Arc<RecoveryCoordinator>>>,
     proxy: tokio::sync::Mutex<Option<ProxyServerHandle>>,
@@ -335,6 +435,7 @@ impl DesktopLifecycleServices {
         runtime_state: Arc<AppRuntimeState>,
         diagnostics: Arc<dyn RuntimeDiagnosticSink>,
     ) -> Arc<Self> {
+        let log_directory = app_data_dir.join("logs");
         Self::new_with_activity_sink(
             app_data_dir,
             user_home,
@@ -342,6 +443,11 @@ impl DesktopLifecycleServices {
             runtime_state,
             diagnostics,
             Arc::new(router_core::proxy::NoopLogicalRequestActivitySink),
+            DesktopRecoveryWiring::new(
+                log_directory,
+                env!("CARGO_PKG_VERSION"),
+                RecoveryIdleWindow::new(),
+            ),
         )
     }
 
@@ -352,6 +458,7 @@ impl DesktopLifecycleServices {
         runtime_state: Arc<AppRuntimeState>,
         diagnostics: Arc<dyn RuntimeDiagnosticSink>,
         activity_sink: Arc<dyn LogicalRequestActivitySink>,
+        recovery_wiring: DesktopRecoveryWiring,
     ) -> Arc<Self> {
         let codex_home = profile.codex_home(&app_data_dir, user_home);
         let route_health = Arc::new(RouteHealthRegistry::new(
@@ -370,6 +477,8 @@ impl DesktopLifecycleServices {
             diagnostics,
             mcp_image_assets,
             activity: LogicalRequestActivityTracker::new(activity_sink),
+            recovery_wiring,
+            directory_lock: std::sync::Mutex::new(None),
             database: tokio::sync::Mutex::new(None),
             recovery: tokio::sync::Mutex::new(None),
             proxy: tokio::sync::Mutex::new(None),
@@ -452,7 +561,46 @@ impl DesktopLifecycleServices {
     }
 
     fn recovery_manager(&self) -> RecoveryManager {
-        RecoveryManager::new(self.app_data_dir.join("router.sqlite3"))
+        self.recovery_wiring
+            .attach_incident_recording(RecoveryManager::new(
+                self.app_data_dir.join("router.sqlite3"),
+            ))
+    }
+
+    /// Acquires the exclusive data-directory lock once per process lifetime.
+    ///
+    /// Every database open, classification, and repair happens after this guard
+    /// is held, so a second process sharing the data directory fails with a
+    /// stable, retryable startup issue instead of opening the primary.
+    async fn acquire_directory_lock(&self) -> Result<(), LifecycleFailure> {
+        if self.directory_lock_held() {
+            return Ok(());
+        }
+        let manager = self.recovery_manager();
+        let lock = tokio::task::spawn_blocking(move || manager.acquire_directory_lock())
+            .await
+            .map_err(|_| LifecycleFailure::Database)?
+            .map_err(|error| {
+                LifecycleFailure::DatabaseIssue(
+                    classify_recovery_startup_error(&error)
+                        .unwrap_or(DatabaseStartupIssue::Unavailable),
+                )
+            })?;
+        let mut guard = self
+            .directory_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.is_none() {
+            *guard = Some(lock);
+        }
+        Ok(())
+    }
+
+    fn directory_lock_held(&self) -> bool {
+        self.directory_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     async fn route_summaries(
@@ -2597,11 +2745,15 @@ impl DesktopLifecycleServices {
             .await
             .map_err(|_| LifecycleFailure::Database)?
             .map_err(|error| map_database_startup_failure(&error))?;
-        let recovery = RecoveryCoordinator::start(
+        let recovery = RecoveryCoordinator::start_with_activity(
             manager,
             database.clone(),
             Arc::new(DesktopRecoveryEventSink {
                 runtime_state: Arc::clone(&self.runtime_state),
+            }),
+            Arc::new(DesktopRecoveryActivityProbe {
+                activity: self.activity.clone(),
+                idle_window: self.recovery_wiring.idle_window(),
             }),
         )
         .await;
@@ -3117,8 +3269,9 @@ impl ProxyPortStore for DatabaseProxyPortStore {
 #[async_trait]
 impl AppLifecycleServices for DesktopLifecycleServices {
     async fn initialize_database(&self) -> Result<(), LifecycleFailure> {
+        self.acquire_directory_lock().await?;
         let path = self.app_data_dir.join("router.sqlite3");
-        let manager = RecoveryManager::new(&path);
+        let manager = self.recovery_manager();
         let classification = tokio::task::spawn_blocking({
             let manager = manager.clone();
             move || manager.classify_startup()
@@ -3134,6 +3287,24 @@ impl AppLifecycleServices for DesktopLifecycleServices {
         match classification {
             DatabaseStartupClassification::NewInstall | DatabaseStartupClassification::Ready => {
                 self.open_and_install_database(path, manager, false).await
+            }
+            DatabaseStartupClassification::Repairable(_, _) => {
+                // An index-only inconsistency is rebuilt in place before the
+                // open path, which re-verifies the database, can succeed. The
+                // pre-repair bytes are quarantined as evidence, and any failure
+                // keeps the existing recovery flow.
+                let manager_for_repair = manager.clone();
+                let repair =
+                    tokio::task::spawn_blocking(move || manager_for_repair.repair_primary_closed())
+                        .await
+                        .map_err(|_| LifecycleFailure::Database)?;
+                match repair {
+                    Ok(outcome) if outcome.recheck == RepairRecheck::Ok => {
+                        self.open_and_install_database(path, manager, false).await
+                    }
+                    Ok(_) => Err(LifecycleFailure::RecoveryRequired),
+                    Err(error) => Err(map_recovery_lifecycle_failure(&error)),
+                }
             }
             DatabaseStartupClassification::RecoveryRequired(_) => {
                 Err(LifecycleFailure::RecoveryRequired)
@@ -3308,7 +3479,7 @@ impl AppLifecycleServices for DesktopLifecycleServices {
 
     async fn restore_database(&self, point_id: &RecoveryPointId) -> Result<(), LifecycleFailure> {
         let path = self.app_data_dir.join("router.sqlite3");
-        let manager = RecoveryManager::new(&path);
+        let manager = self.recovery_manager();
         let manager_for_restore = manager.clone();
         let point_id = point_id.clone();
         tokio::task::spawn_blocking(move || manager_for_restore.restore_point(&point_id))
@@ -3320,7 +3491,7 @@ impl AppLifecycleServices for DesktopLifecycleServices {
 
     async fn start_over_database(&self) -> Result<(), LifecycleFailure> {
         let path = self.app_data_dir.join("router.sqlite3");
-        let manager = RecoveryManager::new(&path);
+        let manager = self.recovery_manager();
         let manager_for_start_over = manager.clone();
         tokio::task::spawn_blocking(move || manager_for_start_over.start_over())
             .await
@@ -3380,7 +3551,8 @@ pub fn runtime_log_plugin<R: Runtime>(directory: Option<PathBuf>) -> TauriPlugin
         .format(|out, message, record| {
             let message = truncate_log_record(&message.to_string());
             out.finish(format_args!(
-                "[{}][{}] {}",
+                "[{}][{}][{}] {}",
+                format_log_timestamp(SystemTime::now()),
                 record.level(),
                 record.target(),
                 message
@@ -4222,7 +4394,9 @@ fn map_recovery_error(error: &RecoveryError, operation: RecoveryOperation) -> Ip
                 false,
             ),
         },
-        RecoveryError::UnsafeFilesystemObject | RecoveryError::FutureSchema => {
+        RecoveryError::UnsafeFilesystemObject
+        | RecoveryError::FutureSchema
+        | RecoveryError::DirectoryInUse => {
             unreachable!("classified recovery startup error")
         }
         RecoveryError::UnknownTable | RecoveryError::DomainValidation => {
@@ -4263,6 +4437,11 @@ fn map_database_startup_issue(issue: DatabaseStartupIssue) -> IpcErrorDto {
         DatabaseStartupIssue::Unavailable => {
             ipc_error("database_unavailable", "数据库暂时不可用。", true)
         }
+        DatabaseStartupIssue::DirectoryInUse => ipc_error(
+            "database_directory_in_use",
+            "另一个 AI Router 进程正在使用该数据目录。",
+            true,
+        ),
     }
 }
 
@@ -5126,6 +5305,58 @@ mod tests {
     }
 
     #[test]
+    fn directory_in_use_maps_to_a_retryable_startup_error() {
+        let mapped = map_database_startup_issue(DatabaseStartupIssue::DirectoryInUse);
+        assert_eq!(mapped.code, "database_directory_in_use");
+        assert!(mapped.retryable);
+        assert!(mapped.message.contains("数据目录"));
+    }
+
+    #[tokio::test]
+    async fn the_data_directory_lock_admits_one_process_at_a_time() {
+        let directory = TempDir::new().expect("app data fixture");
+        let first = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink))),
+            Arc::new(NoopDiagnosticSink),
+        );
+        first
+            .initialize_database()
+            .await
+            .expect("first process opens");
+
+        let second = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink))),
+            Arc::new(NoopDiagnosticSink),
+        );
+        assert_eq!(
+            second.initialize_database().await,
+            Err(LifecycleFailure::DatabaseIssue(
+                DatabaseStartupIssue::DirectoryInUse
+            ))
+        );
+
+        drop(first);
+        let third = DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink))),
+            Arc::new(NoopDiagnosticSink),
+        );
+        third
+            .initialize_database()
+            .await
+            .expect("released lock admits the next process");
+        third.close_database().await;
+    }
+
+    #[test]
     fn recovery_health_changes_publish_only_bounded_state_metadata() {
         let events = Arc::new(RecordingEventSink::default());
         let runtime = Arc::new(AppRuntimeState::new(events.clone()));
@@ -5140,6 +5371,7 @@ mod tests {
             live_critical_revision: 8,
             covered_critical_revision: Some(7),
             last_failure: Some(RecoveryFailureCode::PublicationFailed),
+            last_incident: None,
         });
 
         assert_eq!(

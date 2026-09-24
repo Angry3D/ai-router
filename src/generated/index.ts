@@ -61,6 +61,8 @@ export type { ReachabilityStatus } from "./ReachabilityStatus";
 export type { RecoveryCandidateDto } from "./RecoveryCandidateDto";
 export type { RecoveryHealthDto } from "./RecoveryHealthDto";
 export type { RecoveryHealthKind } from "./RecoveryHealthKind";
+export type { RecoveryIncidentAction } from "./RecoveryIncidentAction";
+export type { RecoveryIncidentDto } from "./RecoveryIncidentDto";
 export type { RecoverySnapshotDto } from "./RecoverySnapshotDto";
 export type { ReorderRoutesAndFallbackInputDto } from "./ReorderRoutesAndFallbackInputDto";
 export type { ReplaceCodexModelsResult } from "./ReplaceCodexModelsResult";

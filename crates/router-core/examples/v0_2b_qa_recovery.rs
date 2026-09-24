@@ -335,6 +335,9 @@ async fn inspect(
         DatabaseStartupClassification::RecoveryRequired(_) => {
             ("recovery_required".to_owned(), None, None, None, None)
         }
+        DatabaseStartupClassification::Repairable(_, _) => {
+            ("repairable".to_owned(), None, None, None, None)
+        }
         DatabaseStartupClassification::Fatal(issue) => (
             format!("fatal_{issue:?}").to_lowercase(),
             None,

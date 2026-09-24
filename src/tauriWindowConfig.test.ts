@@ -1,3 +1,4 @@
+import packageJson from "../package.json";
 import defaultCapabilities from "../src-tauri/capabilities/default.json";
 import productionConfig from "../src-tauri/tauri.conf.json";
 import qaConfig from "../src-tauri/tauri.qa.conf.json";
@@ -99,5 +100,13 @@ describe("Tauri app icon configuration", () => {
     expect((qaConfig as TauriConfig).bundle?.icon).toEqual([
       "icons/app-icon-qa.icns",
     ]);
+  });
+});
+
+describe("Tauri development entrypoint", () => {
+  it("serves pnpm tauri:dev from the isolated QA configuration", () => {
+    expect(packageJson.scripts["tauri:dev"]).toBe(
+      "tauri dev --config src-tauri/tauri.qa.conf.json",
+    );
   });
 });

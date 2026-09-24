@@ -325,6 +325,7 @@ export const previewSettingsSnapshot: SettingsSnapshotDto = {
     kind: "protected",
     latestSuccessAtMs: previewNow - 15 * 60_000,
     validPointCount: 3,
+    lastIncident: null,
   },
 };
 
@@ -397,6 +398,11 @@ export const previewDegradedSettingsSnapshot: SettingsSnapshotDto = {
     kind: "degraded",
     latestSuccessAtMs: previewNow - 2 * 24 * 60 * 60_000,
     validPointCount: 1,
+    lastIncident: {
+      detectedAtMs: previewNow - 26 * 60 * 60_000,
+      action: "recovery_required",
+      repaired: false,
+    },
   },
 };
 
@@ -467,6 +473,7 @@ export const previewFatalDatabaseBootstraps: Record<
   future_schema: fatalBootstrap("future_schema"),
   unsafe_path: fatalBootstrap("unsafe_path"),
   unavailable: fatalBootstrap("unavailable"),
+  directory_in_use: fatalBootstrap("directory_in_use"),
 };
 
 export const previewFatalRecoverySnapshots: Record<
@@ -478,6 +485,7 @@ export const previewFatalRecoverySnapshots: Record<
   future_schema: fatalRecovery("future_schema"),
   unsafe_path: fatalRecovery("unsafe_path"),
   unavailable: fatalRecovery("unavailable"),
+  directory_in_use: fatalRecovery("directory_in_use"),
 };
 
 export const previewRouteEdits: RouteEditDto[] = routes.map((route, index) => ({

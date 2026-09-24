@@ -22,6 +22,8 @@ import type {
   MenuBarSettingsDto,
   OutboundProxySettingsDto,
   RecoveryHealthKind,
+  RecoveryIncidentAction,
+  RecoveryIncidentDto,
   SettingsSnapshotDto,
 } from "../../generated";
 import { ApplicationUpdateSettings } from "./ApplicationUpdateSettings";
@@ -49,6 +51,28 @@ const recoveryHealthPresentation: Record<
   updating: { label: "正在更新", tone: "neutral" },
   degraded: { label: "保护已降级", tone: "danger" },
 };
+
+const recoveryFlowIncident = (detectedAt: string) =>
+  `检测到数据库损坏，已于 ${detectedAt} 进入恢复流程`;
+
+const recoveryIncidentMessages: Record<
+  RecoveryIncidentAction,
+  (detectedAt: string) => string
+> = {
+  repaired: (detectedAt) =>
+    `检测到数据库索引损坏，已于 ${detectedAt} 自动修复`,
+  // `quarantined` belongs to the recovery flow that isolates the unusable
+  // primary; incidents written by older versions still carry it.
+  quarantined: recoveryFlowIncident,
+  recovery_required: recoveryFlowIncident,
+  start_over: (detectedAt) => `数据库已重新开始，时间 ${detectedAt}`,
+};
+
+function recoveryIncidentSummary(incident: RecoveryIncidentDto) {
+  return recoveryIncidentMessages[incident.action](
+    formatDateTime(incident.detectedAtMs),
+  );
+}
 
 export function SystemSettings({
   snapshot,
@@ -689,6 +713,11 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
         <SettingsReadonlyRow label="有效恢复点">
           {snapshot.recovery.validPointCount} 个
         </SettingsReadonlyRow>
+        {snapshot.recovery.lastIncident ? (
+          <SettingsReadonlyRow label="最近自动修复">
+            {recoveryIncidentSummary(snapshot.recovery.lastIncident)}
+          </SettingsReadonlyRow>
+        ) : null}
         <SettingsButton
           type="button"
           disabled={recoveryBusy || snapshot.recovery.kind === "updating"}
