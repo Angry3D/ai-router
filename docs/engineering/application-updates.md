@@ -25,7 +25,10 @@ GitHub artifact provenance 不是第六个下载文件，而是 GitHub 对这些
 `latest.json` 和下载内容都按不可信远端输入处理。Rust coordinator 只接受 canonical repository、
 `darwin-aarch64`、严格稳定且高于运行版本的 SemVer、canonical 归档 URL、有界版本说明和有界签名。
 这些检查决定是否展示更新，不授予安装权限。用户确认下载后，Tauri updater 必须使用 bundle 中的
-项目公钥验证归档签名，验证成功才进入安装。
+项目公钥验证归档签名，验证成功才进入安装。签名还必须记录它对应的版本：应用启用
+`requireSignedVersion`，会把 `latest.json` 声明的版本与签名 trusted comment 中的版本比对，
+不一致或缺失即拒绝安装。这样"把更大的版本号与另一个合法签名包配对"的做法无法促成降级安装。
+该校验从启用它的构建开始生效；更早的已安装版本不校验签名里的版本。
 
 新版本说明由提交在 `release-notes/v<version>.md` 的审核内容生成。Rust 只解析受限的标题和平铺
 项目符号，并向界面投影 `重点更新`、`问题修复`、`注意事项` 三组数据；React 不解析 Markdown 或

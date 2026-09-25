@@ -69,7 +69,8 @@ tag commit；prerelease、build metadata、移动 tag 或版本漂移全部失�
    Release 会硬失败。
 3. `release:build` 用临时 `0600` 配置注入公钥，生成 ad-hoc-signed DMG 和 Tauri updater 归档/签名。
 4. `release:prepare` 检查 app 与 DMG 中的 identifier、版本、macOS 13、arm64、`Signature=adhoc`、无
-   Developer ID authority，验证 updater 签名，生成 `latest.json` 与 `SHA256SUMS`，上传后再下载逐字节
+   Developer ID authority，验证 updater 签名（包括签名 trusted comment 里的版本绑定必须等于本次
+   发布版本，缺失或不匹配即在草稿阶段失败），生成 `latest.json` 与 `SHA256SUMS`，上传后再下载逐字节
    比较 draft 资产。
 5. 固定 SHA 的 GitHub attestation action 为完整资产目录生成 provenance。
 6. `release:publish` 再次回读并验证 draft 资产、manifest 说明和 Release 正文，最后一次性切换为
@@ -85,6 +86,8 @@ secret。只有临时合并的 `tauri.release.conf.json` 启用 DMG、updater ar
 - GitHub 显示每个发布资产的 provenance；
 - Release 说明把 DMG 标为首次安装入口，并明确没有 Apple 验证或公证；
 - 用隔离的一次性 updater QA 根验证 current/newer/malformed/offline/signature-failure/install/restart；
+  这些一次性产物必须用 `tauri signer sign --app-version <version>`（CLI ≥ 2.11.5）签署，否则启用
+  `requireSignedVersion` 的构建会以缺少版本绑定拒绝它们；
 - QA 前后读取生产 PID 与 bundle 路径，确认生产 `AI Router.app` 未被退出、替换、启动或重启。
 
 首个 updater-capable 版本只验证手动 DMG 桥接。第一次真实应用内升级必须从该桥接版本升级到更高的
