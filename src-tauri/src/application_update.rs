@@ -823,7 +823,9 @@ fn map_install_error(error: &tauri_plugin_updater::Error) -> ApplicationUpdateFa
     let (code, message, retryable) = match error {
         tauri_plugin_updater::Error::Minisign(_)
         | tauri_plugin_updater::Error::Base64(_)
-        | tauri_plugin_updater::Error::SignatureUtf8(_) => (
+        | tauri_plugin_updater::Error::SignatureUtf8(_)
+        | tauri_plugin_updater::Error::MissingSignedVersion
+        | tauri_plugin_updater::Error::SignedVersionMismatch { .. } => (
             "update_signature_invalid",
             "更新包签名校验失败，未安装任何内容。",
             false,
@@ -1242,6 +1244,19 @@ mod tests {
         ));
         assert_eq!(signature.code, "update_signature_invalid");
         assert!(!signature.retryable);
+
+        let missing_signed_version =
+            map_install_error(&tauri_plugin_updater::Error::MissingSignedVersion);
+        assert_eq!(missing_signed_version.code, "update_signature_invalid");
+        assert!(!missing_signed_version.retryable);
+
+        let signed_version_mismatch =
+            map_install_error(&tauri_plugin_updater::Error::SignedVersionMismatch {
+                signed: "0.4.3".into(),
+                announced: "9.9.9".into(),
+            });
+        assert_eq!(signed_version_mismatch.code, "update_signature_invalid");
+        assert!(!signed_version_mismatch.retryable);
 
         let permission = map_install_error(&tauri_plugin_updater::Error::AuthenticationFailed);
         assert_eq!(permission.code, "update_permission_denied");

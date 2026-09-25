@@ -62,6 +62,7 @@
         "https://github.com/Angry3D/ai-router/releases/latest/download/latest.json"
       ],
       "dialog": false,
+      "requireSignedVersion": true,
       "pubkey": "__AI_ROUTER_UPDATER_PUBLIC_KEY__"
     }
   }
