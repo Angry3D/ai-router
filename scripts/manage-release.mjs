@@ -716,6 +716,7 @@ async function stageReleaseArtifacts(
       "--",
       join(directory, names[1]),
       join(directory, names[2]),
+      identity.version,
     ],
     { cwd: root, env: { ...process.env, [PUBLIC_KEY_ENV]: publicKey } },
   );
