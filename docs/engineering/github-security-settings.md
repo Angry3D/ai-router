@@ -84,6 +84,27 @@ it, validate the five non-Code-Security checks there and validate both dependenc
 review and CodeQL immediately after public visibility (or in an entitled private
 staging repository) before making the seven-check ruleset active.
 
+## Dependency alerts
+
+Dependabot alerts are only actionable against a target the product builds.
+Before dismissing one, prove reachability for the shipped Apple Silicon target:
+
+```sh
+cargo tree -i <crate> --target aarch64-apple-darwin   # then --target all for the chain
+```
+
+Dismiss as `not_used` only when that target-filtered graph omits the crate, and
+record the advisory identifier, the resolved version, and the reverse chain in
+the dismissal comment. Never dismiss on severity or patch availability alone.
+
+The unified `Cargo.lock` records every target's dependencies, so Linux-only
+crates of the `gtk-rs` stack (`glib`, `atk`, `gdk`, `gtk`) surface as alerts even
+though no supported build compiles them. GHSA-wrw7-89jp-8q8g (`glib`, first
+fixed in 0.20.0, unreachable from the `gtk 0.18` line) is the recorded
+precedent. Reopen the alert if a supported target ever compiles the crate, and
+note that every `dependabot.yml` ecosystem allows only minor and patch updates,
+so a major-only fix has no bot path.
+
 ## Protected stable releases
 
 Create a `v*` tag ruleset that blocks tag deletion, force updates, and moving an
