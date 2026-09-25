@@ -1,6 +1,7 @@
 mod application_update;
 mod popover;
 mod runtime;
+pub mod update_signature;
 
 use std::path::PathBuf;
 use std::sync::{
