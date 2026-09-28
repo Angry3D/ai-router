@@ -13,6 +13,8 @@ Codex App 与多个兼容 OpenAI Responses API 的上游之间切换路由。它
 
 - 在菜单栏查看代理、Codex 和 Fallback 状态，一键切换当前路由。
 - 为多个 Responses API 上游保存路由信息、查询余额，并在故障时按顺序回退。
+- 每条路由可选择上游协议：Responses 原样转发，或把 Responses 请求桥接到只提供
+  Chat Completions 的上游，同时继续向 Codex 提供 Responses 契约。
 - 通过受保护的配置投影连接 Codex；断开时恢复之前保存的配置目标。
 - 管理自定义模型目录和图片生成 MCP，无需手工维护对应的 Codex 配置片段。
 - 按路由、模型、状态和时间查看 token、费用估算与延迟等本地请求元数据。
