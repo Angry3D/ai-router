@@ -15,6 +15,15 @@ import {
 } from "./v0-2a-qa-common.mjs";
 
 const ROUTE_LABELS = ["A", "B", "C", "D"];
+const ALLOWED_PROTOCOLS = new Set(["responses", "chat_completions"]);
+// Route B is the Chat Completions route so a fallback or a dedicated seed can
+// reach the bridge end-to-end.
+const DEFAULT_ROUTE_PROTOCOLS = {
+  A: "responses",
+  B: "chat_completions",
+  C: "responses",
+  D: "responses",
+};
 const ALLOWED_SCENARIOS = new Set([
   "success-json",
   "success-sse",
@@ -43,10 +52,41 @@ const EVENT_KEYS = [
   "observedAtMs",
   "clientClosed",
 ];
+const REQUEST_KINDS = new Set(["responses", "chat", "usage", "unexpected"]);
+const COUNTER_KEYS = ["responses", "chat", "usage"];
 
 function routeKind(pathname) {
-  const match = /^\/v1\/(responses|usage)$/u.exec(pathname);
-  return match?.[1] ?? null;
+  const match = /^\/v1\/(responses|chat\/completions|usage)$/u.exec(pathname);
+  if (!match) return null;
+  return match[1] === "chat/completions" ? "chat" : match[1];
+}
+
+// Every route exposes exactly the three request-kind counters.
+function assertRouteCounters(counters, label) {
+  assertExactKeys(counters, COUNTER_KEYS, label);
+  for (const key of COUNTER_KEYS) {
+    if (!Number.isSafeInteger(counters[key]) || counters[key] < 0) {
+      throw new QaAcceptanceError(`${label}.${key} is invalid.`);
+    }
+  }
+}
+
+// Resolves and validates the per-route protocol plan before any server serves.
+function resolveRouteProtocols(overrides = {}) {
+  const resolved = new Map();
+  for (const label of ROUTE_LABELS) {
+    const protocol =
+      Object.hasOwn(overrides, label) && overrides[label] !== undefined
+        ? overrides[label]
+        : DEFAULT_ROUTE_PROTOCOLS[label];
+    if (!ALLOWED_PROTOCOLS.has(protocol)) {
+      throw new QaAcceptanceError(
+        `fixture route ${label} has an unsupported protocol.`,
+      );
+    }
+    resolved.set(label, protocol);
+  }
+  return resolved;
 }
 
 async function listen(server) {
@@ -83,6 +123,157 @@ function meaningfulEvent() {
   return 'data: {"type":"response.output_text.delta","delta":"fixture"}\n\n';
 }
 
+function chatChunkFrame(delta, finishReason = null) {
+  return `data: ${JSON.stringify({
+    id: "chatcmpl-fixture",
+    object: "chat.completion.chunk",
+    model: "fixture",
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  })}\n\n`;
+}
+
+function chatJsonBody() {
+  return {
+    id: "chatcmpl-fixture",
+    model: "fixture",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content: "fixture" },
+        finish_reason: "stop",
+      },
+    ],
+    usage: {
+      prompt_tokens: 11,
+      completion_tokens: 5,
+      total_tokens: 16,
+      prompt_tokens_details: { cached_tokens: 2 },
+    },
+  };
+}
+
+function chatCreatedEvent() {
+  return chatChunkFrame({ role: "assistant", content: "" });
+}
+
+function chatMeaningfulEvent() {
+  return chatChunkFrame({ content: "fixture" });
+}
+
+function chatToolCallEvent() {
+  return chatChunkFrame({
+    tool_calls: [
+      {
+        index: 0,
+        id: "c4",
+        function: { name: "tool_search", arguments: '{"query":"fixture"}' },
+      },
+    ],
+  });
+}
+
+function chatUsageEvent() {
+  return `data: ${JSON.stringify({
+    id: "chatcmpl-fixture",
+    object: "chat.completion.chunk",
+    model: "fixture",
+    choices: [],
+    usage: {
+      prompt_tokens: 11,
+      completion_tokens: 5,
+      total_tokens: 16,
+      prompt_tokens_details: { cached_tokens: 2 },
+    },
+  })}\n\n`;
+}
+
+function chatFinishEvent(finishReason = "stop") {
+  return chatChunkFrame({}, finishReason);
+}
+
+function chatTerminalEvent() {
+  return "data: [DONE]\n\n";
+}
+
+function chatSseHeaders(response) {
+  response.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+  });
+}
+
+// Answers a Chat Completions SSE scenario with Chat-shaped frames.
+//
+// Scenario names and semantics mirror the Responses branch; only the wire
+// shape differs so the bridge is genuinely exercised. The caller writes the
+// response head, mirroring the Responses branch's leading `response.created`
+// event, so an unlisted scenario (`pending`) still commits the stream.
+function chatStreamScenario(control, response, finish, timers) {
+  const done = chatTerminalEvent();
+  if (control.scenario === "success-sse") {
+    finish("2xx");
+    response.end(
+      `${chatMeaningfulEvent()}${chatToolCallEvent()}${chatUsageEvent()}${chatFinishEvent()}${done}`,
+    );
+    return;
+  }
+  if (control.scenario === "meaningful-delay") {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      if (response.destroyed) return;
+      finish("2xx");
+      response.end(
+        `${chatMeaningfulEvent()}${chatUsageEvent()}${chatFinishEvent()}${done}`,
+      );
+    }, control.delayMs);
+    timers.add(timer);
+    return;
+  }
+  if (control.scenario === "meaningful-pending") {
+    response.write(chatMeaningfulEvent());
+    return;
+  }
+  if (control.scenario === "meaningful-close") {
+    response.write(chatMeaningfulEvent());
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      if (response.destroyed) return;
+      finish("transport");
+      response.destroy();
+    }, control.delayMs);
+    timers.add(timer);
+    return;
+  }
+  if (control.scenario === "terminal-completed") {
+    finish("2xx");
+    response.end(`${chatFinishEvent()}${done}`);
+    return;
+  }
+  if (control.scenario === "terminal-done") {
+    finish("2xx");
+    response.end(done);
+    return;
+  }
+  if (control.scenario === "terminal-pending") {
+    response.write(chatFinishEvent());
+    return;
+  }
+  if (control.scenario === "lifecycle-only") {
+    const interval = setInterval(
+      () => {
+        if (response.destroyed) {
+          clearInterval(interval);
+          timers.delete(interval);
+          return;
+        }
+        response.write(chatChunkFrame({ role: "assistant" }));
+      },
+      Math.max(control.delayMs, 1_000),
+    );
+    timers.add(interval);
+  }
+}
+
 function safeServer(handler) {
   return createServer((request, response) => {
     void handler(request, response).catch(() => {
@@ -92,8 +283,9 @@ function safeServer(handler) {
   });
 }
 
-export async function createFixtureServer({ root: candidateRoot }) {
+export async function createFixtureServer({ root: candidateRoot, protocols }) {
   const { nonce, root } = await resolveRunRoot(candidateRoot);
+  const protocolByLabel = resolveRouteProtocols(protocols);
   const ledgerPath = join(root, "fixture-events.sanitized.jsonl");
   await unlink(ledgerPath).catch((error) => {
     if (error.code !== "ENOENT") throw error;
@@ -106,7 +298,7 @@ export async function createFixtureServer({ root: candidateRoot }) {
     ]),
   );
   const counters = new Map(
-    ROUTE_LABELS.map((label) => [label, { responses: 0, usage: 0 }]),
+    ROUTE_LABELS.map((label) => [label, { responses: 0, chat: 0, usage: 0 }]),
   );
   const timers = new Set();
   const responses = new Set();
@@ -123,6 +315,9 @@ export async function createFixtureServer({ root: candidateRoot }) {
   const record = (event) => {
     const safe = { schemaVersion: 1, sequence: ++sequence, ...event };
     assertExactKeys(safe, EVENT_KEYS, "fixture event");
+    if (!REQUEST_KINDS.has(safe.requestKind)) {
+      throw new QaAcceptanceError("fixture event request kind is invalid.");
+    }
     ledgerWrite = ledgerWrite.then(() =>
       appendFile(ledgerPath, `${JSON.stringify(safe)}\n`, "utf8"),
     );
@@ -201,6 +396,8 @@ export async function createFixtureServer({ root: candidateRoot }) {
       return;
     }
 
+    const chat = protocolByLabel.get(label) === "chat_completions";
+
     if (control.scenario === "http-500") {
       finish("5xx");
       sendJson(response, 500, {
@@ -241,11 +438,18 @@ export async function createFixtureServer({ root: candidateRoot }) {
     }
     if (control.scenario === "success-json") {
       finish("2xx");
-      sendJson(response, 200, {
-        id: "fixture",
-        status: "completed",
-        output: [],
-      });
+      sendJson(
+        response,
+        200,
+        chat ? chatJsonBody() : { id: "fixture", status: "completed", output: [] },
+      );
+      return;
+    }
+
+    if (chat) {
+      chatSseHeaders(response);
+      response.write(chatCreatedEvent());
+      chatStreamScenario(control, response, finish, timers);
       return;
     }
 
@@ -349,7 +553,7 @@ export async function createFixtureServer({ root: candidateRoot }) {
           return;
         }
         for (const label of ROUTE_LABELS) {
-          counters.set(label, { responses: 0, usage: 0 });
+          counters.set(label, { responses: 0, chat: 0, usage: 0 });
         }
         unexpectedTrafficCount = 0;
         sendJson(response, 200, { ok: true });
@@ -391,11 +595,16 @@ export async function createFixtureServer({ root: candidateRoot }) {
       }
       sendJson(response, 200, {
         unexpectedTrafficCount,
-        routes: ROUTE_LABELS.map((routeLabel) => ({
-          routeLabel,
-          ...counters.get(routeLabel),
-          ...controls.get(routeLabel),
-        })),
+        routes: ROUTE_LABELS.map((routeLabel) => {
+          const routeCounters = counters.get(routeLabel);
+          assertRouteCounters(routeCounters, `fixture route ${routeLabel} counters`);
+          return {
+            routeLabel,
+            protocol: protocolByLabel.get(routeLabel),
+            ...routeCounters,
+            ...controls.get(routeLabel),
+          };
+        }),
       });
       return;
     }
@@ -411,7 +620,11 @@ export async function createFixtureServer({ root: candidateRoot }) {
       );
       const port = await listen(server);
       servers.push(server);
-      routes.push({ label, baseUrl: `http://127.0.0.1:${port}/v1` });
+      routes.push({
+        label,
+        protocol: protocolByLabel.get(label),
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+      });
     }
     const controller = safeServer(handleController);
     const controllerPort = await listen(controller);

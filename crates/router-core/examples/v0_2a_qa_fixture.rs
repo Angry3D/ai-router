@@ -13,7 +13,8 @@ use router_core::{
     balance::BalanceQueryMode,
     codex_config::load_or_create_gateway_token,
     domain::{
-        ApiKey, BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, UpstreamAttemptId,
+        ApiKey, BalanceQueryPolicy, CompletionState, DeliveryState, RouteId, RouteProtocol,
+        UpstreamAttemptId,
     },
     qa_acceptance::{QA_APP_IDENTIFIER, QaAcceptanceRoot},
     storage::{
@@ -78,6 +79,7 @@ struct FixtureManifest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FixtureRoute {
     label: String,
+    protocol: String,
     base_url: String,
 }
 
@@ -136,6 +138,13 @@ struct RequestSummary {
     cancelled: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivationSummary {
+    schema_version: u8,
+    active_route_label: String,
+}
+
 fn required_option(arguments: &[String], name: &str) -> Result<String, Box<dyn Error>> {
     let index = arguments
         .iter()
@@ -156,6 +165,11 @@ fn optional_u64(arguments: &[String], name: &str) -> Result<Option<u64>, Box<dyn
         .ok_or_else(|| format!("missing value for {name}"))?
         .parse::<u64>()?;
     Ok(Some(value))
+}
+
+fn route_protocol(route: &FixtureRoute) -> Result<RouteProtocol, Box<dyn Error>> {
+    RouteProtocol::parse_persisted(&route.protocol)
+        .ok_or_else(|| format!("fixture route {} has an unsupported protocol", route.label).into())
 }
 
 fn resolve_root(path: &str) -> Result<QaAcceptanceRoot, Box<dyn Error>> {
@@ -205,6 +219,7 @@ fn validate_manifest(
             return Err("fixture route labels must be unique A through D".into());
         }
         let url = validate_loopback_url(&route.base_url, "route URL")?;
+        route_protocol(route)?;
         let port = url
             .port()
             .ok_or("fixture route URL must use an explicit loopback port")?;
@@ -246,12 +261,13 @@ async fn seed(root: &QaAcceptanceRoot, manifest_path: &Path) -> Result<(), Box<d
 
     let mut seeded_routes = Vec::with_capacity(manifest.routes.len());
     for route in manifest.routes {
+        let protocol = route_protocol(&route)?;
         let label = route.label;
         let created = database
             .create_route(CreateRouteInput {
                 name: format!("Synthetic {label}"),
                 base_url: route.base_url,
-                protocol: None,
+                protocol: Some(protocol),
                 api_key: ApiKey::parse(&format!("qa-synthetic-route-{label}"))?,
                 menu_visible: None,
                 balance_query: (label == "A").then(|| BalanceQueryInput {
@@ -651,6 +667,36 @@ fn count(connection: &Connection, table: &str) -> Result<i64, Box<dyn Error>> {
     )
 }
 
+/// Makes one synthetic fixture route the active route.
+///
+/// The QA application reads its routing snapshot from the database at startup,
+/// so this runs before launch rather than mutating a live process.
+///
+/// # Errors
+///
+/// Returns an error for a label outside A-D, a route that was never seeded, or
+/// a storage failure.
+async fn activate(root: &QaAcceptanceRoot, label: &str) -> Result<(), Box<dyn Error>> {
+    if !matches!(label, "A" | "B" | "C" | "D") {
+        return Err("activate route label must be one of A, B, C, D".into());
+    }
+    let database = DatabaseExecutor::open(root.database_path())?;
+    let name = format!("Synthetic {label}");
+    let route = database
+        .list_routes()
+        .await?
+        .into_iter()
+        .find(|route| route.name == name)
+        .ok_or_else(|| format!("fixture route {label} is not seeded"))?;
+    database.activate_route(route.route_id).await?;
+    let summary = ActivationSummary {
+        schema_version: 1,
+        active_route_label: label.to_owned(),
+    };
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
 async fn request(
     root: &QaAcceptanceRoot,
     stream: bool,
@@ -676,8 +722,12 @@ async fn request(
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(serde_json::to_vec(&serde_json::json!({
             "model": "qa-synthetic-model",
-            "input": "qa-synthetic-input",
             "stream": stream,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "qa-synthetic-input" }],
+            }],
         }))?)
         .send()
         .await?;
@@ -716,9 +766,9 @@ async fn request(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
-    let command = arguments
-        .first()
-        .ok_or("usage: v0_2a_qa_fixture <seed|request|inspect|usage-seed> [--root PATH]")?;
+    let command = arguments.first().ok_or(
+        "usage: v0_2a_qa_fixture <seed|activate|request|inspect|usage-seed> [--root PATH]",
+    )?;
     if command == "usage-seed" {
         return usage_seed().await;
     }
@@ -728,6 +778,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let manifest = PathBuf::from(required_option(&arguments, "--manifest")?);
             seed(&root, &manifest).await
         }
+        "activate" => {
+            let label = required_option(&arguments, "--route")?;
+            activate(&root, &label).await
+        }
         "inspect" => inspect(&root).await,
         "request" => {
             let stream = arguments.iter().any(|argument| argument == "--stream");
@@ -735,7 +789,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let timeout_ms = optional_u64(&arguments, "--timeout-ms")?.unwrap_or(90_000);
             request(&root, stream, cancel_after_ms, timeout_ms).await
         }
-        _ => Err("usage: v0_2a_qa_fixture <seed|request|inspect|usage-seed> [--root PATH]".into()),
+        _ => Err(
+            "usage: v0_2a_qa_fixture <seed|activate|request|inspect|usage-seed> [--root PATH]"
+                .into(),
+        ),
     }
 }
 
@@ -768,13 +825,19 @@ mod tests {
             schema_version: 1,
             nonce: root.nonce().to_owned(),
             controller_url: "http://127.0.0.1:12345".to_owned(),
-            routes: [("A", 12346), ("B", 12347), ("C", 12348), ("D", 12349)]
-                .into_iter()
-                .map(|(label, port)| FixtureRoute {
-                    label: label.to_owned(),
-                    base_url: format!("http://127.0.0.1:{port}/v1"),
-                })
-                .collect(),
+            routes: [
+                ("A", 12346, "responses"),
+                ("B", 12347, "chat_completions"),
+                ("C", 12348, "responses"),
+                ("D", 12349, "responses"),
+            ]
+            .into_iter()
+            .map(|(label, port, protocol)| FixtureRoute {
+                label: label.to_owned(),
+                protocol: protocol.to_owned(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+            })
+            .collect(),
         }
     }
 
@@ -796,6 +859,112 @@ mod tests {
 
         fixture.routes[0].base_url = "https://provider.example/v1".to_owned();
         assert!(validate_manifest(&fixture, &root).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_an_unknown_route_protocol() {
+        let temporary = TempDir::new().expect("temporary");
+        let root = root(&temporary, "protocol");
+        let mut fixture = manifest(&root);
+        validate_manifest(&fixture, &root).expect("valid manifest");
+
+        fixture.routes[1].protocol = "anthropic_messages".to_owned();
+        let error = validate_manifest(&fixture, &root).expect_err("unknown protocol");
+        assert!(error.to_string().contains("unsupported protocol"));
+    }
+
+    #[test]
+    fn manifest_route_requires_a_protocol_field() {
+        let serialized = serde_json::json!({
+            "schemaVersion": 1,
+            "nonce": "n",
+            "controllerUrl": "http://127.0.0.1:12345",
+            "routes": [{ "label": "A", "baseUrl": "http://127.0.0.1:12346/v1" }],
+        });
+        assert!(serde_json::from_value::<FixtureManifest>(serialized).is_err());
+    }
+
+    #[tokio::test]
+    async fn activate_selects_a_seeded_chat_route_by_label() {
+        let temporary = TempDir::new().expect("temporary");
+        let root = root(&temporary, "activate");
+        let path = root.root().join("fixture-manifest.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&manifest(&root)).expect("manifest JSON"),
+        )
+        .expect("manifest file");
+        seed(&root, &path).await.expect("seed");
+
+        activate(&root, "B").await.expect("activate chat route");
+        let database = DatabaseExecutor::open(root.database_path()).expect("database");
+        let active = database
+            .active_route_id()
+            .await
+            .expect("active route")
+            .expect("an active route");
+        let route = database
+            .list_routes()
+            .await
+            .expect("routes")
+            .into_iter()
+            .find(|route| route.route_id == active)
+            .expect("active route record");
+        assert_eq!(route.name, "Synthetic B");
+        assert_eq!(route.protocol, RouteProtocol::ChatCompletions);
+    }
+
+    #[tokio::test]
+    async fn activate_rejects_unknown_and_missing_route_labels() {
+        let temporary = TempDir::new().expect("temporary");
+        let seeded_root = root(&temporary, "activate-invalid");
+        let path = seeded_root.root().join("fixture-manifest.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&manifest(&seeded_root)).expect("manifest JSON"),
+        )
+        .expect("manifest file");
+        seed(&seeded_root, &path).await.expect("seed");
+
+        assert!(activate(&seeded_root, "E").await.is_err());
+        assert!(activate(&seeded_root, "synthetic B").await.is_err());
+
+        let unseeded = root(&temporary, "activate-unseeded");
+        DatabaseExecutor::open(unseeded.database_path()).expect("empty QA database");
+        let error = activate(&unseeded, "B")
+            .await
+            .expect_err("unseeded route label");
+        assert!(error.to_string().contains("is not seeded"));
+    }
+
+    #[tokio::test]
+    async fn seed_persists_each_manifest_protocol() {
+        let temporary = TempDir::new().expect("temporary");
+        let root = root(&temporary, "seed-protocol");
+        let path = root.root().join("fixture-manifest.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&manifest(&root)).expect("manifest JSON"),
+        )
+        .expect("manifest file");
+        seed(&root, &path).await.expect("seed");
+
+        let database = DatabaseExecutor::open(root.database_path()).expect("database");
+        let protocols = database
+            .list_routes()
+            .await
+            .expect("routes")
+            .into_iter()
+            .map(|route| (route.name, route.protocol))
+            .collect::<Vec<_>>();
+        assert!(protocols.contains(&("Synthetic B".to_owned(), RouteProtocol::ChatCompletions)));
+        assert_eq!(
+            protocols
+                .iter()
+                .filter(|(_, protocol)| *protocol == RouteProtocol::Responses)
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -890,6 +1059,14 @@ mod tests {
                 .expect("completion states"),
             4
         );
+        let standard_catalog_predicate = format!(
+            "pricing_catalog_version = '{}'",
+            router_core::pricing::CATALOG_VERSION
+        );
+        let priority_catalog_predicate = format!(
+            "pricing_catalog_version = '{}'",
+            router_core::pricing::PRIORITY_CATALOG_VERSION
+        );
         for predicate in [
             "streaming = 0",
             "streaming = 1",
@@ -898,8 +1075,8 @@ mod tests {
             "total_latency_ms > 60000",
             "total_latency_ms >= 3600000",
             "first_output_latency_ms IS NOT NULL",
-            "pricing_catalog_version = 'openai-standard-2026-07-27'",
-            "pricing_catalog_version = 'openai-priority-2026-07-28'",
+            standard_catalog_predicate.as_str(),
+            priority_catalog_predicate.as_str(),
         ] {
             let sql = format!("SELECT COUNT(*) FROM proxy_requests WHERE {predicate}");
             let count: i64 = connection
