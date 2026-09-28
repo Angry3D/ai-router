@@ -51,6 +51,7 @@ describe("license and provenance gate", () => {
       "lucide-icons",
       "readme-product-screenshots",
       "openai-pricing-snapshots",
+      "cc-switch-chat-bridge",
     ]);
   });
 

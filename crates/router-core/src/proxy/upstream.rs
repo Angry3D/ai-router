@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_lines)]
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{Cursor, Read},
     pin::Pin,
     sync::Arc,
@@ -25,6 +25,8 @@ use super::{
     RequestActivityDisposition, RequestTransitionSink, RoutingSnapshot, RoutingSnapshotStore,
     RuntimeDiagnosticCode, RuntimeDiagnosticComponent, RuntimeDiagnosticEvent,
     RuntimeDiagnosticSink, UpstreamRequestHandler, ValidatedProxyRequest,
+    chat_bridge::{BridgeError, CompatibilityMarker, ToolOrigin, translate_request},
+    chat_stream::{self, ChatSseDecoder, ChatStreamBridge},
     fallback::{
         ClassifiedFailure, FIRST_MEANINGFUL_OUTPUT_TIMEOUT, FailurePolicy, SSE_PREFLIGHT_LIMIT,
         TransportFailure, classify_http, classify_semantic, classify_transport,
@@ -40,7 +42,8 @@ use super::{
 };
 use crate::{
     domain::{
-        CompletionState, DeliveryState, InferenceFailureReason, InferenceOutcome, UpstreamAttemptId,
+        CompletionState, DeliveryState, InferenceFailureReason, InferenceOutcome, RouteProtocol,
+        UpstreamAttemptId,
     },
     storage::{
         AttemptHistoryRecord, AttemptRole, AttemptRoutingTransition,
@@ -53,6 +56,9 @@ const DEFAULT_RESPONSE_LIMIT: usize = 200 * 1024 * 1024;
 pub(crate) const EXACT_CONTENT_DECODER_WINDOW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_UPSTREAM_ERROR_MESSAGE_CHARS: usize = 1_800;
 const RESPONSE_TERMINAL_GRACE: Duration = Duration::from_secs(3);
+
+/// Maximum buffered bytes for a Chat upstream that ignored `stream: true`.
+const MAX_CHAT_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 const fn checked_next_attempt_index(attempt_index: u32) -> Option<u32> {
     attempt_index.checked_add(1)
@@ -1237,7 +1243,45 @@ impl ResponsesForwarder {
             return Self::invalid_route_credentials(request, context);
         };
         let endpoint = request.route.base_url.inference_url(request.route.protocol);
-        let body = upstream_request_body(request);
+        let prepared = match prepare_attempt_body(request) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                context.finish_local(
+                    CompletionState::Failed,
+                    StatusCode::BAD_REQUEST,
+                    error.code,
+                    RuntimeDiagnosticCode::ChatBridgeUnsupportedRequest,
+                );
+                return AttemptResult::Committed(local_error_with_request_id(
+                    StatusCode::BAD_REQUEST,
+                    error.code,
+                    &unsupported_request_message(error.feature),
+                    request.request_id.clone(),
+                ));
+            }
+        };
+        let PreparedAttemptBody {
+            body,
+            stream: translation,
+        } = prepared;
+        if translation.is_some() && !request.stream {
+            // A Chat attempt is only bridged as Responses SSE in this release;
+            // a non-streaming client request fails closed before any send
+            // instead of passing an unbridged Chat body back to the client.
+            let error = BridgeError::CLIENT_NON_STREAMING;
+            context.finish_local(
+                CompletionState::Failed,
+                StatusCode::BAD_REQUEST,
+                error.code,
+                RuntimeDiagnosticCode::ChatBridgeUnsupportedRequest,
+            );
+            return AttemptResult::Committed(local_error_with_request_id(
+                StatusCode::BAD_REQUEST,
+                error.code,
+                &unsupported_request_message(error.feature),
+                request.request_id.clone(),
+            ));
+        }
         let started = Instant::now();
         let probe_deadline = probe_evidence_timeout.map(|timeout| started + timeout);
         let Ok(client) = self.client.client() else {
@@ -1343,12 +1387,23 @@ impl ResponsesForwarder {
                 .await;
         }
         if request.stream {
+            let stream = match translation {
+                Some(translation) => {
+                    emit_compatibility_diagnostic(
+                        &self.diagnostics,
+                        request,
+                        &translation.compatibility,
+                    );
+                    translated_chat_stream(upstream, translation, request)
+                }
+                None => raw_upstream_stream(upstream),
+            };
             if request.routing.enabled
                 && self.policy_current(&request.routing, &request.route.route_id)
             {
                 return self
                     .preflight_stream(
-                        upstream,
+                        stream,
                         request,
                         context,
                         request.request_started,
@@ -1357,7 +1412,7 @@ impl ResponsesForwarder {
                     .await;
             }
             return AttemptResult::Committed(streaming_response(
-                upstream,
+                stream,
                 request.request_started,
                 context,
             ));
@@ -1655,7 +1710,7 @@ impl ResponsesForwarder {
 
     async fn preflight_stream(
         &self,
-        upstream: reqwest::Response,
+        upstream: UpstreamStream,
         request: &ValidatedProxyRequest,
         context: RequestHistoryContext,
         request_started: Instant,
@@ -1765,6 +1820,26 @@ impl ResponsesForwarder {
 }
 
 type BoxByteStream = Pin<Box<dyn Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send>>;
+
+/// One attempt's outbound body plus the response translation it needs.
+struct PreparedAttemptBody {
+    body: Bytes,
+    stream: Option<ChatTranslationPlan>,
+}
+
+/// Response translation state for one Chat Completions attempt.
+struct ChatTranslationPlan {
+    tool_names: HashMap<String, ToolOrigin>,
+    compatibility: Vec<CompatibilityMarker>,
+}
+
+/// The upstream response parts one attempt streams to the client.
+struct UpstreamStream {
+    status: StatusCode,
+    source_headers: HeaderMap,
+    declared_sse: bool,
+    stream: BoxByteStream,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreflightCommitReason {
@@ -1881,14 +1956,14 @@ struct SsePreflight {
 }
 
 impl SsePreflight {
-    fn new(upstream: reqwest::Response, context: RequestHistoryContext, started: Instant) -> Self {
-        let status = upstream.status();
-        let source_headers = upstream.headers().clone();
-        let declared_sse = is_event_stream(&source_headers);
+    fn new(upstream: UpstreamStream, context: RequestHistoryContext, started: Instant) -> Self {
+        let UpstreamStream {
+            status,
+            source_headers,
+            declared_sse,
+            stream,
+        } = upstream;
         let headers = streaming_response_headers(&source_headers, declared_sse);
-        let stream = Box::pin(upstream.bytes_stream().map(|result| {
-            result.map_err(|_| std::io::Error::other("upstream response stream failed"))
-        }));
         Self {
             status,
             source_headers,
@@ -2556,13 +2631,28 @@ fn upstream_request_body(request: &ValidatedProxyRequest) -> Bytes {
     request.body.clone()
 }
 
+/// Request headers only the Codex Responses backend understands.
+///
+/// A Chat Completions attempt must not forward them: they are Responses-only
+/// client facts with no contract evidence for a Chat upstream.
+const CODEX_ONLY_REQUEST_HEADERS: [&str; 3] = [
+    "chatgpt-account-id",
+    "x-oai-attestation",
+    "x-codex-turn-state",
+];
+
 fn build_upstream_headers(request: &ValidatedProxyRequest) -> Result<HeaderMap, ()> {
     let mut headers = HeaderMap::new();
     let connection_tokens = connection_nominated_headers(&request.headers);
+    let chat_attempt = request.route.protocol == RouteProtocol::ChatCompletions;
     for (name, value) in &request.headers {
-        if !remove_request_header(name) && !connection_tokens.contains(name) {
-            headers.append(name.clone(), value.clone());
+        if remove_request_header(name) || connection_tokens.contains(name) {
+            continue;
         }
+        if chat_attempt && CODEX_ONLY_REQUEST_HEADERS.contains(&name.as_str()) {
+            continue;
+        }
+        headers.append(name.clone(), value.clone());
     }
     let mut bearer = Vec::with_capacity(7 + request.route.api_key.expose().len());
     bearer.extend_from_slice(b"Bearer ");
@@ -2630,17 +2720,252 @@ pub(super) fn remove_request_header(name: &HeaderName) -> bool {
         || name_text.starts_with("x-akamai-")
 }
 
-fn streaming_response(
+/// Wraps a Chat Completions response so the client receives Responses SSE.
+///
+/// A gateway that ignored `stream: true` returns JSON; that body is read under
+/// a bound and passed through the same item builder as a single frame.
+fn translated_chat_stream(
     response: reqwest::Response,
-    started: Instant,
-    context: RequestHistoryContext,
-) -> Response {
+    plan: ChatTranslationPlan,
+    request: &ValidatedProxyRequest,
+) -> UpstreamStream {
     let status = response.status();
-    let is_sse = is_event_stream(response.headers());
-    let headers = streaming_response_headers(response.headers(), is_sse);
+    // The client always receives synthesized Responses SSE, even when the
+    // gateway ignored `stream: true` and answered JSON, so the declared type is
+    // read before it is replaced.
+    let declared_sse = is_event_stream(response.headers());
+    let mut source_headers = response.headers().clone();
+    source_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    let ChatTranslationPlan {
+        tool_names,
+        compatibility: _compatibility,
+    } = plan;
+    let response_id = format!("resp_{}", request.request_id);
+    let created_at = u64::try_from(now_millis()).unwrap_or_default();
+    let model = request.model.clone();
+    if declared_sse {
+        let upstream: BoxByteStream = Box::pin(response.bytes_stream().map(|result| {
+            result.map_err(|_| std::io::Error::other("upstream response stream failed"))
+        }));
+        UpstreamStream {
+            status,
+            source_headers,
+            declared_sse: true,
+            stream: Box::pin(translate_chat_sse(
+                upstream,
+                response_id,
+                created_at,
+                model,
+                tool_names,
+            )),
+        }
+    } else {
+        let upstream: BoxByteStream = Box::pin(response.bytes_stream().map(|result| {
+            result.map_err(|_| std::io::Error::other("upstream response stream failed"))
+        }));
+        let stream = stream::once(async move {
+            let mut generated = Vec::new();
+            let mut bridge = ChatStreamBridge::new(response_id, created_at, model, tool_names);
+            match read_bounded_body(upstream, MAX_CHAT_JSON_BODY_BYTES).await {
+                Ok(body) => {
+                    if bridge.handle_json_response(&body, &mut generated).is_err() {
+                        generated.clear();
+                        bridge.fail(
+                            &mut generated,
+                            chat_stream::UPSTREAM_ERROR_CODE,
+                            "Upstream returned an unreadable completion body.",
+                        );
+                    }
+                }
+                Err(JsonBodyError::TooLarge) => bridge.fail(
+                    &mut generated,
+                    chat_stream::FRAME_TOO_LARGE_CODE,
+                    "The upstream completion body exceeded the local limit.",
+                ),
+                Err(JsonBodyError::Read) => bridge.fail(
+                    &mut generated,
+                    chat_stream::UPSTREAM_ERROR_CODE,
+                    "The upstream completion body could not be read.",
+                ),
+            }
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(generated))
+        });
+        UpstreamStream {
+            status,
+            source_headers,
+            declared_sse: true,
+            stream: Box::pin(stream),
+        }
+    }
+}
+
+fn translate_chat_sse(
+    upstream: BoxByteStream,
+    response_id: String,
+    created_at: u64,
+    model: String,
+    tool_names: HashMap<String, ToolOrigin>,
+) -> impl Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send {
+    let state = ChatStreamState {
+        upstream,
+        decoder: ChatSseDecoder::default(),
+        bridge: ChatStreamBridge::new(response_id, created_at, model, tool_names),
+        pending: Vec::new(),
+        finished: false,
+    };
+    stream::unfold(state, |mut state| async move {
+        loop {
+            if !state.pending.is_empty() {
+                let bytes = std::mem::take(&mut state.pending);
+                return Some((
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from(bytes)),
+                    state,
+                ));
+            }
+            if state.finished {
+                return None;
+            }
+            if state.bridge.is_terminal() {
+                state.finished = true;
+                continue;
+            }
+            match state.upstream.next().await {
+                Some(Ok(chunk)) => match state.decoder.push(&chunk) {
+                    Ok(payloads) => {
+                        for payload in payloads {
+                            state.bridge.handle_payload(&payload, &mut state.pending);
+                        }
+                    }
+                    Err(failure) => {
+                        state
+                            .bridge
+                            .fail(&mut state.pending, failure.code, failure.message);
+                    }
+                },
+                Some(Err(_)) => state.bridge.fail(
+                    &mut state.pending,
+                    chat_stream::UPSTREAM_ERROR_CODE,
+                    "The upstream response stream failed.",
+                ),
+                None => state.bridge.finish_on_eof(&mut state.pending),
+            }
+        }
+    })
+}
+
+struct ChatStreamState {
+    upstream: BoxByteStream,
+    decoder: ChatSseDecoder,
+    bridge: ChatStreamBridge,
+    pending: Vec<u8>,
+    finished: bool,
+}
+
+/// Why a non-SSE Chat body could not be used.
+enum JsonBodyError {
+    /// The upstream body was larger than the local bound.
+    TooLarge,
+    /// The upstream body stream failed.
+    Read,
+}
+
+async fn read_bounded_body(stream: BoxByteStream, limit: usize) -> Result<Vec<u8>, JsonBodyError> {
+    let mut stream = stream;
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| JsonBodyError::Read)?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(JsonBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Prepares one attempt's outbound body and, for Chat attempts, its response
+/// translation plan.
+///
+/// # Errors
+///
+/// Returns the bounded translation error when a Chat attempt cannot express the
+/// client request; the caller reports it as a local, non-striking client error.
+fn prepare_attempt_body(
+    request: &ValidatedProxyRequest,
+) -> Result<PreparedAttemptBody, BridgeError> {
+    match request.route.protocol {
+        RouteProtocol::Responses => Ok(PreparedAttemptBody {
+            body: upstream_request_body(request),
+            stream: None,
+        }),
+        RouteProtocol::ChatCompletions => {
+            let translated = translate_request(&request.body)?;
+            Ok(PreparedAttemptBody {
+                body: translated.body,
+                stream: Some(ChatTranslationPlan {
+                    tool_names: translated.tool_names,
+                    compatibility: translated.compatibility,
+                }),
+            })
+        }
+    }
+}
+
+fn unsupported_request_message(feature: &str) -> String {
+    format!(
+        "The request contains content the Chat Completions upstream cannot express ({feature})."
+    )
+}
+
+/// Records the bounded compatibility diagnostic for a bridged attempt.
+///
+/// The payload never carries feature values, tool names, or body content.
+fn emit_compatibility_diagnostic(
+    diagnostics: &Arc<dyn RuntimeDiagnosticSink>,
+    request: &ValidatedProxyRequest,
+    markers: &[CompatibilityMarker],
+) {
+    if markers.is_empty() {
+        return;
+    }
+    diagnostics.emit(RuntimeDiagnosticEvent {
+        component: RuntimeDiagnosticComponent::Upstream,
+        code: RuntimeDiagnosticCode::ChatBridgeCompatibility,
+        request_id: Some(request.request_id.clone()),
+        route_id: Some(request.route.route_id.clone()),
+        http_status: None,
+    });
+}
+
+fn raw_upstream_stream(response: reqwest::Response) -> UpstreamStream {
+    let declared_sse = is_event_stream(response.headers());
+    let source_headers = response.headers().clone();
+    let status = response.status();
     let stream: BoxByteStream = Box::pin(response.bytes_stream().map(|result| {
         result.map_err(|_| std::io::Error::other("upstream response stream failed"))
     }));
+    UpstreamStream {
+        status,
+        source_headers,
+        declared_sse,
+        stream,
+    }
+}
+
+fn streaming_response(
+    upstream: UpstreamStream,
+    started: Instant,
+    context: RequestHistoryContext,
+) -> Response {
+    let UpstreamStream {
+        status,
+        source_headers,
+        declared_sse,
+        stream,
+    } = upstream;
+    let headers = streaming_response_headers(&source_headers, declared_sse);
     streaming_response_from_parts(
         status,
         headers,
@@ -2649,7 +2974,7 @@ fn streaming_response(
         started,
         context,
         None,
-        is_sse,
+        declared_sse,
         None,
     )
 }
@@ -3184,6 +3509,14 @@ mod tests {
     }
 
     fn request_for_base(stream: bool, base_url: &str) -> ValidatedProxyRequest {
+        request_for_base_with_protocol(stream, base_url, RouteProtocol::Responses)
+    }
+
+    fn request_for_base_with_protocol(
+        stream: bool,
+        base_url: &str,
+        protocol: RouteProtocol,
+    ) -> ValidatedProxyRequest {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("localhost"));
         headers.insert(
@@ -3201,8 +3534,8 @@ mod tests {
         let route = Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: "Primary".to_owned(),
-            protocol: RouteProtocol::Responses,
-            base_url: BaseUrl::parse(base_url, RouteProtocol::Responses).expect("base URL"),
+            protocol,
+            base_url: BaseUrl::parse(base_url, protocol).expect("base URL"),
             api_key: Arc::new(ApiKey::parse("upstream-secret").expect("API key")),
             fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
         });
@@ -3281,13 +3614,24 @@ mod tests {
     }
 
     async fn start_mock_upstream(state: MockUpstream) -> ProxyServerHandle {
+        start_mock_upstream_with_protocol(state, RouteProtocol::Responses).await
+    }
+
+    async fn start_mock_upstream_with_protocol(
+        state: MockUpstream,
+        protocol: RouteProtocol,
+    ) -> ProxyServerHandle {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("mock listener");
+        let path = match protocol {
+            RouteProtocol::Responses => "/v1/responses",
+            RouteProtocol::ChatCompletions => "/v1/chat/completions",
+        };
         ProxyServerHandle::from_listener(
             listener,
             Router::new()
-                .route("/v1/responses", post(mock_upstream_handler))
+                .route(path, post(mock_upstream_handler))
                 .with_state(state),
         )
     }
@@ -3885,6 +4229,34 @@ mod tests {
         let stream_headers = build_upstream_headers(&request(true)).expect("stream headers");
         assert_eq!(
             stream_headers.get(header::ACCEPT_ENCODING),
+            Some(&HeaderValue::from_static("identity"))
+        );
+    }
+
+    #[test]
+    fn chat_attempts_drop_codex_only_headers_and_keep_shared_ones() {
+        let responses = build_upstream_headers(&request(false)).expect("responses headers");
+        assert!(responses.contains_key("x-codex-turn-state"));
+        assert!(responses.contains_key("chatgpt-account-id"));
+        assert!(responses.contains_key("x-oai-attestation"));
+
+        let chat = request_for_base_with_protocol(
+            true,
+            "https://example.test/v1",
+            RouteProtocol::ChatCompletions,
+        );
+        let chat_headers = build_upstream_headers(&chat).expect("chat headers");
+        assert!(!chat_headers.contains_key("x-codex-turn-state"));
+        assert!(!chat_headers.contains_key("chatgpt-account-id"));
+        assert!(!chat_headers.contains_key("x-oai-attestation"));
+        assert_eq!(
+            chat_headers.get(header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer upstream-secret"))
+        );
+        assert!(chat_headers.contains_key(header::COOKIE));
+        assert!(chat_headers.contains_key("x-future-field"));
+        assert_eq!(
+            chat_headers.get(header::ACCEPT_ENCODING),
             Some(&HeaderValue::from_static("identity"))
         );
     }
@@ -4603,7 +4975,7 @@ mod tests {
             .checked_sub(Duration::from_millis(50))
             .expect("test latency is representable");
 
-        let response = streaming_response(upstream, started, context);
+        let response = streaming_response(raw_upstream_stream(upstream), started, context);
         let downstream = to_bytes(response.into_body(), sse.len() + 1)
             .await
             .expect("SSE response");
@@ -4701,6 +5073,56 @@ mod tests {
             inference.status(&route_id, now_millis()).kind,
             InferenceStatusKind::Unverified
         );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn chat_bridge_cancellation_is_history_only_and_inference_neutral() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut state = mock_upstream(StatusCode::OK, sse);
+        state.headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        state.body_delay = Duration::from_millis(200);
+        let captured_paths = Arc::clone(&state.request_paths);
+        let server = start_mock_upstream_with_protocol(state, RouteProtocol::ChatCompletions).await;
+        let history = Arc::new(HistoryCapture::default());
+        let inference = InferenceStatusService::new(Arc::new(NoopInferenceChanges));
+        let mut routed_request = request_for_base_with_protocol(
+            true,
+            &format!("http://{}/v1", server.address()),
+            RouteProtocol::ChatCompletions,
+        );
+        routed_request.body = Bytes::from_static(
+            br#"{"model":"gpt-test","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#,
+        );
+        let route_id = routed_request.route.route_id.clone();
+        let forwarder = test_forwarder(
+            UpstreamForwarderConfig::default(),
+            history.clone(),
+            Arc::new(DiagnosticCapture::default()),
+            inference.clone(),
+        );
+
+        let response = forwarder.handle(routed_request).await;
+        drop(response);
+
+        {
+            let records = history.0.lock().expect("history mutex");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].completion_state, CompletionState::Cancelled);
+        }
+        assert_eq!(
+            inference.status(&route_id, now_millis()).kind,
+            InferenceStatusKind::Unverified
+        );
+        let paths = captured_paths.lock().expect("request path mutex").clone();
+        assert_eq!(paths, vec!["/v1/chat/completions".to_owned()]);
         server.shutdown().await;
     }
 
@@ -6644,7 +7066,8 @@ mod tests {
             .body(reqwest::Body::from(source.clone()))
             .expect("upstream response")
             .into();
-        let mut preflight = SsePreflight::new(upstream, context, Instant::now());
+        let mut preflight =
+            SsePreflight::new(raw_upstream_stream(upstream), context, Instant::now());
         let chunk = preflight
             .stream
             .next()
@@ -6709,7 +7132,8 @@ mod tests {
                 .body(reqwest::Body::from(source.clone()))
                 .expect("upstream response")
                 .into();
-            let mut preflight = SsePreflight::new(upstream, context, Instant::now());
+            let mut preflight =
+                SsePreflight::new(raw_upstream_stream(upstream), context, Instant::now());
             let chunk = preflight
                 .stream
                 .next()
@@ -6766,7 +7190,8 @@ mod tests {
                 .body(reqwest::Body::from(source.clone()))
                 .expect("upstream response")
                 .into();
-            let mut preflight = SsePreflight::new(upstream, context, Instant::now());
+            let mut preflight =
+                SsePreflight::new(raw_upstream_stream(upstream), context, Instant::now());
             let chunk = preflight
                 .stream
                 .next()

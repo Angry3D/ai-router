@@ -69,6 +69,29 @@ Lucide 的版权与 ISC 许可全文见
 使用者应以实际账单和当前官方文档为准。详细单位与更新规则见
 [`crates/router-core/pricing/catalogs/README.md`](./crates/router-core/pricing/catalogs/README.md)。
 
+<!-- provenance:cc-switch-chat-bridge -->
+
+## Codex Chat bridge literals
+
+- 本地文件：`crates/router-core/src/proxy/chat_bridge.rs`、
+  `third-party/cc-switch-chat-bridge.provenance.json`
+- 上游项目：`farion1231/cc-switch`
+- 上游提交：`0555c09d9aa06e5f93bf6d57ecf8faa9e6305c4b`
+- 上游路径：`src-tauri/src/proxy/providers/transform_codex_chat.rs`
+- 上游地址：<https://github.com/farion1231/cc-switch>
+- 许可证：MIT
+- 版权：Copyright (c) 2025 Jason Young
+- 本地处理：只按上游逐字复制模型可见的短字面量——合成 `tool_search` 函数声明（含名称、
+  描述、`query`/`limit` 参数模式）、自定义工具包装输入的描述文本，以及
+  `Original tool definition:` 标题及其代码块格式。声明字面量的 SHA-256
+  （`e684675e547c7e60317a9a43834d2133d3655704902296e0881619c13f48b06c`）由单元测试固定。
+  未复制任何上游源文件；其余转换逻辑、错误分类和边界处理均为 AI Router 自有实现。
+
+MIT 许可全文见
+[`third-party/licenses/MIT-cc-switch.txt`](./third-party/licenses/MIT-cc-switch.txt)，
+逐字内容、改编行为与有意分歧见
+[`third-party/cc-switch-chat-bridge.provenance.json`](./third-party/cc-switch-chat-bridge.provenance.json)。
+
 ## 依赖项
 
 npm 与 Cargo 传递依赖不会因出现在 lockfile 中而重新授权为 MIT。运行
