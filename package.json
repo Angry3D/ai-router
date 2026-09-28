@@ -84,7 +84,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
-    "@openai/codex": "0.155.1",
+    "@openai/codex": "0.156.1",
     "@tauri-apps/cli": "^2.11.5",
     "@testing-library/jest-dom": "^6.9.0",
     "@testing-library/react": "^16.3.3",
@@ -97,7 +97,7 @@
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^16.5.0",
     "jsdom": "^27.2.0",
-    "prettier": "3.9.8",
+    "prettier": "3.9.9",
     "semver": "7.8.5",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.70.1",
