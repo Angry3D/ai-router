@@ -4,7 +4,12 @@
 
 AI Router 的本地代理只监听 loopback，并使用本地 gateway token 保护 Codex 投影。文本推理入口是
 Responses API；项目不宣称兼容完整 OpenAI API。用户保存的 Base URL 可以是 API 前缀或一个终止于
-`/responses` 的完整地址，内部统一保存前缀并只派生一个最终 `/responses`，不会自动猜测 `/v1`。
+所选协议端点的完整地址，内部统一保存前缀并只派生一个最终端点（Responses 为 `/responses`，
+Chat Completions 为 `/chat/completions`），不会自动猜测 `/v1`。
+
+每条路由选择一个上游协议。Responses 路由把原始请求字节转发给 `/responses`；Chat Completions 路由
+只在这一次尝试内把 Responses 请求翻译成 Chat 请求，并把上游响应翻译回 Responses 事件。翻译失败
+属于本地客户端错误：不发送上游请求、不打击路由健康、也不静默跳到下一条路由。
 
 请求在进入代理后读取一份不可变路由快照。一次尝试绑定 route、Base URL、API Key、余额脚本设置和
 服务层级策略；配置更新只影响后续快照，不能在进行中的请求里混合新旧字段。
@@ -23,6 +28,30 @@ Responses API；项目不宣称兼容完整 OpenAI API。用户保存的 Base UR
 Responses SSE 在转发前观察有界事件数据，用于确定首个有效输出、终止状态、token 用量和历史结果。
 代理不缓存完整无限流，也不把 provider 文本变成回退依据。超时、连接失败、上游 HTTP 状态和协议
 错误保持不同的稳定分类。
+
+## Chat Completions 上游兼容
+
+Chat Completions 路由仍然向 Codex 提供 Responses 契约：请求在这一次尝试内被翻译，上游响应被翻译回
+Responses 事件，回退、历史、用量和诊断继续沿用既有语义。翻译是有界且失败关闭的，不会静默丢弃
+语义：
+
+- 工具声明按 64 字节上限扁平化命名空间（超长时追加 SHA-256 后缀），重名或空名一律失败关闭，而不是
+  静默丢弃工具。
+- 托管 `tool_search` 使用固定的合成函数声明，并在返回时还原为 `tool_search_call`；默认形态的
+  `web_search` 声明（仅 `external_web_access` 布尔值）会被省略并记录兼容标记，更丰富的形态失败关闭。
+- 自定义工具把原始声明嵌入函数描述，调用输入包装为字符串字段，返回时还原为 `custom_tool_call`。
+- 可读的 reasoning 文本会回放到对应的 assistant 轮次，`reasoning.effort` 的
+  `low | medium | high | xhigh | max` 映射为顶层 `reasoning_effort`；只有不透明
+  `encrypted_content`、provider 专有形态或不支持的值会失败关闭。
+- Codex 本地压缩仍是受支持路径；带 `compaction_trigger` 的请求在发送上游前失败关闭。
+- 上游若忽略 `stream: true` 而返回 JSON，同一套条目构建逻辑仍会生成 Responses SSE。
+- 增量 SSE 组帧有 256 KiB 上限：单个完整帧和未完成的尾部都受同一上限约束，超限即输出有界失败并
+  结束本轮，不会无限增长缓冲。
+- 上游完全未提供用量时不会伪造计费数据；上游提供了用量但缺少必需字段时，会按 Codex 0.155.1 的
+  契约把 `input_tokens_details.{cached_tokens,cache_write_tokens}` 等必需字段补零，而不是让整条
+  响应解析失败。本版本对非流式客户端请求的 Chat 路由失败关闭。
+
+这些兼容行为只影响 Chat Completions 路由；Responses 路由保持字节不变的转发。
 
 ## 图片结果兼容
 
