@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-pub const CATALOG_VERSION: &str = "openai-standard-2026-09-12";
-pub const PRIORITY_CATALOG_VERSION: &str = "openai-priority-2026-09-12";
+pub const CATALOG_VERSION: &str = "openai-standard-2026-09-29";
+pub const PRIORITY_CATALOG_VERSION: &str = "openai-priority-2026-09-29";
 const STANDARD_CATALOG_JSON: &str =
-    include_str!("../pricing/catalogs/openai-standard-2026-09-12.json");
+    include_str!("../pricing/catalogs/openai-standard-2026-09-29.json");
 const PRIORITY_CATALOG_JSON: &str =
-    include_str!("../pricing/catalogs/openai-priority-2026-09-12.json");
+    include_str!("../pricing/catalogs/openai-priority-2026-09-29.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogTier {
@@ -32,13 +32,13 @@ impl CatalogTier {
 
     const fn captured_at(self) -> &'static str {
         match self {
-            Self::Standard | Self::Priority => "2026-09-12",
+            Self::Standard | Self::Priority => "2026-09-29",
         }
     }
 
     const fn effective_at(self) -> Option<&'static str> {
         match self {
-            Self::Standard => Some("2026-09-12"),
+            Self::Standard => Some("2026-09-29"),
             Self::Priority => None,
         }
     }
@@ -61,6 +61,8 @@ impl CatalogTier {
         match self {
             Self::Standard => &[
                 "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -87,6 +89,8 @@ impl CatalogTier {
             ],
             Self::Priority => &[
                 "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -256,7 +260,12 @@ fn validate_catalog(catalog: Catalog, tier: CatalogTier) -> Result<(), &'static 
         model_bands.sort_by_key(|(minimum, _)| minimum.unwrap_or(0));
         let expected = if matches!(
             model_id.as_str(),
-            "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+            "gpt-6-astra"
+                | "gpt-6-sol"
+                | "gpt-6-luna"
+                | "gpt-5.6-sol"
+                | "gpt-5.6-terra"
+                | "gpt-5.6-luna"
         ) || (tier == CatalogTier::Standard
             && matches!(model_id.as_str(), "gpt-5.5" | "gpt-5.4"))
         {
@@ -531,6 +540,16 @@ mod tests {
                 (20_000_000, 2_000_000, Some(25_000_000), 75_000_000),
             ),
             (
+                "gpt-6-sol",
+                (2_000_000, 200_000, Some(2_500_000), 10_000_000),
+                (4_000_000, 400_000, Some(5_000_000), 15_000_000),
+            ),
+            (
+                "gpt-6-luna",
+                (100_000, 10_000, Some(125_000), 500_000),
+                (200_000, 20_000, Some(250_000), 750_000),
+            ),
+            (
                 "gpt-5.6-sol",
                 (4_000_000, 400_000, Some(5_000_000), 20_000_000),
                 (8_000_000, 800_000, Some(10_000_000), 30_000_000),
@@ -555,6 +574,16 @@ mod tests {
                 "gpt-6-astra",
                 (20_000_000, 2_000_000, Some(25_000_000), 100_000_000),
                 Some((40_000_000, 4_000_000, Some(50_000_000), 150_000_000)),
+            ),
+            (
+                "gpt-6-sol",
+                (4_000_000, 400_000, Some(5_000_000), 20_000_000),
+                Some((8_000_000, 800_000, Some(10_000_000), 30_000_000)),
+            ),
+            (
+                "gpt-6-luna",
+                (200_000, 20_000, Some(250_000), 1_000_000),
+                Some((400_000, 40_000, Some(500_000), 1_500_000)),
             ),
             (
                 "gpt-5.6-sol",
