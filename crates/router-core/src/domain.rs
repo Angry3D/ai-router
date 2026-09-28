@@ -145,18 +145,72 @@ impl RouteName {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum RouteProtocol {
+    #[default]
+    Responses,
+    ChatCompletions,
+}
+
+impl RouteProtocol {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "chat_completions",
+        }
+    }
+
+    /// Parses a persisted protocol without silently substituting a default.
+    #[must_use]
+    pub fn parse_persisted(value: &str) -> Option<Self> {
+        match value {
+            "responses" => Some(Self::Responses),
+            "chat_completions" => Some(Self::ChatCompletions),
+            _ => None,
+        }
+    }
+
+    /// Terminal inference endpoint this protocol appends to a canonical prefix.
+    #[must_use]
+    pub const fn terminal_endpoint(self) -> &'static str {
+        match self {
+            Self::Responses => "/responses",
+            Self::ChatCompletions => "/chat/completions",
+        }
+    }
+
+    /// Terminal endpoint accepted only by the other protocol.
+    const fn foreign_terminal_endpoint(self) -> &'static str {
+        match self {
+            Self::Responses => "/chat/completions",
+            Self::ChatCompletions => "/responses",
+        }
+    }
+
+    const fn duplicate_terminal_error_code(self) -> &'static str {
+        match self {
+            Self::Responses => "base_url_duplicate_responses",
+            Self::ChatCompletions => "base_url_duplicate_chat_completions",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseUrl(String);
 
 impl BaseUrl {
-    /// Validates and normalizes the API prefix before `/responses`.
+    /// Validates and normalizes the API prefix before the protocol endpoint.
     ///
     /// # Errors
     ///
     /// Returns a field-specific error for an oversized or non-HTTP(S) absolute
-    /// URL, when credentials, query parameters, or fragments are present, or
-    /// when the supplied endpoint is incompatible with the Responses API.
-    pub fn parse(value: &str) -> Result<Self, ValidationError> {
+    /// URL, when credentials, query parameters, or fragments are present, when
+    /// the supplied endpoint belongs to the other protocol, or when the
+    /// selected protocol's terminal endpoint is repeated.
+    pub fn parse(value: &str, protocol: RouteProtocol) -> Result<Self, ValidationError> {
         let value = value.trim();
         if value.len() > MAX_BASE_URL_BYTES {
             return Err(ValidationError::new("base_url_too_long", "baseUrl"));
@@ -176,33 +230,35 @@ impl BaseUrl {
 
         let normalized = parsed.as_str().trim_end_matches('/');
         let normalized_path = parsed.path().trim_end_matches('/');
-        if normalized_path.ends_with("/chat/completions") {
+        if normalized_path.ends_with(protocol.foreign_terminal_endpoint()) {
             return Err(ValidationError::new(
                 "base_url_unsupported_endpoint",
                 "baseUrl",
             ));
         }
 
+        let endpoint = protocol.terminal_endpoint();
         let canonical_path = normalized_path
-            .strip_suffix("/responses")
+            .strip_suffix(endpoint)
             .map_or(normalized_path, |prefix| prefix.trim_end_matches('/'));
-        if canonical_path.ends_with("/responses") {
+        if canonical_path.ends_with(endpoint) {
             return Err(ValidationError::new(
-                "base_url_duplicate_responses",
+                protocol.duplicate_terminal_error_code(),
                 "baseUrl",
             ));
         }
 
         let canonical = if normalized_path == canonical_path {
-            normalized
+            normalized.to_owned()
         } else {
             normalized
-                .strip_suffix("/responses")
+                .strip_suffix(endpoint)
                 .unwrap_or(normalized)
                 .trim_end_matches('/')
+                .to_owned()
         };
 
-        Ok(Self(canonical.to_owned()))
+        Ok(Self(canonical))
     }
 
     #[must_use]
@@ -211,8 +267,8 @@ impl BaseUrl {
     }
 
     #[must_use]
-    pub fn inference_url(&self) -> String {
-        format!("{}/responses", self.0)
+    pub fn inference_url(&self, protocol: RouteProtocol) -> String {
+        format!("{}{}", self.0, protocol.terminal_endpoint())
     }
 
     #[must_use]
@@ -893,12 +949,13 @@ mod tests {
         DEFAULT_IMAGES_GENERATION_MODEL, ImagesGenerationModel, ImagesGenerationTimeout,
         MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW, MAX_IMAGES_GENERATION_MODEL_BYTES,
         MAX_OUTBOUND_PROXY_URL_BYTES, McpImageCapacityWarningThreshold, OutboundProxyConfig,
-        OutboundProxyUrl, RouteName,
+        OutboundProxyUrl, RouteName, RouteProtocol,
     };
 
     #[derive(Deserialize)]
     struct BaseUrlFixture {
         input: String,
+        protocol: RouteProtocol,
         canonical: Option<String>,
         inference: Option<String>,
         error: Option<String>,
@@ -910,24 +967,32 @@ mod tests {
     }
 
     #[test]
-    fn route_name_normalizes_and_rejects_invalid_values() {
-        let name = RouteName::parse("  Work Key  ").expect("valid name");
-        assert_eq!(name.as_str(), "Work Key");
-        assert_eq!(name.comparison_key(), "work key");
-        assert!(RouteName::parse("\n").is_err());
-        assert!(RouteName::parse(&"x".repeat(30)).is_ok());
-        assert!(RouteName::parse(&"x".repeat(31)).is_err());
+    fn route_protocol_round_trips_its_persisted_values() {
+        for protocol in [RouteProtocol::Responses, RouteProtocol::ChatCompletions] {
+            assert_eq!(
+                RouteProtocol::parse_persisted(protocol.as_str()),
+                Some(protocol)
+            );
+            assert_eq!(
+                serde_json::to_value(protocol).expect("serialized protocol"),
+                serde_json::Value::String(protocol.as_str().to_owned())
+            );
+        }
+        assert_eq!(RouteProtocol::default(), RouteProtocol::Responses);
+        assert_eq!(RouteProtocol::parse_persisted("chat"), None);
+        assert_eq!(RouteProtocol::parse_persisted(""), None);
     }
 
     #[test]
     fn base_url_matches_the_shared_cross_layer_contract() {
         for fixture in base_url_fixtures() {
             if let Some(expected_code) = fixture.error {
-                let error = BaseUrl::parse(&fixture.input).expect_err("invalid URL");
+                let error =
+                    BaseUrl::parse(&fixture.input, fixture.protocol).expect_err("invalid URL");
                 assert_eq!(error.code, expected_code, "input: {}", fixture.input);
                 assert_eq!(error.field, "baseUrl", "input: {}", fixture.input);
             } else {
-                let base = BaseUrl::parse(&fixture.input).expect("valid URL");
+                let base = BaseUrl::parse(&fixture.input, fixture.protocol).expect("valid URL");
                 assert_eq!(
                     Some(base.as_str()),
                     fixture.canonical.as_deref(),
@@ -935,7 +1000,7 @@ mod tests {
                     fixture.input
                 );
                 assert_eq!(
-                    base.inference_url(),
+                    base.inference_url(fixture.protocol),
                     fixture.inference.expect("valid fixture inference URL"),
                     "input: {}",
                     fixture.input
@@ -945,11 +1010,41 @@ mod tests {
     }
 
     #[test]
+    fn base_url_keeps_image_generation_independent_of_the_protocol() {
+        for protocol in [RouteProtocol::Responses, RouteProtocol::ChatCompletions] {
+            let base =
+                BaseUrl::parse("https://example.com/openai/v1", protocol).expect("valid URL");
+            assert_eq!(
+                base.images_generation_url(),
+                "https://example.com/openai/v1/images/generations"
+            );
+            assert_eq!(
+                base.inference_url(protocol),
+                format!(
+                    "https://example.com/openai/v1{}",
+                    protocol.terminal_endpoint()
+                )
+            );
+        }
+    }
+
+    #[test]
     fn base_url_enforces_the_utf8_byte_limit() {
         let oversized = format!("https://example.com/{}", "x".repeat(MAX_BASE_URL_BYTES));
-        let error = BaseUrl::parse(&oversized).expect_err("oversized URL");
+        let error =
+            BaseUrl::parse(&oversized, RouteProtocol::Responses).expect_err("oversized URL");
         assert_eq!(error.code, "base_url_too_long");
         assert_eq!(error.field, "baseUrl");
+    }
+
+    #[test]
+    fn route_name_normalizes_and_rejects_invalid_values() {
+        let name = RouteName::parse("  Work Key  ").expect("valid name");
+        assert_eq!(name.as_str(), "Work Key");
+        assert_eq!(name.comparison_key(), "work key");
+        assert!(RouteName::parse("\n").is_err());
+        assert!(RouteName::parse(&"x".repeat(30)).is_ok());
+        assert!(RouteName::parse(&"x".repeat(31)).is_err());
     }
 
     #[test]

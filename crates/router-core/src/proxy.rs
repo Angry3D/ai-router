@@ -41,7 +41,7 @@ use uuid::Uuid;
 use crate::{
     domain::{
         ApiKey, BaseUrl, CompletionState, DEFAULT_IMAGES_GENERATION_MODEL, ImagesGenerationTimeout,
-        ReachabilityResult, ReachabilityStatus, RouteId,
+        ReachabilityResult, ReachabilityStatus, RouteId, RouteProtocol,
     },
     storage::RequestHistoryRecord,
 };
@@ -93,6 +93,7 @@ pub struct RouteSnapshot {
     pub route_id: RouteId,
     pub name: String,
     pub base_url: BaseUrl,
+    pub protocol: RouteProtocol,
     pub api_key: Arc<ApiKey>,
     pub fallback_excluded_models: Arc<HashSet<String>>,
 }
@@ -1136,18 +1137,20 @@ impl ReachabilityProbe {
         self
     }
 
-    /// Checks the final Responses endpoint without credentials or a body.
+    /// Checks the protocol's final inference endpoint without credentials or a
+    /// body.
     ///
     /// # Errors
     ///
     /// Returns a field-specific validation error when the supplied Base URL is
-    /// invalid or incompatible with the Responses API.
+    /// invalid or incompatible with the selected protocol.
     pub async fn check(
         &self,
         base_url: &str,
+        protocol: RouteProtocol,
     ) -> Result<ReachabilityResult, crate::domain::ValidationError> {
-        let base_url = BaseUrl::parse(base_url)?;
-        let inference_url = base_url.inference_url();
+        let base_url = BaseUrl::parse(base_url, protocol)?;
+        let inference_url = base_url.inference_url(protocol);
         for attempt in 0..2 {
             let started = Instant::now();
             let Ok(client) = self.client.client() else {
@@ -1407,7 +1410,9 @@ mod tests {
         Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: name.to_owned(),
-            base_url: BaseUrl::parse("https://api.example.test/v1").expect("valid base URL"),
+            protocol: RouteProtocol::Responses,
+            base_url: BaseUrl::parse("https://api.example.test/v1", RouteProtocol::Responses)
+                .expect("valid base URL"),
             api_key: Arc::new(ApiKey::parse("upstream-key").expect("valid API key")),
             fallback_excluded_models: Arc::new(HashSet::new()),
         })
@@ -1482,8 +1487,12 @@ mod tests {
         let image_route = Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: "Image fixture".to_owned(),
-            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", server.address()))
-                .expect("image base URL"),
+            protocol: RouteProtocol::Responses,
+            base_url: BaseUrl::parse(
+                &format!("http://{}/openai/v1", server.address()),
+                RouteProtocol::Responses,
+            )
+            .expect("image base URL"),
             api_key: Arc::new(ApiKey::parse("image-route-key").expect("image key")),
             fallback_excluded_models: Arc::new(HashSet::new()),
         });
@@ -2227,8 +2236,12 @@ mod tests {
         let image_route = Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: "Image route".to_owned(),
-            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
-                .expect("image base URL"),
+            protocol: RouteProtocol::Responses,
+            base_url: BaseUrl::parse(
+                &format!("http://{}/openai/v1", image_upstream.address()),
+                RouteProtocol::Responses,
+            )
+            .expect("image base URL"),
             api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
             fallback_excluded_models: Arc::new(HashSet::new()),
         });
@@ -2352,8 +2365,12 @@ mod tests {
         let image_route = Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: "Image route".to_owned(),
-            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
-                .expect("image base URL"),
+            protocol: RouteProtocol::Responses,
+            base_url: BaseUrl::parse(
+                &format!("http://{}/openai/v1", image_upstream.address()),
+                RouteProtocol::Responses,
+            )
+            .expect("image base URL"),
             api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
             fallback_excluded_models: Arc::new(HashSet::new()),
         });
@@ -2586,8 +2603,12 @@ mod tests {
         let image_route = Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: "Image route".to_owned(),
-            base_url: BaseUrl::parse(&format!("http://{}/openai/v1", image_upstream.address()))
-                .expect("image base URL"),
+            protocol: RouteProtocol::Responses,
+            base_url: BaseUrl::parse(
+                &format!("http://{}/openai/v1", image_upstream.address()),
+                RouteProtocol::Responses,
+            )
+            .expect("image base URL"),
             api_key: Arc::new(ApiKey::parse("image-route-key").expect("image API key")),
             fallback_excluded_models: Arc::new(HashSet::new()),
         });
@@ -3182,7 +3203,10 @@ mod tests {
             .with_timing(Duration::from_secs(1), Duration::from_millis(100));
 
         let result = probe
-            .check(&format!("http://{}/v1/responses", server.address()))
+            .check(
+                &format!("http://{}/v1/responses", server.address()),
+                RouteProtocol::Responses,
+            )
             .await
             .expect("valid probe URL");
 
@@ -3221,7 +3245,10 @@ mod tests {
             .expect("probe client")
             .with_timing(Duration::from_secs(1), Duration::from_millis(5));
         let slow = slow_probe
-            .check(&format!("http://{}", slow_server.address()))
+            .check(
+                &format!("http://{}", slow_server.address()),
+                RouteProtocol::Responses,
+            )
             .await
             .expect("valid probe URL");
         assert_eq!(slow.status, ReachabilityStatus::Slow);
@@ -3260,7 +3287,10 @@ mod tests {
                 .with_timing(Duration::from_secs(1), Duration::from_millis(100));
 
             let result = probe
-                .check(&format!("http://{}/custom/responses", server.address()))
+                .check(
+                    &format!("http://{}/custom/responses", server.address()),
+                    RouteProtocol::Responses,
+                )
                 .await
                 .expect("valid probe URL");
 
@@ -3284,7 +3314,10 @@ mod tests {
                 "base_url_unsupported_endpoint",
             ),
         ] {
-            let error = probe.check(input).await.expect_err("invalid probe URL");
+            let error = probe
+                .check(input, RouteProtocol::Responses)
+                .await
+                .expect_err("invalid probe URL");
             assert_eq!(error.code, expected_code);
             assert_eq!(error.field, "baseUrl");
         }
@@ -3303,7 +3336,10 @@ mod tests {
             .expect("probe client")
             .with_timing(Duration::from_millis(20), Duration::from_millis(10));
         let timeout = timeout_probe
-            .check(&format!("http://{}", timeout_server.address()))
+            .check(
+                &format!("http://{}", timeout_server.address()),
+                RouteProtocol::Responses,
+            )
             .await
             .expect("valid probe URL");
         assert_eq!(timeout.status, ReachabilityStatus::Unreachable);
@@ -3327,7 +3363,7 @@ mod tests {
             .expect("probe client")
             .with_timing(Duration::from_millis(200), Duration::from_millis(100));
         let reset = reset_probe
-            .check(&format!("http://{address}"))
+            .check(&format!("http://{address}"), RouteProtocol::Responses)
             .await
             .expect("valid probe URL");
         assert_eq!(reset.status, ReachabilityStatus::Unreachable);

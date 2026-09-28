@@ -199,6 +199,19 @@ describe("RoutesSettings unified dragging", () => {
     expect(ipc.reorderRoutesAndFallback).not.toHaveBeenCalled();
   });
 
+  it("marks a Chat Completions route in the existing identity column", () => {
+    renderRoutes();
+
+    const chatRoute = screen.getByRole("button", {
+      name: /Ciii 主用codex\.ciii\.club · Chat Completions/,
+    });
+    const identity = within(chatRoute).getByText(/codex\.ciii\.club/);
+    expect(identity).toHaveTextContent("codex.ciii.club · Chat Completions");
+    expect(
+      screen.getByRole("button", { name: /AI INPUT 工作账号ai\.input\.im/ }),
+    ).toHaveTextContent("ai.input.im");
+  });
+
   it("renders the persisted prefix and a whole-bar sortable boundary", () => {
     renderRoutes({
       ...previewSettingsSnapshot,

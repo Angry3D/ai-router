@@ -28,6 +28,7 @@ import type {
   ReachabilityResult,
   RouteEditDto,
   RouteId,
+  RouteProtocol,
   RouteSaveInputDto,
 } from "../../generated";
 import { AppScrollArea } from "../shared/AppScrollArea";
@@ -129,6 +130,7 @@ function modelActivationMessage(activation: string) {
 interface RouteFormState {
   name: string;
   baseUrl: string;
+  protocol: RouteProtocol;
   apiKey: string;
   menuVisible: boolean;
   queryMode: BalanceQueryMode;
@@ -150,6 +152,7 @@ type BalanceTestFeedback =
 const emptyRouteForm: RouteFormState = {
   name: "",
   baseUrl: "",
+  protocol: "responses",
   apiKey: "",
   menuVisible: true,
   queryMode: "general_v1",
@@ -163,6 +166,7 @@ function formFromEdit(edit: RouteEditDto): RouteFormState {
   return {
     name: edit.name,
     baseUrl: edit.baseUrl,
+    protocol: edit.protocol,
     apiKey: edit.apiKey,
     menuVisible: edit.menuVisible !== false,
     queryMode: edit.balanceQuery?.mode ?? "general_v1",
@@ -294,8 +298,8 @@ function RouteForm(props: {
   }, [form.models]);
 
   const baseUrlPreview = useMemo(
-    () => previewBaseUrl(form.baseUrl),
-    [form.baseUrl],
+    () => previewBaseUrl(form.baseUrl, form.protocol),
+    [form.baseUrl, form.protocol],
   );
   const inferenceUrl = form.baseUrl.trim()
     ? baseUrlPreview.valid
@@ -319,11 +323,11 @@ function RouteForm(props: {
     value: RouteFormState[K],
   ) => {
     setForm((current) => ({ ...current, [key]: value }));
-    if (key === "baseUrl") {
+    if (key === "baseUrl" || key === "protocol") {
       probeGeneration.current += 1;
       setReachability(null);
     }
-    if (["baseUrl", "apiKey", "queryMode", "customSource"].includes(key)) {
+    if (["baseUrl", "protocol", "apiKey", "queryMode", "customSource"].includes(key)) {
       setBalanceFeedback(null);
     }
     setError(null);
@@ -441,6 +445,7 @@ function RouteForm(props: {
         routeId: props.newRoute ? null : props.routeId,
         name: form.name,
         baseUrl: form.baseUrl,
+        protocol: form.protocol,
         apiKey: form.apiKey,
         menuVisible: form.menuVisible,
         balanceQuery,
@@ -467,7 +472,7 @@ function RouteForm(props: {
           key: form.models[index]?.key ?? model.key,
         }),
       );
-      const canonicalBaseUrl = previewBaseUrl(form.baseUrl);
+      const canonicalBaseUrl = previewBaseUrl(form.baseUrl, form.protocol);
       const savedForm = {
         ...form,
         baseUrl: canonicalBaseUrl.valid
@@ -538,7 +543,7 @@ function RouteForm(props: {
     setBusy(true);
     setError(null);
     try {
-      const result = await checkRouteReachability(form.baseUrl);
+      const result = await checkRouteReachability(form.baseUrl, form.protocol);
       if (generation === probeGeneration.current) setReachability(result);
     } catch (reason) {
       if (generation === probeGeneration.current) {
@@ -639,6 +644,34 @@ function RouteForm(props: {
               aria-required="true"
               onChange={(event) => patchForm("name", event.target.value)}
             />
+          </SettingsFieldRow>
+          <SettingsFieldRow label="上游协议">
+            <div
+              className="settings-segments"
+              role="radiogroup"
+              aria-label="上游协议"
+            >
+              <label className="settings-segment-option">
+                <input
+                  type="radio"
+                  name="route-protocol"
+                  value="responses"
+                  checked={form.protocol === "responses"}
+                  onChange={() => patchForm("protocol", "responses")}
+                />
+                <span>Responses API</span>
+              </label>
+              <label className="settings-segment-option">
+                <input
+                  type="radio"
+                  name="route-protocol"
+                  value="chat_completions"
+                  checked={form.protocol === "chat_completions"}
+                  onChange={() => patchForm("protocol", "chat_completions")}
+                />
+                <span>Chat Completions</span>
+              </label>
+            </div>
           </SettingsFieldRow>
           <SettingsFieldRow label="Base URL" htmlFor="route-base-url" required>
             <SettingsTextInput

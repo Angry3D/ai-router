@@ -29,6 +29,7 @@ import type {
   RouteActivationResultDto,
   RouteEditDto,
   RouteId,
+  RouteProtocol,
   RouteSaveInputDto,
   RouteSaveResultDto,
   SettingsSnapshotDto,
@@ -421,12 +422,14 @@ export async function testBalanceQuery(
 
 export async function checkRouteReachability(
   baseUrl: string,
+  protocol: RouteProtocol,
 ): Promise<ReachabilityResult> {
   if (import.meta.env.DEV && !isTauriRuntime()) {
     return { status: "reachable", ttfbMs: 186, errorCategory: null };
   }
   return invoke<ReachabilityResult>(IPC_COMMANDS.checkRouteReachability, {
     baseUrl,
+    protocol,
   });
 }
 

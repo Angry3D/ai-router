@@ -711,9 +711,11 @@ mod tests {
     };
 
     use super::*;
+    use crate::domain::RouteProtocol;
 
     struct StoredRoute {
         base_url: String,
+        protocol: String,
         api_key: String,
         query: BalanceQueryConfig,
         query_revision: u64,
@@ -732,6 +734,7 @@ mod tests {
                 route_id,
                 StoredRoute {
                     base_url: "https://example.test/v1".to_owned(),
+                    protocol: "responses".to_owned(),
                     api_key: "exact-key".to_owned(),
                     query: BalanceQueryConfig {
                         mode: crate::balance::BalanceQueryMode::CustomJs,
@@ -791,7 +794,12 @@ mod tests {
                 .filter(|route| route.enabled)
                 .map(|route| BalanceRouteConfig {
                     route_id: route_id.clone(),
-                    base_url: BaseUrl::parse(&route.base_url).expect("stored base URL"),
+                    base_url: BaseUrl::parse(
+                        &route.base_url,
+                        RouteProtocol::parse_persisted(&route.protocol)
+                            .expect("stored route protocol"),
+                    )
+                    .expect("stored base URL"),
                     api_key: ApiKey::parse(&route.api_key).expect("stored API key"),
                     query: route.query.clone(),
                     query_revision: route.query_revision,

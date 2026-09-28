@@ -28,12 +28,13 @@ use crate::domain::{
     CodexModelValidationError, CompletionState, DeliveryState,
     FallbackExcludedModelValidationError, ImagesGenerationModel, ImagesGenerationTimeout,
     McpImageCapacityWarningThreshold, ModelVerdict, OutboundProxyConfig, OutboundProxyUrl, RouteId,
-    RouteMoveDirection, RouteName, SecretId, UpstreamAttemptId, ValidationError, model_verdict,
+    RouteMoveDirection, RouteName, RouteProtocol, SecretId, UpstreamAttemptId, ValidationError,
+    model_verdict,
 };
 use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
 
 const GENERAL_BALANCE_SOURCE_HASHES: [&str; 3] = [
     "24cbea85c2fa635112e5915836e2a78144e0a6a21997b86ef5187c2665e14507",
@@ -79,6 +80,7 @@ pub struct RouteRecord {
     pub route_id: RouteId,
     pub name: String,
     pub base_url: String,
+    pub protocol: RouteProtocol,
     pub secret_id: SecretId,
     pub menu_visible: bool,
     pub sort_order: i64,
@@ -109,6 +111,7 @@ pub struct RoutingStateRecord {
 pub struct CreateRouteInput {
     pub name: String,
     pub base_url: String,
+    pub protocol: Option<RouteProtocol>,
     pub api_key: ApiKey,
     pub menu_visible: Option<bool>,
     pub balance_query: Option<BalanceQueryInput>,
@@ -119,6 +122,7 @@ pub struct UpdateRouteInput {
     pub route_id: RouteId,
     pub name: String,
     pub base_url: String,
+    pub protocol: Option<RouteProtocol>,
     pub api_key: ApiKey,
     pub menu_visible: Option<bool>,
     pub balance_query: Option<BalanceQueryInput>,
@@ -1208,7 +1212,8 @@ impl DatabaseExecutor {
         fallback_excluded_models: Vec<String>,
     ) -> Result<RouteRecord, StorageError> {
         let name = RouteName::parse(&input.name)?;
-        let base_url = BaseUrl::parse(&input.base_url)?;
+        let protocol = input.protocol.unwrap_or_default();
+        let base_url = BaseUrl::parse(&input.base_url, protocol)?;
         let script = validate_balance_query(input.balance_query)?;
         let models = normalize_codex_model_records(models)?;
         let fallback_excluded_models =
@@ -1249,8 +1254,8 @@ impl DatabaseExecutor {
                 params![secret_id.as_str(), key, timestamp],
             )?;
             transaction.execute(
-                "INSERT INTO routes (route_id, display_name, display_name_key, base_url, secret_id, menu_visible, sort_order, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-                params![route_id.as_str(), name.as_str(), name.comparison_key(), base_url.as_str(), secret_id.as_str(), input.menu_visible.unwrap_or(true), sort_order, timestamp],
+                "INSERT INTO routes (route_id, display_name, display_name_key, base_url, secret_id, menu_visible, protocol, sort_order, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                params![route_id.as_str(), name.as_str(), name.comparison_key(), base_url.as_str(), secret_id.as_str(), input.menu_visible.unwrap_or(true), protocol.as_str(), sort_order, timestamp],
             )?;
             write_balance_query(&transaction, &route_id, script.as_ref(), timestamp)?;
             write_codex_models(&transaction, &route_id, &models)?;
@@ -1277,6 +1282,7 @@ impl DatabaseExecutor {
                     route_id,
                     name: name.as_str().to_owned(),
                     base_url: base_url.as_str().to_owned(),
+                    protocol,
                     secret_id,
                     menu_visible: input.menu_visible.unwrap_or(true),
                     sort_order,
@@ -1338,7 +1344,6 @@ impl DatabaseExecutor {
         fallback_excluded_models: Vec<String>,
     ) -> Result<bool, StorageError> {
         let name = RouteName::parse(&input.name)?;
-        let base_url = BaseUrl::parse(&input.base_url)?;
         let script = validate_balance_query(input.balance_query)?;
         let models = normalize_codex_model_records(models)?;
         let fallback_excluded_models =
@@ -1353,15 +1358,17 @@ impl DatabaseExecutor {
                 script.as_ref(),
                 input.accept_script_risk,
             )?;
-            let stored: Option<(String, String, String, bool, Vec<u8>)> = transaction
-                .query_row(
-                    "SELECT r.display_name, r.base_url, r.secret_id, r.menu_visible, s.value FROM routes r JOIN secrets s ON s.secret_id = r.secret_id WHERE r.route_id = ?1",
-                    [input.route_id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-                )
-                .optional()?;
-            let (stored_name, stored_base_url, secret_id, stored_menu_visible, stored_key) =
-                stored.ok_or(StorageError::NotFound)?;
+            let stored = read_route_for_update(&transaction, &input.route_id)?;
+            let StoredRouteUpdate {
+                name: stored_name,
+                base_url: stored_base_url,
+                secret_id,
+                menu_visible: stored_menu_visible,
+                protocol: stored_protocol,
+                key: stored_key,
+            } = stored;
+            let protocol = input.protocol.unwrap_or(stored_protocol);
+            let base_url = BaseUrl::parse(&input.base_url, protocol)?;
             let menu_visible = input.menu_visible.unwrap_or(stored_menu_visible);
             let stored_query = read_balance_query(&transaction, &input.route_id)?;
             let stored_models = read_codex_models(&transaction, &input.route_id)?;
@@ -1369,6 +1376,7 @@ impl DatabaseExecutor {
                 read_fallback_excluded_models(&transaction, &input.route_id)?;
             if stored_name == name.as_str()
                 && stored_base_url == base_url.as_str()
+                && stored_protocol == protocol
                 && stored_menu_visible == menu_visible
                 && stored_key == key
                 && stored_query == script
@@ -1387,8 +1395,8 @@ impl DatabaseExecutor {
                 params![key, timestamp, secret_id],
             )?;
             transaction.execute(
-                "UPDATE routes SET display_name = ?1, display_name_key = ?2, base_url = ?3, menu_visible = ?4, updated_at_ms = ?5 WHERE route_id = ?6",
-                params![name.as_str(), name.comparison_key(), base_url.as_str(), menu_visible, timestamp, input.route_id.as_str()],
+                "UPDATE routes SET display_name = ?1, display_name_key = ?2, base_url = ?3, menu_visible = ?4, protocol = ?5, updated_at_ms = ?6 WHERE route_id = ?7",
+                params![name.as_str(), name.comparison_key(), base_url.as_str(), menu_visible, protocol.as_str(), timestamp, input.route_id.as_str()],
             )?;
             if stored_menu_visible != menu_visible {
                 let effective_participant_count = effective_fallback_participant_count(
@@ -1947,7 +1955,7 @@ impl DatabaseExecutor {
     pub async fn list_routes(&self) -> Result<Vec<RouteRecord>, StorageError> {
         self.call(|connection| {
             let mut statement = connection.prepare(
-                "SELECT route_id, display_name, base_url, secret_id, menu_visible, sort_order, created_at_ms, updated_at_ms FROM routes ORDER BY sort_order, created_at_ms",
+                "SELECT route_id, display_name, base_url, secret_id, menu_visible, protocol, sort_order, created_at_ms, updated_at_ms FROM routes ORDER BY sort_order, created_at_ms",
             )?;
             let stored = statement
                 .query_map([], |row| {
@@ -1957,9 +1965,10 @@ impl DatabaseExecutor {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, bool>(4)?,
-                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(5)?,
                         row.get::<_, i64>(6)?,
                         row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1972,6 +1981,7 @@ impl DatabaseExecutor {
                         base_url,
                         secret_id,
                         menu_visible,
+                        protocol,
                         sort_order,
                         created_at_ms,
                         updated_at_ms,
@@ -1980,6 +1990,8 @@ impl DatabaseExecutor {
                             route_id: RouteId::from_string(route_id),
                             name,
                             base_url,
+                            protocol: RouteProtocol::parse_persisted(&protocol)
+                                .ok_or(StorageError::Initialization)?,
                             secret_id: SecretId::from_string(secret_id),
                             menu_visible,
                             sort_order,
@@ -2004,7 +2016,7 @@ impl DatabaseExecutor {
         self.call(move |connection| {
             let stored = connection
                 .query_row(
-                    "SELECT r.display_name, r.base_url, r.secret_id, r.menu_visible, r.sort_order, r.created_at_ms, r.updated_at_ms, s.value, b.mode, b.enabled, b.custom_source FROM routes r JOIN secrets s ON s.secret_id = r.secret_id LEFT JOIN balance_queries b ON b.route_id = r.route_id WHERE r.route_id = ?1",
+                    "SELECT r.display_name, r.base_url, r.secret_id, r.menu_visible, r.protocol, r.sort_order, r.created_at_ms, r.updated_at_ms, s.value, b.mode, b.enabled, b.custom_source FROM routes r JOIN secrets s ON s.secret_id = r.secret_id LEFT JOIN balance_queries b ON b.route_id = r.route_id WHERE r.route_id = ?1",
                     [route_id.as_str()],
                     |row| {
                         Ok((
@@ -2012,13 +2024,14 @@ impl DatabaseExecutor {
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, bool>(3)?,
-                            row.get::<_, i64>(4)?,
+                            row.get::<_, String>(4)?,
                             row.get::<_, i64>(5)?,
                             row.get::<_, i64>(6)?,
-                            row.get::<_, Vec<u8>>(7)?,
-                            row.get::<_, Option<String>>(8)?,
-                            row.get::<_, Option<bool>>(9)?,
-                            row.get::<_, Option<String>>(10)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, Vec<u8>>(8)?,
+                            row.get::<_, Option<String>>(9)?,
+                            row.get::<_, Option<bool>>(10)?,
+                            row.get::<_, Option<String>>(11)?,
                         ))
                     },
                 )
@@ -2029,6 +2042,7 @@ impl DatabaseExecutor {
                 base_url,
                 secret_id,
                 menu_visible,
+                protocol,
                 sort_order,
                 created_at_ms,
                 updated_at_ms,
@@ -2037,6 +2051,8 @@ impl DatabaseExecutor {
                 enabled,
                 custom_source,
             ) = stored;
+            let protocol = RouteProtocol::parse_persisted(&protocol)
+                .ok_or(StorageError::Initialization)?;
             let balance_query = mode
                 .map(|mode| {
                     Ok::<BalanceQueryInput, StorageError>(BalanceQueryInput {
@@ -2055,6 +2071,7 @@ impl DatabaseExecutor {
                     route_id,
                     name,
                     base_url,
+                    protocol,
                     secret_id: SecretId::from_string(secret_id),
                     menu_visible,
                     sort_order,
@@ -2558,27 +2575,30 @@ impl DatabaseExecutor {
         self.call(move |connection| {
             let stored = connection
                 .query_row(
-                    "SELECT r.base_url, s.value, b.mode, b.custom_source FROM routes r JOIN secrets s ON s.secret_id = r.secret_id JOIN balance_queries b ON b.route_id = r.route_id WHERE r.route_id = ?1 AND b.enabled = 1",
+                    "SELECT r.base_url, r.protocol, s.value, b.mode, b.custom_source FROM routes r JOIN secrets s ON s.secret_id = r.secret_id JOIN balance_queries b ON b.route_id = r.route_id WHERE r.route_id = ?1 AND b.enabled = 1",
                     [route_id.as_str()],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
-                            row.get::<_, Vec<u8>>(1)?,
-                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
                             row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
                         ))
                     },
                 )
                 .optional()?;
-            let Some((base_url, api_key, mode, custom_source)) = stored else {
+            let Some((base_url, protocol, api_key, mode, custom_source)) = stored else {
                 return Ok(None);
             };
+            let protocol =
+                RouteProtocol::parse_persisted(&protocol).ok_or(StorageError::Initialization)?;
             let mode = BalanceQueryMode::parse_persisted(&mode)
                 .ok_or(StorageError::Initialization)?;
             let query_revision = balance_revision(&base_url, &api_key, mode, &custom_source);
             Ok(Some(BalanceRouteConfig {
                 route_id,
-                base_url: BaseUrl::parse(&base_url)?,
+                base_url: BaseUrl::parse(&base_url, protocol)?,
                 api_key: ApiKey::from_stored(api_key),
                 query: BalanceQueryConfig {
                     mode,
@@ -3740,6 +3760,47 @@ impl SecretStore for SqliteSecretStore {
     }
 }
 
+struct StoredRouteUpdate {
+    name: String,
+    base_url: String,
+    secret_id: String,
+    menu_visible: bool,
+    protocol: RouteProtocol,
+    key: Vec<u8>,
+}
+
+fn read_route_for_update(
+    transaction: &Transaction<'_>,
+    route_id: &RouteId,
+) -> Result<StoredRouteUpdate, StorageError> {
+    let stored: Option<(String, String, String, bool, String, Vec<u8>)> = transaction
+        .query_row(
+            "SELECT r.display_name, r.base_url, r.secret_id, r.menu_visible, r.protocol, s.value FROM routes r JOIN secrets s ON s.secret_id = r.secret_id WHERE r.route_id = ?1",
+            [route_id.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (name, base_url, secret_id, menu_visible, protocol, key) =
+        stored.ok_or(StorageError::NotFound)?;
+    Ok(StoredRouteUpdate {
+        name,
+        base_url,
+        secret_id,
+        menu_visible,
+        protocol: RouteProtocol::parse_persisted(&protocol).ok_or(StorageError::Initialization)?,
+        key,
+    })
+}
+
 fn validate_balance_query(
     query: Option<BalanceQueryInput>,
 ) -> Result<Option<BalanceQueryInput>, ValidationError> {
@@ -4080,6 +4141,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     }
     if version < 26 {
         migrate_v26(connection)?;
+    }
+    if version < 27 {
+        migrate_v27(connection)?;
     }
     Ok(())
 }
@@ -4694,6 +4758,15 @@ fn migrate_v25(connection: &mut Connection) -> Result<(), StorageError> {
         ALTER TABLE app_settings ADD COLUMN outbound_proxy_url TEXT;
         PRAGMA user_version = 25;
         ",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v27(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "ALTER TABLE routes ADD COLUMN protocol TEXT NOT NULL DEFAULT 'responses' CHECK (protocol IN ('responses', 'chat_completions')); PRAGMA user_version = 27;",
     )?;
     transaction.commit()?;
     Ok(())
@@ -5475,16 +5548,16 @@ mod tests {
 
     use super::{
         AttributionAggregate, BalanceQueryInput, CodexModelRecord, CodexRestartNoticeRecord,
-        CreateRouteInput, DatabaseExecutor, FallbackStopReason, RoutingDecision, SCHEMA_VERSION,
-        SecretStore, SqliteBalanceRouteSource, SqliteSecretStore, StatisticsTotals, StorageError,
-        UpdateRouteInput, UsageAttemptDetail, UsageStatisticsAttributionDimension,
+        CreateRouteInput, DatabaseExecutor, FallbackStopReason, RouteProtocol, RoutingDecision,
+        SCHEMA_VERSION, SecretStore, SqliteBalanceRouteSource, SqliteSecretStore, StatisticsTotals,
+        StorageError, UpdateRouteInput, UsageAttemptDetail, UsageStatisticsAttributionDimension,
         UsageStatisticsAttributionMetric, UsageStatisticsGranularity, UsageStatisticsQuery,
         is_general_balance_source_hash, materialize_routing_decisions, migrate_v1, migrate_v2,
         migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7, migrate_v8, migrate_v9,
         migrate_v10, migrate_v11, migrate_v12, migrate_v13, migrate_v14, migrate_v15, migrate_v16,
         migrate_v17, migrate_v18, migrate_v19, migrate_v20, migrate_v21, migrate_v22, migrate_v23,
-        migrate_v24, migrate_v25, migrate_v26, statistics_attribution, statistics_bucket_windows,
-        validate_balance_query,
+        migrate_v24, migrate_v25, migrate_v26, migrate_v27, statistics_attribution,
+        statistics_bucket_windows, validate_balance_query,
     };
     use crate::{
         balance::{BalanceQueryMode, BalanceRouteSource, LEGACY_GENERAL_V1_SOURCE},
@@ -5623,6 +5696,174 @@ mod tests {
     fn migrate_test_database_to_v22(connection: &mut Connection) {
         migrate_test_database_to_v21(connection);
         migrate_v22(connection).expect("v22");
+    }
+
+    fn migrate_test_database_to_v26(connection: &mut Connection) {
+        migrate_test_database_to_v22(connection);
+        migrate_v23(connection).expect("v23");
+        migrate_v24(connection).expect("v24");
+        migrate_v25(connection).expect("v25");
+        migrate_v26(connection).expect("v26");
+    }
+
+    fn insert_legacy_route(connection: &Connection) {
+        connection
+            .execute_batch(
+                "INSERT INTO secrets (secret_id, kind, value, created_at_ms, updated_at_ms)
+                     VALUES ('legacy-secret', 'route_api_key', x'01', 1, 1);
+                 INSERT INTO routes (route_id, display_name, display_name_key, base_url, secret_id, menu_visible, sort_order, created_at_ms, updated_at_ms)
+                     VALUES ('legacy-route', 'Legacy', 'legacy', 'https://legacy.example/v1', 'legacy-secret', 1, 0, 1, 1);",
+            )
+            .expect("legacy route row");
+    }
+
+    fn user_version(connection: &Connection) -> i64 {
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .expect("schema version")
+    }
+
+    #[test]
+    fn migration_v27_defaults_route_protocol_and_rolls_back_atomically() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        migrate_test_database_to_v26(&mut connection);
+        insert_legacy_route(&connection);
+
+        migrate_v27(&mut connection).expect("v27");
+
+        let protocol: String = connection
+            .query_row(
+                "SELECT protocol FROM routes WHERE route_id = 'legacy-route'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("route protocol");
+        assert_eq!(protocol, "responses");
+        assert_eq!(user_version(&connection), 27);
+        assert!(route_columns(&connection).contains("protocol"));
+        assert!(
+            connection
+                .execute("UPDATE routes SET protocol = 'chat'", [])
+                .is_err(),
+            "the CHECK constraint must reject an unknown protocol"
+        );
+        connection
+            .execute("UPDATE routes SET protocol = 'chat_completions'", [])
+            .expect("a chat route must satisfy the CHECK");
+
+        let mut rollback = Connection::open_in_memory().expect("rollback database");
+        migrate_test_database_to_v26(&mut rollback);
+        insert_legacy_route(&rollback);
+        rollback
+            .execute("ALTER TABLE routes ADD COLUMN protocol TEXT", [])
+            .expect("collision column");
+        assert!(migrate_v27(&mut rollback).is_err());
+        assert_eq!(user_version(&rollback), 26);
+        let collided: Option<String> = rollback
+            .query_row(
+                "SELECT protocol FROM routes WHERE route_id = 'legacy-route'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("collision column value");
+        assert_eq!(
+            collided, None,
+            "the failed migration must not apply its default"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_v27_database_defaults_responses_and_round_trips_a_chat_route() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("router.sqlite3");
+        let mut connection = Connection::open(&path).expect("legacy connection");
+        migrate_test_database_to_v26(&mut connection);
+        insert_legacy_route(&connection);
+        drop(connection);
+
+        let database = DatabaseExecutor::open(&path).expect("database");
+        let routes = database.list_routes().await.expect("routes");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].protocol, RouteProtocol::Responses);
+        assert_eq!(routes[0].base_url, "https://legacy.example/v1");
+
+        let chat = database
+            .create_route(CreateRouteInput {
+                name: "Chat".to_owned(),
+                base_url: " https://example.test/openai/v1/chat/completions/ ".to_owned(),
+                protocol: Some(RouteProtocol::ChatCompletions),
+                api_key: ApiKey::parse("chat-key").expect("key"),
+                menu_visible: None,
+                balance_query: None,
+                accept_script_risk: false,
+            })
+            .await
+            .expect("chat route");
+        assert_eq!(chat.protocol, RouteProtocol::ChatCompletions);
+        assert_eq!(chat.base_url, "https://example.test/openai/v1");
+
+        let revision = database.critical_revision().await.expect("revision");
+        database
+            .update_route(UpdateRouteInput {
+                route_id: chat.route_id.clone(),
+                name: chat.name.clone(),
+                base_url: chat.base_url.clone(),
+                protocol: None,
+                api_key: ApiKey::parse("chat-key").expect("key"),
+                menu_visible: None,
+                balance_query: None,
+                accept_script_risk: false,
+            })
+            .await
+            .expect("unchanged update");
+        assert_eq!(
+            database.critical_revision().await.expect("revision"),
+            revision,
+            "an unchanged route must not advance the revision"
+        );
+        let preserved = database
+            .route_edit(chat.route_id.clone())
+            .await
+            .expect("route edit");
+        assert_eq!(preserved.route.protocol, RouteProtocol::ChatCompletions);
+
+        database
+            .update_route(UpdateRouteInput {
+                route_id: chat.route_id.clone(),
+                name: chat.name.clone(),
+                base_url: chat.base_url.clone(),
+                protocol: Some(RouteProtocol::Responses),
+                api_key: ApiKey::parse("chat-key").expect("key"),
+                menu_visible: None,
+                balance_query: None,
+                accept_script_risk: false,
+            })
+            .await
+            .expect("protocol-only update");
+        assert!(
+            database.critical_revision().await.expect("revision") > revision,
+            "a protocol-only change must advance the revision"
+        );
+        let reverted = database
+            .route_edit(chat.route_id.clone())
+            .await
+            .expect("route edit");
+        assert_eq!(reverted.route.protocol, RouteProtocol::Responses);
+
+        let stored: String = database
+            .test_execute({
+                let route_id = chat.route_id.clone();
+                move |connection| {
+                    Ok(connection.query_row(
+                        "SELECT protocol FROM routes WHERE route_id = ?1",
+                        rusqlite::params![route_id.as_str()],
+                        |row| row.get(0),
+                    )?)
+                }
+            })
+            .await
+            .expect("stored protocol");
+        assert_eq!(stored, "responses");
     }
 
     fn route_columns(connection: &Connection) -> BTreeSet<String> {
@@ -6900,6 +7141,7 @@ mod tests {
         CreateRouteInput {
             name: name.to_owned(),
             base_url: "https://example.com/v1".to_owned(),
+            protocol: None,
             api_key: ApiKey::parse(key).expect("valid key"),
             menu_visible: None,
             balance_query: Some(BalanceQueryInput {
@@ -6938,6 +7180,7 @@ mod tests {
                 route_id: route.route_id.clone(),
                 name: route.name.clone(),
                 base_url: route.base_url.clone(),
+                protocol: None,
                 api_key: ApiKey::parse(key).expect("valid key"),
                 menu_visible: Some(menu_visible),
                 balance_query: Some(BalanceQueryInput {
@@ -7139,6 +7382,7 @@ mod tests {
                     route_id: route.route_id.clone(),
                     name: "Fallback renamed".to_owned(),
                     base_url: "https://changed.example/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse("changed-key").expect("key"),
                     menu_visible: None,
                     balance_query: None,
@@ -7181,6 +7425,7 @@ mod tests {
                     route_id: route.route_id,
                     name: "Fallback".to_owned(),
                     base_url: "https://example.com/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse("fallback-key").expect("key"),
                     menu_visible: None,
                     balance_query: Some(BalanceQueryInput {
@@ -7255,6 +7500,7 @@ mod tests {
             route_id: first.route_id.clone(),
             name: "Renamed".to_owned(),
             base_url: "https://changed.example/v1".to_owned(),
+            protocol: None,
             api_key: ApiKey::parse("changed-key").expect("key"),
             menu_visible: None,
             balance_query: None,
@@ -7464,6 +7710,7 @@ mod tests {
                 route_id: created.route_id.clone(),
                 name: "Work".to_owned(),
                 base_url: "https://example.com/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("second-key").expect("key"),
                 menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
@@ -7494,6 +7741,7 @@ mod tests {
                 route_id: created.route_id.clone(),
                 name: "Work".to_owned(),
                 base_url: "https://example.com/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("second-key").expect("key"),
                 menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
@@ -7518,6 +7766,7 @@ mod tests {
                 route_id: created.route_id.clone(),
                 name: "Work".to_owned(),
                 base_url: "https://example.com/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("second-key").expect("key"),
                 menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
@@ -7547,6 +7796,7 @@ mod tests {
                 route_id: created.route_id.clone(),
                 name: "Work".to_owned(),
                 base_url: "https://example.com/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("second-key").expect("key"),
                 menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
@@ -8281,10 +8531,12 @@ mod tests {
             .await
             .expect("legacy route remains readable");
         assert_eq!(legacy.route.base_url, "https://legacy.example/v1/responses");
-        let parsed = BaseUrl::parse(&legacy.route.base_url).expect("legacy endpoint parses");
+        assert_eq!(legacy.route.protocol, RouteProtocol::Responses);
+        let parsed = BaseUrl::parse(&legacy.route.base_url, legacy.route.protocol)
+            .expect("legacy endpoint parses");
         assert_eq!(parsed.as_str(), "https://legacy.example/v1");
         assert_eq!(
-            parsed.inference_url(),
+            parsed.inference_url(legacy.route.protocol),
             "https://legacy.example/v1/responses"
         );
 
@@ -8293,6 +8545,7 @@ mod tests {
                 route_id: created.route_id.clone(),
                 name: legacy.route.name,
                 base_url: legacy.route.base_url,
+                protocol: None,
                 api_key: legacy.api_key,
                 menu_visible: None,
                 balance_query: legacy.balance_query,
@@ -8369,6 +8622,7 @@ mod tests {
                 route_id: second.route_id.clone(),
                 name: second.name.clone(),
                 base_url: second.base_url.clone(),
+                protocol: None,
                 api_key: ApiKey::parse("second-key").expect("key"),
                 menu_visible: None,
                 balance_query: Some(BalanceQueryInput {
@@ -9487,6 +9741,7 @@ mod tests {
             route_id: stored.route_id,
             name: "Changed".to_owned(),
             base_url: "https://example.com/v1".to_owned(),
+            protocol: None,
             api_key: ApiKey::parse("replacement").expect("key"),
             menu_visible: None,
             balance_query: None,

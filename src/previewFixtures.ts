@@ -129,6 +129,7 @@ const routes = [
     routeId: workRouteId,
     name: "AI INPUT 工作账号",
     baseUrlHost: "ai.input.im",
+    protocol: "responses" as const,
     inferenceStatus: {
       kind: "recent_success" as const,
       lastOutcome: "success" as const,
@@ -153,6 +154,7 @@ const routes = [
     routeId: ciiiRouteId,
     name: "Ciii 主用",
     baseUrlHost: "codex.ciii.club",
+    protocol: "chat_completions" as const,
     inferenceStatus: {
       kind: "recent_success" as const,
       lastOutcome: "success" as const,
@@ -492,10 +494,14 @@ export const previewRouteEdits: RouteEditDto[] = routes.map((route, index) => ({
   routeId: route.routeId,
   name: route.name,
   baseUrl: index < 2 ? "https://ai.input.im/v1" : "https://codex.ciii.club/v1",
+  protocol:
+    index === 2 ? ("chat_completions" as const) : ("responses" as const),
   inferenceUrl:
     index < 2
       ? "https://ai.input.im/v1/responses"
-      : "https://codex.ciii.club/v1/responses",
+      : index === 2
+        ? "https://codex.ciii.club/v1/chat/completions"
+        : "https://codex.ciii.club/v1/responses",
   apiKey: "preview-key-not-real",
   menuVisible: true,
   balanceQuery: {

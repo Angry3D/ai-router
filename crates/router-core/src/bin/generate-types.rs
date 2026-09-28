@@ -33,7 +33,7 @@ use router_core::{
         AppearancePreference, CompletionState, DeliveryState, InferenceFailureReason,
         InferenceOutcome, InferenceStatus, InferenceStatusKind, ProxyRequestMetadata,
         ProxyRuntimeStatus, ReachabilityResult, ReachabilityStatus, RouteMoveDirection,
-        UpstreamAttemptMetadata,
+        RouteProtocol, UpstreamAttemptMetadata,
     },
     lifecycle::{AppLifecycleIssue, AppLifecyclePhase, AppLifecycleSnapshot},
     recovery::{DatabaseStartupIssue, RecoveryHealthKind},
@@ -133,6 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ConfigOperationResult::export_all_to(&output)?;
     CompletionState::export_all_to(&output)?;
     AppearancePreference::export_all_to(&output)?;
+    RouteProtocol::export_all_to(&output)?;
     DeliveryState::export_all_to(&output)?;
     InferenceFailureReason::export_all_to(&output)?;
     InferenceOutcome::export_all_to(&output)?;

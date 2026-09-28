@@ -18,7 +18,7 @@ use router_core::{
     domain::{
         ApiKey, BalanceQueryPolicy, BaseUrl, CompletionState, DeliveryState, ImagesGenerationModel,
         ImagesGenerationTimeout, InferenceStatus, InferenceStatusKind, OutboundProxyUrl,
-        UpstreamAttemptId,
+        RouteProtocol, UpstreamAttemptId,
     },
     proxy::{
         AsyncHistoryRecorder, HistorySummaryChangeSink, InferenceStatusChangeSink,
@@ -311,6 +311,7 @@ async fn assert_persistence_and_privacy(
         name: route.name.clone(),
         base_url_host: "127.0.0.1".to_owned(),
         menu_visible: Some(true),
+        protocol: Some(RouteProtocol::Responses),
         inference_status: InferenceStatus {
             kind: InferenceStatusKind::Unverified,
             last_outcome: None,
@@ -378,6 +379,7 @@ async fn responses_flow_preserves_transport_and_enforces_privacy_allowlist() {
         .create_route(CreateRouteInput {
             name: "P9 integration route".to_owned(),
             base_url: format!("http://{}/v1", upstream.address()),
+            protocol: None,
             api_key: ApiKey::parse(API_KEY_SENTINEL).expect("API Key"),
             menu_visible: None,
             balance_query: Some(BalanceQueryInput {
@@ -419,7 +421,8 @@ async fn responses_flow_preserves_transport_and_enforces_privacy_allowlist() {
     proxy_state.set_active_route(Some(Arc::new(RouteSnapshot {
         route_id: route.route_id.clone(),
         name: route.name.clone(),
-        base_url: BaseUrl::parse(&route.base_url).expect("base URL"),
+        protocol: RouteProtocol::Responses,
+        base_url: BaseUrl::parse(&route.base_url, RouteProtocol::Responses).expect("base URL"),
         api_key: Arc::new(ApiKey::parse(API_KEY_SENTINEL).expect("API Key")),
         fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
     })));
@@ -478,6 +481,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         .create_route(CreateRouteInput {
             name: "Image privacy route".to_owned(),
             base_url: format!("http://{}/v1", image_upstream.address()),
+            protocol: None,
             api_key: ApiKey::parse(IMAGE_ROUTE_KEY_SENTINEL).expect("image route key"),
             menu_visible: None,
             balance_query: None,
@@ -515,7 +519,8 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
     let image_route = Arc::new(RouteSnapshot {
         route_id: route.route_id.clone(),
         name: route.name.clone(),
-        base_url: BaseUrl::parse(&route.base_url).expect("base URL"),
+        protocol: RouteProtocol::Responses,
+        base_url: BaseUrl::parse(&route.base_url, RouteProtocol::Responses).expect("base URL"),
         api_key: Arc::new(ApiKey::parse(IMAGE_ROUTE_KEY_SENTINEL).expect("image route key")),
         fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
     });
@@ -756,6 +761,7 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
         name: route.name,
         base_url_host: "127.0.0.1".to_owned(),
         menu_visible: Some(true),
+        protocol: Some(RouteProtocol::Responses),
         inference_status: InferenceStatus {
             kind: InferenceStatusKind::Unverified,
             last_outcome: None,
@@ -873,6 +879,7 @@ async fn seed_recovery_critical_state(database: &DatabaseExecutor) -> RecoveryCr
         .create_route(CreateRouteInput {
             name: "Recovery first".to_owned(),
             base_url: "https://first.example.invalid/v1".to_owned(),
+            protocol: None,
             api_key: ApiKey::parse(API_KEY_SENTINEL).expect("first Key"),
             menu_visible: None,
             balance_query: Some(BalanceQueryInput {
@@ -888,6 +895,7 @@ async fn seed_recovery_critical_state(database: &DatabaseExecutor) -> RecoveryCr
         .create_route(CreateRouteInput {
             name: "Recovery second".to_owned(),
             base_url: "https://second.example.invalid/v1".to_owned(),
+            protocol: None,
             api_key: ApiKey::parse(RECOVERY_SECOND_KEY).expect("second Key"),
             menu_visible: None,
             balance_query: None,

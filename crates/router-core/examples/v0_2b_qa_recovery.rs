@@ -269,6 +269,7 @@ async fn seed(root: &QaAcceptanceRoot) -> Result<RecoverySummary, Box<dyn Error>
         .create_route(CreateRouteInput {
             name: "Synthetic Recovery A".to_owned(),
             base_url: "http://127.0.0.1:39001/v1".to_owned(),
+            protocol: None,
             api_key: ApiKey::parse("qa-recovery-key-a")?,
             menu_visible: None,
             balance_query: Some(BalanceQueryInput {
@@ -283,6 +284,7 @@ async fn seed(root: &QaAcceptanceRoot) -> Result<RecoverySummary, Box<dyn Error>
         .create_route(CreateRouteInput {
             name: "Synthetic Recovery B".to_owned(),
             base_url: "http://127.0.0.1:39002/v1".to_owned(),
+            protocol: None,
             api_key: ApiKey::parse("qa-recovery-key-b")?,
             menu_visible: None,
             balance_query: None,

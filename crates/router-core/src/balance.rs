@@ -1387,13 +1387,14 @@ mod tests {
     use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
     use super::*;
+    use crate::domain::RouteProtocol;
 
     fn key() -> ApiKey {
         ApiKey::parse("route-secret").expect("API key")
     }
 
     fn base(value: &str) -> BaseUrl {
-        BaseUrl::parse(value).expect("base URL")
+        BaseUrl::parse(value, RouteProtocol::Responses).expect("base URL")
     }
 
     #[derive(Clone)]

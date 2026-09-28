@@ -26,7 +26,10 @@ function RouteIdentity({ route }: { route: RouteSummary }) {
   return (
     <span className="settings-route-identity">
       <strong>{route.name}</strong>
-      <small>{route.baseUrlHost}</small>
+      <small>
+        {route.baseUrlHost}
+        {route.protocol === "chat_completions" ? " · Chat Completions" : ""}
+      </small>
     </span>
   );
 }

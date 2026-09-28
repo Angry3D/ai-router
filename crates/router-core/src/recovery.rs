@@ -1947,6 +1947,11 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         [],
         |row| row.get(0),
     )?;
+    let invalid_route_protocol: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM routes WHERE protocol NOT IN ('responses', 'chat_completions'))",
+        [],
+        |row| row.get(0),
+    )?;
     let gateway_count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM secrets WHERE kind = 'gateway_token'",
         [],
@@ -2161,6 +2166,7 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
     if invalid_route_secret
         || orphan_secret
         || invalid_menu_visibility
+        || invalid_route_protocol
         || gateway_count > 1
         || !fallback_valid
         || !active_is_valid
@@ -2479,6 +2485,7 @@ mod tests {
                 CreateRouteInput {
                     name: "Synthetic".to_owned(),
                     base_url: "https://example.invalid/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse("synthetic-route-key").expect("key"),
                     menu_visible: None,
                     balance_query: Some(BalanceQueryInput {
@@ -2637,6 +2644,7 @@ mod tests {
                 .create_route(CreateRouteInput {
                     name: format!("Route {index}"),
                     base_url: "https://example.invalid/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse(&format!("synthetic-key-{index}")).expect("key"),
                     menu_visible: None,
                     balance_query: None,
@@ -2704,6 +2712,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "Visibility".to_owned(),
                 base_url: "https://example.invalid/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("visibility-key").expect("key"),
                 menu_visible: None,
                 balance_query: None,
@@ -2738,12 +2747,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_validation_rejects_invalid_route_protocol() {
+        let (_root, primary, database, manager) = setup();
+        database
+            .create_route(CreateRouteInput {
+                name: "Protocol".to_owned(),
+                base_url: "https://example.invalid/v1".to_owned(),
+                protocol: None,
+                api_key: ApiKey::parse("protocol-key").expect("key"),
+                menu_visible: None,
+                balance_query: None,
+                accept_script_risk: false,
+            })
+            .await
+            .expect("route");
+        let point = manager.create_point(&database).await.expect("point");
+        drop(database);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        for path in [&primary, &point.path] {
+            let connection = Connection::open(path).expect("database to corrupt");
+            connection
+                .pragma_update(None, "ignore_check_constraints", true)
+                .expect("bypass CHECK for corruption fixture");
+            connection
+                .execute("UPDATE routes SET protocol = 'chat'", [])
+                .expect("inject invalid protocol");
+        }
+
+        let inventory = manager.scan().expect("scan corrupt point");
+        assert!(inventory.valid_points.is_empty());
+        assert_eq!(inventory.invalid_point_count, 1);
+        let DatabaseStartupClassification::RecoveryRequired(inventory) = manager
+            .classify_startup()
+            .expect("classify corrupt primary")
+        else {
+            panic!("an invalid persisted protocol must require recovery");
+        };
+        assert_eq!(inventory.invalid_point_count, 1);
+    }
+
+    #[tokio::test]
     async fn recovery_validation_rejects_invalid_image_timeout() {
         let (_root, primary, database, manager) = setup();
         let route = database
             .create_route(CreateRouteInput {
                 name: "Images".to_owned(),
                 base_url: "https://example.invalid/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("images-key").expect("key"),
                 menu_visible: None,
                 balance_query: None,
@@ -2947,6 +2998,7 @@ mod tests {
                 .create_route(CreateRouteInput {
                     name: "Only".to_owned(),
                     base_url: "https://example.invalid/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse("only-key").expect("key"),
                     menu_visible: None,
                     balance_query: None,
@@ -2996,6 +3048,7 @@ mod tests {
                 .create_route(CreateRouteInput {
                     name: "Balance".to_owned(),
                     base_url: "https://example.invalid/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse("balance-key").expect("key"),
                     menu_visible: None,
                     balance_query: Some(BalanceQueryInput {
@@ -3032,6 +3085,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "First".to_owned(),
                 base_url: "https://example.invalid/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("first-key").expect("key"),
                 menu_visible: None,
                 balance_query: None,
@@ -3043,6 +3097,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "Second".to_owned(),
                 base_url: "https://example.invalid/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("second-key").expect("key"),
                 menu_visible: None,
                 balance_query: None,
@@ -3158,6 +3213,7 @@ mod tests {
                 .create_route(CreateRouteInput {
                     name: format!("Fallback {index}"),
                     base_url: "https://example.invalid/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse(&format!("fallback-key-{index}")).expect("key"),
                     menu_visible: None,
                     balance_query: None,

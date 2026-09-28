@@ -251,6 +251,7 @@ async fn seed(root: &QaAcceptanceRoot, manifest_path: &Path) -> Result<(), Box<d
             .create_route(CreateRouteInput {
                 name: format!("Synthetic {label}"),
                 base_url: route.base_url,
+                protocol: None,
                 api_key: ApiKey::parse(&format!("qa-synthetic-route-{label}"))?,
                 menu_visible: None,
                 balance_query: (label == "A").then(|| BalanceQueryInput {
@@ -917,6 +918,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "Configured Route Name".to_owned(),
                 base_url: "https://qa-provider.example/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("qa-configured-route-key").expect("QA key"),
                 menu_visible: None,
                 balance_query: None,

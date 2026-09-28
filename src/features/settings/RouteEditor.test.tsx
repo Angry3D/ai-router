@@ -813,6 +813,7 @@ describe("RouteEditor interactions", () => {
       expect(await screen.findByText(label)).toBeInTheDocument();
       expect(ipc.checkRouteReachability).toHaveBeenCalledWith(
         "https://ai.input.im/v1",
+        "responses",
       );
     },
   );
@@ -854,6 +855,98 @@ describe("RouteEditor interactions", () => {
     expect(screen.queryByText("可达 · 18 ms")).not.toBeInTheDocument();
     expect(
       screen.getByText("https://second.example/v1/responses"),
+    ).toBeInTheDocument();
+  });
+
+  it("selects the upstream protocol before Base URL and derives the endpoint from it", async () => {
+    await renderSettings();
+
+    const group = screen.getByRole("radiogroup", { name: "上游协议" });
+    const responses = within(group).getByRole("radio", { name: "Responses API" });
+    const chat = within(group).getByRole("radio", { name: "Chat Completions" });
+    expect(responses).toBeChecked();
+    expect(chat).not.toBeChecked();
+
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://example.test/openai/v1" },
+    });
+    expect(
+      screen.getByText("https://example.test/openai/v1/responses"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(chat);
+    expect(chat).toBeChecked();
+    expect(
+      screen.getByText("https://example.test/openai/v1/chat/completions"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://example.test/v1/responses" },
+    });
+    expect(screen.getByText("地址无效")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "检查推理地址" }),
+    ).toBeDisabled();
+  });
+
+  it("clears reachability and balance feedback when the protocol changes", async () => {
+    ipc.checkRouteReachability.mockResolvedValue({
+      status: "reachable",
+      ttfbMs: 21,
+      errorCategory: null,
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "检查推理地址" }));
+    expect(await screen.findByText("可达 · 21 ms")).toBeInTheDocument();
+
+    fireEvent.click(
+      within(screen.getByRole("radiogroup", { name: "上游协议" })).getByRole(
+        "radio",
+        { name: "Chat Completions" },
+      ),
+    );
+
+    expect(screen.queryByText("可达 · 21 ms")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("https://ai.input.im/v1/chat/completions"),
+    ).toBeInTheDocument();
+  });
+
+  it("submits the selected protocol with the route save", async () => {
+    await renderSettings();
+    ipc.saveRoute.mockResolvedValue({
+      catalog: { retryRequired: false, retryToken: null, models: [] },
+    });
+
+    fireEvent.click(
+      within(screen.getByRole("radiogroup", { name: "上游协议" })).getByRole(
+        "radio",
+        { name: "Chat Completions" },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(ipc.saveRoute).toHaveBeenCalled());
+    expect(ipc.saveRoute.mock.calls[0][0]).toMatchObject({
+      protocol: "chat_completions",
+      baseUrl: "https://ai.input.im/v1",
+    });
+  });
+
+  it("restores a persisted chat route with its protocol and derived endpoint", async () => {
+    await renderSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: /Ciii 主用codex\.ciii\.club/ }),
+    );
+    await screen.findByLabelText("路由名称");
+
+    const group = screen.getByRole("radiogroup", { name: "上游协议" });
+    expect(
+      within(group).getByRole("radio", { name: "Chat Completions" }),
+    ).toBeChecked();
+    expect(
+      screen.getByText("https://codex.ciii.club/v1/chat/completions"),
     ).toBeInTheDocument();
   });
 
