@@ -1374,6 +1374,7 @@ fn shell_error(code: &str, message: &str, retryable: bool) -> router_core::state
 #[cfg(test)]
 mod tests {
     use super::*;
+    use router_core::domain::RouteProtocol;
     use router_core::domain::{InferenceStatus, InferenceStatusKind, RouteId};
 
     fn tray_snapshot(
@@ -1387,6 +1388,7 @@ mod tests {
                 name: name.to_owned(),
                 base_url_host: "example.com".to_owned(),
                 menu_visible: Some(true),
+                protocol: Some(RouteProtocol::Responses),
                 inference_status: InferenceStatus {
                     kind: InferenceStatusKind::Unverified,
                     last_outcome: None,

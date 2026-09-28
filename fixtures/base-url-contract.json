@@ -1,68 +1,142 @@
 [
   {
     "input": " https://example.com ",
+    "protocol": "responses",
     "canonical": "https://example.com",
     "inference": "https://example.com/responses"
   },
   {
     "input": "https://example.com/v1///",
+    "protocol": "responses",
     "canonical": "https://example.com/v1",
     "inference": "https://example.com/v1/responses"
   },
   {
     "input": "https://example.com/openai/v1/responses/",
+    "protocol": "responses",
     "canonical": "https://example.com/openai/v1",
     "inference": "https://example.com/openai/v1/responses"
   },
   {
     "input": "https://example.com/Responses",
+    "protocol": "responses",
     "canonical": "https://example.com/Responses",
     "inference": "https://example.com/Responses/responses"
   },
   {
     "input": "https://responses",
+    "protocol": "responses",
     "canonical": "https://responses",
     "inference": "https://responses/responses"
   },
   {
     "input": "https://chat/completions",
+    "protocol": "responses",
     "canonical": "https://chat/completions",
     "inference": "https://chat/completions/responses"
   },
   {
     "input": "https://example.com/v1/responses/responses",
+    "protocol": "responses",
     "error": "base_url_duplicate_responses"
   },
   {
     "input": "https://example.com/v1/chat/completions/",
+    "protocol": "responses",
+    "error": "base_url_unsupported_endpoint"
+  },
+  {
+    "input": "https://example.com/v1/chat/completions",
+    "protocol": "responses",
     "error": "base_url_unsupported_endpoint"
   },
   {
     "input": "ftp://example.com",
+    "protocol": "responses",
     "error": "base_url_invalid"
   },
   {
     "input": "/v1",
+    "protocol": "responses",
     "error": "base_url_invalid"
   },
   {
     "input": "https://user@example.com/v1",
+    "protocol": "responses",
     "error": "base_url_invalid"
   },
   {
     "input": "https://user:secret@example.com/v1",
+    "protocol": "responses",
     "error": "base_url_invalid"
   },
   {
     "input": "https://example.com/v1?q=1",
+    "protocol": "responses",
     "error": "base_url_invalid"
   },
   {
     "input": "https://example.com/v1#fragment",
+    "protocol": "responses",
     "error": "base_url_invalid"
   },
   {
     "input": "http:/",
+    "protocol": "responses",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "https://example.com/v1/chat/completions/",
+    "protocol": "chat_completions",
+    "canonical": "https://example.com/v1",
+    "inference": "https://example.com/v1/chat/completions"
+  },
+  {
+    "input": "https://example.com/openai/v1",
+    "protocol": "chat_completions",
+    "canonical": "https://example.com/openai/v1",
+    "inference": "https://example.com/openai/v1/chat/completions"
+  },
+  {
+    "input": " https://example.com/v1/// ",
+    "protocol": "chat_completions",
+    "canonical": "https://example.com/v1",
+    "inference": "https://example.com/v1/chat/completions"
+  },
+  {
+    "input": "https://chat/completions",
+    "protocol": "chat_completions",
+    "canonical": "https://chat/completions",
+    "inference": "https://chat/completions/chat/completions"
+  },
+  {
+    "input": "https://example.com/v1/responses",
+    "protocol": "chat_completions",
+    "error": "base_url_unsupported_endpoint"
+  },
+  {
+    "input": "https://example.com/v1/chat/completions/chat/completions",
+    "protocol": "chat_completions",
+    "error": "base_url_duplicate_chat_completions"
+  },
+  {
+    "input": "https://example.com/v1/chat/completions/chat/completions/",
+    "protocol": "chat_completions",
+    "error": "base_url_duplicate_chat_completions"
+  },
+  {
+    "input": "https://example.com/v1/chat/completions?q=1",
+    "protocol": "chat_completions",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "https://user:secret@example.com/v1/chat/completions",
+    "protocol": "chat_completions",
+    "error": "base_url_invalid"
+  },
+  {
+    "input": "ftp://example.com/v1/chat/completions",
+    "protocol": "chat_completions",
     "error": "base_url_invalid"
   }
 ]

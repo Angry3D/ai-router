@@ -1236,7 +1236,7 @@ impl ResponsesForwarder {
         let Ok(headers) = build_upstream_headers(request) else {
             return Self::invalid_route_credentials(request, context);
         };
-        let endpoint = request.route.base_url.inference_url();
+        let endpoint = request.route.base_url.inference_url(request.route.protocol);
         let body = upstream_request_body(request);
         let started = Instant::now();
         let probe_deadline = probe_evidence_timeout.map(|timeout| started + timeout);
@@ -3169,6 +3169,7 @@ mod tests {
     use tokio::{io::AsyncReadExt, net::TcpListener, sync::Notify};
 
     use super::*;
+    use crate::domain::RouteProtocol;
     use crate::{
         domain::{ApiKey, BaseUrl, InferenceStatusKind, RouteId},
         proxy::{
@@ -3200,7 +3201,8 @@ mod tests {
         let route = Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: "Primary".to_owned(),
-            base_url: BaseUrl::parse(base_url).expect("base URL"),
+            protocol: RouteProtocol::Responses,
+            base_url: BaseUrl::parse(base_url, RouteProtocol::Responses).expect("base URL"),
             api_key: Arc::new(ApiKey::parse("upstream-secret").expect("API key")),
             fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
         });
@@ -3315,7 +3317,8 @@ mod tests {
         Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: name.to_owned(),
-            base_url: BaseUrl::parse(base_url).expect("base URL"),
+            protocol: RouteProtocol::Responses,
+            base_url: BaseUrl::parse(base_url, RouteProtocol::Responses).expect("base URL"),
             api_key: Arc::new(ApiKey::parse(&format!("{name}-key")).expect("API key")),
             fallback_excluded_models: Arc::new(
                 excluded_models

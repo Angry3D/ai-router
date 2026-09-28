@@ -2,5 +2,6 @@
 import type { BalanceQueryEditDto } from "./BalanceQueryEditDto";
 import type { CodexModelDto } from "./CodexModelDto";
 import type { RouteId } from "./RouteId";
+import type { RouteProtocol } from "./RouteProtocol";
 
-export type RouteEditDto = { routeId: RouteId, name: string, baseUrl: string, inferenceUrl: string, apiKey: string, menuVisible: boolean, balanceQuery: BalanceQueryEditDto | null, fallbackExcludedModels: Array<string>, models: Array<CodexModelDto>, };
+export type RouteEditDto = { routeId: RouteId, name: string, baseUrl: string, protocol: RouteProtocol, inferenceUrl: string, apiKey: string, menuVisible: boolean, balanceQuery: BalanceQueryEditDto | null, fallbackExcludedModels: Array<string>, models: Array<CodexModelDto>, };

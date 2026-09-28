@@ -39,7 +39,7 @@ use router_core::{
         ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, CodexModelValidationError,
         FallbackExcludedModelValidationError, ImagesGenerationModel, ImagesGenerationTimeout,
         McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl,
-        ReachabilityResult, RouteId, ValidationError,
+        ReachabilityResult, RouteId, RouteProtocol, ValidationError,
     },
     lifecycle::{
         AppCoordinator, AppLifecycleIssue, AppLifecyclePhase, AppLifecycleServices,
@@ -612,10 +612,11 @@ impl DesktopLifecycleServices {
         routes
             .into_iter()
             .map(|route| {
-                let base_url = BaseUrl::parse(&route.base_url)
+                let base_url = BaseUrl::parse(&route.base_url, route.protocol)
                     .map_err(|error| map_validation_error(&error))?;
                 Ok(RouteSummaryDto {
                     menu_visible: Some(route.menu_visible),
+                    protocol: Some(route.protocol),
                     inference_status: inference.as_ref().map_or_else(
                         || router_core::domain::InferenceStatus {
                             kind: router_core::domain::InferenceStatusKind::Unverified,
@@ -733,7 +734,8 @@ impl DesktopLifecycleServices {
             participants.push(Arc::new(RouteSnapshot {
                 route_id: route.route_id.clone(),
                 name: route.name.clone(),
-                base_url: BaseUrl::parse(&route.base_url)
+                protocol: route.protocol,
+                base_url: BaseUrl::parse(&route.base_url, route.protocol)
                     .map_err(|error| map_validation_error(&error))?,
                 api_key: Arc::new(api_key),
                 fallback_excluded_models: Arc::new(
@@ -763,7 +765,8 @@ impl DesktopLifecycleServices {
                 Some(Arc::new(RouteSnapshot {
                     route_id: route.route_id.clone(),
                     name: route.name.clone(),
-                    base_url: BaseUrl::parse(&route.base_url)
+                    protocol: route.protocol,
+                    base_url: BaseUrl::parse(&route.base_url, route.protocol)
                         .map_err(|error| map_validation_error(&error))?,
                     api_key: Arc::new(api_key),
                     fallback_excluded_models: Arc::new(
@@ -800,7 +803,8 @@ impl DesktopLifecycleServices {
                     Some(Arc::new(RouteSnapshot {
                         route_id: route.route_id.clone(),
                         name: route.name.clone(),
-                        base_url: BaseUrl::parse(&route.base_url)
+                        protocol: route.protocol,
+                        base_url: BaseUrl::parse(&route.base_url, route.protocol)
                             .map_err(|error| map_validation_error(&error))?,
                         api_key: Arc::new(api_key),
                         fallback_excluded_models: Arc::new(
@@ -1278,15 +1282,16 @@ impl DesktopLifecycleServices {
             .route_edit(route_id)
             .await
             .map_err(map_storage_error)?;
-        let base_url =
-            BaseUrl::parse(&edit.route.base_url).map_err(|error| map_validation_error(&error))?;
+        let base_url = BaseUrl::parse(&edit.route.base_url, edit.route.protocol)
+            .map_err(|error| map_validation_error(&error))?;
         let api_key = String::from_utf8(edit.api_key.expose().to_vec())
             .map_err(|_| ipc_error("route_key_invalid", "路由 Key 无法读取。", false))?;
         Ok(RouteEditDto {
             route_id: edit.route.route_id,
             name: edit.route.name,
             base_url: base_url.as_str().to_owned(),
-            inference_url: base_url.inference_url(),
+            protocol: edit.route.protocol,
+            inference_url: base_url.inference_url(edit.route.protocol),
             api_key,
             menu_visible: edit.route.menu_visible,
             balance_query: edit.balance_query.map(|query| BalanceQueryEditDto {
@@ -1355,6 +1360,7 @@ impl DesktopLifecycleServices {
                         route_id: route_id.clone(),
                         name: input.name,
                         base_url: input.base_url,
+                        protocol: Some(input.protocol),
                         api_key,
                         menu_visible: Some(input.menu_visible),
                         balance_query,
@@ -1372,6 +1378,7 @@ impl DesktopLifecycleServices {
                     CreateRouteInput {
                         name: input.name,
                         base_url: input.base_url,
+                        protocol: Some(input.protocol),
                         api_key,
                         menu_visible: Some(input.menu_visible),
                         balance_query,
@@ -2017,8 +2024,8 @@ impl DesktopLifecycleServices {
     ) -> Result<BalanceResult, IpcErrorDto> {
         let api_key =
             ApiKey::parse(&input.api_key).map_err(|error| map_validation_error(&error))?;
-        let base_url =
-            BaseUrl::parse(&input.base_url).map_err(|error| map_validation_error(&error))?;
+        let base_url = parse_balance_base_url(&input.base_url)
+            .map_err(|error| map_validation_error(&error))?;
         BalanceExecutor::new_with_outbound_proxy(&self.outbound_proxy)
             .map_err(|_| ipc_error("balance_unavailable", "余额服务尚未就绪。", true))?
             .query(
@@ -2036,11 +2043,12 @@ impl DesktopLifecycleServices {
     pub async fn check_reachability(
         &self,
         base_url: String,
+        protocol: RouteProtocol,
     ) -> Result<ReachabilityResult, IpcErrorDto> {
         let probe = ReachabilityProbe::new_with_outbound_proxy(&self.outbound_proxy)
             .map_err(|_| ipc_error("reachability_unavailable", "地址检查暂不可用。", true))?;
         probe
-            .check(&base_url)
+            .check(&base_url, protocol)
             .await
             .map_err(|error| map_validation_error(&error))
     }
@@ -3392,13 +3400,14 @@ impl AppLifecycleServices for DesktopLifecycleServices {
         let summaries = routes
             .iter()
             .map(|route| {
-                let base_url =
-                    BaseUrl::parse(&route.base_url).map_err(|_| LifecycleFailure::Database)?;
+                let base_url = BaseUrl::parse(&route.base_url, route.protocol)
+                    .map_err(|_| LifecycleFailure::Database)?;
                 Ok(RouteSummaryDto {
                     route_id: route.route_id.clone(),
                     name: route.name.clone(),
                     base_url_host: base_url.host(),
                     menu_visible: Some(route.menu_visible),
+                    protocol: Some(route.protocol),
                     inference_status: inference.status(&route.route_id, now_millis()),
                     health: self.route_health.snapshot(&route.route_id).map(Into::into),
                 })
@@ -3923,6 +3932,19 @@ pub async fn refresh_all_balances(
 }
 
 #[tauri::command]
+/// Balance queries only use the canonical prefix, which is identical for both
+/// protocols, so the delivered terminal endpoint form is accepted either way.
+fn parse_balance_base_url(value: &str) -> Result<BaseUrl, ValidationError> {
+    BaseUrl::parse(value, RouteProtocol::Responses).or_else(|error| {
+        if error.code == "base_url_unsupported_endpoint" {
+            BaseUrl::parse(value, RouteProtocol::ChatCompletions)
+        } else {
+            Err(error)
+        }
+    })
+}
+
+#[tauri::command]
 pub async fn test_balance_query(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     input: BalanceTestInputDto,
@@ -3934,8 +3956,9 @@ pub async fn test_balance_query(
 pub async fn check_route_reachability(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     base_url: String,
+    protocol: router_core::domain::RouteProtocol,
 ) -> Result<router_core::domain::ReachabilityResult, IpcErrorDto> {
-    services.check_reachability(base_url).await
+    services.check_reachability(base_url, protocol).await
 }
 
 #[tauri::command]
@@ -4155,8 +4178,14 @@ fn map_validation_error(error: &ValidationError) -> IpcErrorDto {
         message: match error.code {
             "base_url_invalid" => "请输入有效的 HTTP(S) 地址。",
             "base_url_too_long" => "地址过长。",
-            "base_url_unsupported_endpoint" => "仅支持 Responses API 地址。",
+            "base_url_unsupported_endpoint" => "地址必须匹配所选的上游协议。",
             "base_url_duplicate_responses" => "Responses 地址不能重复包含 /responses。",
+            "base_url_duplicate_chat_completions" => {
+                "Chat Completions 地址不能重复包含 /chat/completions。"
+            }
+            "chat_bridge_unsupported_request" => {
+                "该请求包含 Chat Completions 上游无法表达的内容，请改用 Responses 上游。"
+            }
             "images_generation_timeout_out_of_range" => "生成等待上限需为 600 至 3600 秒。",
             "images_generation_model_required" => "请输入生图模型。",
             "images_generation_model_control_character" => "生图模型不能包含控制字符。",
@@ -4798,6 +4827,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "Models".to_owned(),
                 base_url: "https://models.example/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("models-key").expect("API key"),
                 menu_visible: None,
                 balance_query: None,
@@ -4813,6 +4843,7 @@ mod tests {
             route_id: Some(route_id.clone()),
             name: name.to_owned(),
             base_url: "https://A.example/v1".to_owned(),
+            protocol: RouteProtocol::Responses,
             api_key: "A-key".to_owned(),
             menu_visible: true,
             balance_query: None,
@@ -4989,6 +5020,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "Image repair".to_owned(),
                 base_url: "https://image-repair.example/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("image-repair-key").expect("API key"),
                 menu_visible: None,
                 balance_query: None,
@@ -5046,6 +5078,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: name.to_owned(),
                 base_url: format!("https://{name}.example/v1"),
+                protocol: None,
                 api_key: ApiKey::parse(&format!("{name}-key")).expect("API key"),
                 menu_visible: None,
                 balance_query: None,
@@ -5080,6 +5113,7 @@ mod tests {
                 route_id: hidden.clone(),
                 name: "B".to_owned(),
                 base_url: "https://B.example/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("B-key").expect("API key"),
                 menu_visible: Some(false),
                 balance_query: None,
@@ -5623,6 +5657,7 @@ mod tests {
                 CreateRouteInput {
                     name: "First".to_owned(),
                     base_url: "https://first.example/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse("first-key").expect("key"),
                     menu_visible: None,
                     balance_query: None,
@@ -5641,6 +5676,7 @@ mod tests {
                 CreateRouteInput {
                     name: "Second".to_owned(),
                     base_url: "https://second.example/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse("second-key").expect("key"),
                     menu_visible: None,
                     balance_query: None,
@@ -5844,6 +5880,7 @@ mod tests {
                 CreateRouteInput {
                     name: "Fallback target".to_owned(),
                     base_url: "https://fallback.example/v1".to_owned(),
+                    protocol: None,
                     api_key: ApiKey::parse("fallback-key").expect("key"),
                     menu_visible: None,
                     balance_query: None,
@@ -6741,6 +6778,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "Image A".to_owned(),
                 base_url: "https://image-a.example/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("image-a-key").expect("API key"),
                 menu_visible: None,
                 balance_query: None,
@@ -6752,6 +6790,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "Image B".to_owned(),
                 base_url: "https://image-b.example/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("image-b-key").expect("API key"),
                 menu_visible: None,
                 balance_query: None,
@@ -6882,6 +6921,7 @@ mod tests {
             .create_route(CreateRouteInput {
                 name: "Image model".to_owned(),
                 base_url: "https://image-model.example/v1".to_owned(),
+                protocol: None,
                 api_key: ApiKey::parse("image-model-key").expect("API key"),
                 menu_visible: None,
                 balance_query: None,
@@ -7296,6 +7336,7 @@ mod tests {
                     .create_route(CreateRouteInput {
                         name: name.to_owned(),
                         base_url: format!("https://{}.example/v1", name.replace(' ', "-")),
+                        protocol: None,
                         api_key: ApiKey::parse(&format!("{}-key", name.replace(' ', "-")))
                             .expect("API key"),
                         menu_visible: None,
@@ -7404,24 +7445,39 @@ mod tests {
 
     #[test]
     fn base_url_validation_errors_map_to_safe_field_specific_ipc_messages() {
-        for (input, code, message) in [
+        for (input, protocol, code, message) in [
             (
                 "https://example.test/v1/responses/responses",
+                RouteProtocol::Responses,
                 "base_url_duplicate_responses",
                 "Responses 地址不能重复包含 /responses。",
             ),
             (
+                "https://example.test/v1/chat/completions/chat/completions",
+                RouteProtocol::ChatCompletions,
+                "base_url_duplicate_chat_completions",
+                "Chat Completions 地址不能重复包含 /chat/completions。",
+            ),
+            (
                 "https://example.test/v1/chat/completions",
+                RouteProtocol::Responses,
                 "base_url_unsupported_endpoint",
-                "仅支持 Responses API 地址。",
+                "地址必须匹配所选的上游协议。",
+            ),
+            (
+                "https://example.test/v1/responses",
+                RouteProtocol::ChatCompletions,
+                "base_url_unsupported_endpoint",
+                "地址必须匹配所选的上游协议。",
             ),
             (
                 "ftp://example.test",
+                RouteProtocol::Responses,
                 "base_url_invalid",
                 "请输入有效的 HTTP(S) 地址。",
             ),
         ] {
-            let validation = BaseUrl::parse(input).expect_err("invalid Base URL");
+            let validation = BaseUrl::parse(input, protocol).expect_err("invalid Base URL");
             let ipc = map_validation_error(&validation);
             assert_eq!(ipc.code, code);
             assert_eq!(ipc.message, message);
@@ -7457,7 +7513,9 @@ mod tests {
                 Arc::new(RouteSnapshot {
                     route_id: RouteId::from_string(format!("route-{index}")),
                     name: format!("Route {index}"),
-                    base_url: BaseUrl::parse("https://example.test/v1").expect("base URL"),
+                    protocol: RouteProtocol::Responses,
+                    base_url: BaseUrl::parse("https://example.test/v1", RouteProtocol::Responses)
+                        .expect("base URL"),
                     api_key: Arc::new(ApiKey::parse("test-key").expect("API key")),
                     fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
                 })
@@ -7882,6 +7940,7 @@ mod tests {
                     .create_route(CreateRouteInput {
                         name: name.to_owned(),
                         base_url: format!("https://{name}.example/v1"),
+                        protocol: None,
                         api_key: ApiKey::parse(&format!("{name}-key")).expect("API key"),
                         menu_visible: None,
                         balance_query: None,

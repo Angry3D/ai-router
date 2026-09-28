@@ -8,7 +8,7 @@ use thiserror::Error;
 use ts_rs::TS;
 
 use crate::{
-    domain::{AppearancePreference, InferenceStatus, ProxyRuntimeStatus, RouteId},
+    domain::{AppearancePreference, InferenceStatus, ProxyRuntimeStatus, RouteId, RouteProtocol},
     lifecycle::{AppLifecycleIssue, AppLifecyclePhase, AppLifecycleSnapshot},
     proxy::{RecoveryOrigin, RouteHealthSnapshot},
 };
@@ -122,6 +122,9 @@ pub struct RouteSummaryDto {
     #[serde(default = "default_menu_visible")]
     #[ts(optional)]
     pub menu_visible: Option<bool>,
+    #[serde(default = "default_route_protocol")]
+    #[ts(optional)]
+    pub protocol: Option<RouteProtocol>,
     pub inference_status: InferenceStatus,
     pub health: Option<RouteHealthDto>,
 }
@@ -129,6 +132,11 @@ pub struct RouteSummaryDto {
 #[allow(clippy::unnecessary_wraps)]
 const fn default_menu_visible() -> Option<bool> {
     Some(true)
+}
+
+#[allow(clippy::unnecessary_wraps)]
+const fn default_route_protocol() -> Option<RouteProtocol> {
+    Some(RouteProtocol::Responses)
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -460,7 +468,7 @@ mod tests {
         AppRuntimeState, RouteSummaryDto, RuntimeProjectionUpdate, StateArea, StateChangedEventDto,
         StateCoordinator, StateEventError, StateEventSink,
     };
-    use crate::domain::{AppearancePreference, ProxyRuntimeStatus, RouteId};
+    use crate::domain::{AppearancePreference, ProxyRuntimeStatus, RouteId, RouteProtocol};
 
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<StateChangedEventDto>>);
@@ -542,6 +550,7 @@ mod tests {
             name: "Work".to_owned(),
             base_url_host: "example.com".to_owned(),
             menu_visible: Some(true),
+            protocol: Some(RouteProtocol::Responses),
             inference_status: crate::domain::InferenceStatus {
                 kind: crate::domain::InferenceStatusKind::Unverified,
                 last_outcome: None,
@@ -584,6 +593,7 @@ mod tests {
             name: "Work".to_owned(),
             base_url_host: "example.com".to_owned(),
             menu_visible: Some(true),
+            protocol: Some(RouteProtocol::Responses),
             inference_status: crate::domain::InferenceStatus {
                 kind: crate::domain::InferenceStatusKind::Unverified,
                 last_outcome: None,
@@ -644,6 +654,7 @@ mod tests {
                         name: "Work".to_owned(),
                         base_url_host: "example.com".to_owned(),
                         menu_visible: Some(true),
+                        protocol: Some(RouteProtocol::Responses),
                         inference_status: crate::domain::InferenceStatus {
                             kind: crate::domain::InferenceStatusKind::Unverified,
                             last_outcome: None,

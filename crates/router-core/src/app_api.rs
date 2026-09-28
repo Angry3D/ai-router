@@ -9,7 +9,7 @@ use crate::{
     codex_config::CodexConfigStatus,
     domain::{
         BalanceQueryPolicy, CompletionState, DeliveryState, ModelVerdict, OutboundProxyConfig,
-        RouteId, ValidationError,
+        RouteId, RouteProtocol, ValidationError,
     },
     incident::{IncidentAction, IncidentRecord},
     recovery::{DatabaseStartupIssue, RecoveryHealth, RecoveryHealthKind},
@@ -715,6 +715,7 @@ pub struct RouteEditDto {
     pub route_id: RouteId,
     pub name: String,
     pub base_url: String,
+    pub protocol: RouteProtocol,
     pub inference_url: String,
     pub api_key: String,
     #[serde(default = "default_menu_visible")]
@@ -731,6 +732,8 @@ pub struct RouteSaveInputDto {
     pub route_id: Option<RouteId>,
     pub name: String,
     pub base_url: String,
+    #[serde(default)]
+    pub protocol: RouteProtocol,
     pub api_key: String,
     #[serde(default = "default_menu_visible")]
     pub menu_visible: bool,

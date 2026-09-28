@@ -74,6 +74,7 @@ export type { RouteHealthDto } from "./RouteHealthDto";
 export type { RouteHealthOriginDto } from "./RouteHealthOriginDto";
 export type { RouteId } from "./RouteId";
 export type { RouteMoveDirection } from "./RouteMoveDirection";
+export type { RouteProtocol } from "./RouteProtocol";
 export type { RouteSaveInputDto } from "./RouteSaveInputDto";
 export type { RouteSaveResultDto } from "./RouteSaveResultDto";
 export type { RouteSummaryDto } from "./RouteSummaryDto";

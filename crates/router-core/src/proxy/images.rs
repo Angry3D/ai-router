@@ -1361,6 +1361,7 @@ mod tests {
 
     use super::download::test_support::{AssetFixture, AssetReply};
     use super::*;
+    use crate::domain::RouteProtocol;
     use crate::{
         domain::{ApiKey, BaseUrl, RouteId},
         proxy::{ProxyServerHandle, RouteSnapshot, RoutingSnapshot},
@@ -2023,7 +2024,8 @@ mod tests {
         Arc::new(RouteSnapshot {
             route_id: RouteId::new(),
             name: "Image route".to_owned(),
-            base_url: BaseUrl::parse(base_url).expect("base URL"),
+            protocol: RouteProtocol::Responses,
+            base_url: BaseUrl::parse(base_url, RouteProtocol::Responses).expect("base URL"),
             api_key: Arc::new(ApiKey::parse(key).expect("API key")),
             fallback_excluded_models: Arc::new(std::collections::HashSet::new()),
         })
