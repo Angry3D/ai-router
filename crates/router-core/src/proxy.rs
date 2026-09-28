@@ -50,6 +50,8 @@ use self::history::{
     NoopHistorySink, NoopRuntimeDiagnosticSink, bounded_string, now_millis, parse_turn_id,
 };
 
+mod chat_bridge;
+mod chat_stream;
 mod fallback;
 mod health;
 mod history;

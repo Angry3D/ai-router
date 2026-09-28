@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "policyVersion": "2026-08-11",
+  "policyVersion": "2026-09-28",
   "project": {
     "name": "ai-router",
     "author": "Angry3D",
@@ -201,6 +201,33 @@
       "hashes": {
         "crates/router-core/pricing/catalogs/openai-priority-2026-07-28.json": "28028f0647cda3fc10d6af36072ec84e509ffcb866be2a4d3cca1e1461bcee37",
         "crates/router-core/pricing/catalogs/openai-standard-2026-07-27.json": "87f3cd449fdc0789d850577c35848db43a7dbc76296ebedd4b2471a88594f9f1"
+      }
+    },
+    {
+      "id": "cc-switch-chat-bridge",
+      "name": "Codex Chat bridge model-visible literals (farion1231/cc-switch)",
+      "version": "0555c09d9aa06e5f93bf6d57ecf8faa9e6305c4b",
+      "license": "MIT",
+      "upstream": "https://github.com/farion1231/cc-switch",
+      "noticeMarker": "<!-- provenance:cc-switch-chat-bridge -->",
+      "localPaths": [
+        "crates/router-core/src/proxy/chat_bridge.rs",
+        "third-party/cc-switch-chat-bridge.provenance.json",
+        "third-party/licenses/MIT-cc-switch.txt"
+      ],
+      "sourceRecord": {
+        "path": "third-party/cc-switch-chat-bridge.provenance.json",
+        "requiredStrings": [
+          "https://github.com/farion1231/cc-switch",
+          "0555c09d9aa06e5f93bf6d57ecf8faa9e6305c4b",
+          "src-tauri/src/proxy/providers/transform_codex_chat.rs",
+          "MIT",
+          "e684675e547c7e60317a9a43834d2133d3655704902296e0881619c13f48b06c"
+        ]
+      },
+      "hashes": {
+        "third-party/cc-switch-chat-bridge.provenance.json": "2bf6e78b110d3ba0b757ac5be3566c25977aba76415677d7f1bd85fa1342e660",
+        "third-party/licenses/MIT-cc-switch.txt": "eb383fe9c509b8761ad4721e920a188552166e3a1451965f23f1542c803af76a"
       }
     }
   ],
