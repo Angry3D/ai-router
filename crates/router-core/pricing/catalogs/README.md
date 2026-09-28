@@ -16,6 +16,11 @@ captured on 2026-09-12. The latter retains the internal `priority` name for
 compatibility while recording the official Fast mode rates; both `fast` and
 `priority` request values select it.
 
+`openai-standard-2026-09-29.json` and `openai-priority-2026-09-29.json` were
+captured on 2026-09-29. The latter retains the internal `priority` name for
+compatibility while recording the official Fast mode rates; both `fast` and
+`priority` request values select it.
+
 These snapshots are local estimates, not an OpenAI bill, quote, or promise
 that the rates remain current. Review the linked official documentation and
 the actual provider bill before relying on the values. A catalog update must

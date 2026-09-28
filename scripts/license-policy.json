@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "policyVersion": "2026-09-28",
+  "policyVersion": "2026-09-29",
   "project": {
     "name": "ai-router",
     "author": "Angry3D",
@@ -246,6 +246,27 @@
       "path": "crates/router-core/pricing/catalogs/openai-priority-2026-07-28.json",
       "version": "openai-priority-2026-07-28",
       "capturedAt": "2026-07-28",
+      "unit": "micro_usd_per_million_tokens",
+      "sources": [
+        "https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode",
+        "https://developers.openai.com/api/docs/pricing/",
+        "https://developers.openai.com/api/docs/guides/prompt-caching/"
+      ]
+    },
+    {
+      "path": "crates/router-core/pricing/catalogs/openai-standard-2026-09-29.json",
+      "version": "openai-standard-2026-09-29",
+      "capturedAt": "2026-09-29",
+      "unit": "micro_usd_per_million_tokens",
+      "sources": [
+        "https://developers.openai.com/api/docs/pricing/",
+        "https://developers.openai.com/api/docs/guides/prompt-caching/"
+      ]
+    },
+    {
+      "path": "crates/router-core/pricing/catalogs/openai-priority-2026-09-29.json",
+      "version": "openai-priority-2026-09-29",
+      "capturedAt": "2026-09-29",
       "unit": "micro_usd_per_million_tokens",
       "sources": [
         "https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode",
