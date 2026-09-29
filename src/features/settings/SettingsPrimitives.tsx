@@ -4,11 +4,13 @@ import type {
   InputHTMLAttributes,
   SelectHTMLAttributes,
   ReactNode,
+  Ref,
   TextareaHTMLAttributes,
 } from "react";
 import { GithubFilled } from "@ant-design/icons";
 import { CircleHelp } from "lucide-react";
 import { forwardRef, useId, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { appVariant, appVersionLabel } from "../../appVariant";
 import { AppScrollArea } from "../shared/AppScrollArea";
@@ -356,6 +358,216 @@ export function SettingsTextarea({
 }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return (
     <textarea {...props} className={classes("settings-textarea", className)} />
+  );
+}
+
+export interface SettingsComboboxOption {
+  id: string;
+  disabled?: boolean;
+}
+
+export function SettingsCombobox({
+  id,
+  inputRef,
+  value,
+  onChange,
+  options,
+  onSelect,
+  onSubmit,
+  ariaLabel,
+  placeholder,
+  describedBy,
+  maxLength,
+  popupHost,
+  disabled = false,
+  invalid = false,
+  placement = "below",
+}: {
+  id?: string;
+  inputRef?: Ref<HTMLInputElement>;
+  value: string;
+  onChange: (value: string) => void;
+  options: SettingsComboboxOption[];
+  onSelect: (id: string) => void;
+  onSubmit?: (value: string) => void;
+  ariaLabel: string;
+  placeholder?: string;
+  describedBy?: string;
+  maxLength?: number;
+  popupHost?: HTMLElement | null;
+  disabled?: boolean;
+  invalid?: boolean;
+  placement?: "below" | "above";
+}) {
+  const generatedId = useId();
+  const inputId = id ?? `settings-combobox-${generatedId}`;
+  const listboxId = `${inputId}-listbox`;
+  const optionId = (index: number) => `${listboxId}-option-${index}`;
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+
+  const query = value.trim().toLowerCase();
+  const filtered = query
+    ? options.filter((option) => option.id.toLowerCase().includes(query))
+    : options;
+  const expanded = open && !disabled && options.length > 0;
+
+  let activeIndex = -1;
+  if (expanded) {
+    if (filtered[highlight] && !filtered[highlight].disabled) {
+      activeIndex = highlight;
+    } else {
+      for (let index = highlight; index < filtered.length; index += 1) {
+        if (!filtered[index].disabled) {
+          activeIndex = index;
+          break;
+        }
+      }
+      if (activeIndex === -1) {
+        const last = Math.min(highlight, filtered.length - 1);
+        for (let index = last; index >= 0; index -= 1) {
+          if (!filtered[index].disabled) {
+            activeIndex = index;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  const openPopup = () => {
+    if (disabled || options.length === 0) return;
+    setHighlight(0);
+    setOpen(true);
+  };
+
+  const moveHighlight = (step: 1 | -1) => {
+    if (!expanded) {
+      setHighlight(step === 1 ? 0 : Math.max(filtered.length - 1, 0));
+      setOpen(options.length > 0);
+      return;
+    }
+    if (activeIndex === -1) {
+      setHighlight(step === 1 ? 0 : Math.max(filtered.length - 1, 0));
+      return;
+    }
+    for (
+      let index = activeIndex + step;
+      index >= 0 && index < filtered.length;
+      index += step
+    ) {
+      if (!filtered[index].disabled) {
+        setHighlight(index);
+        return;
+      }
+    }
+    setHighlight(activeIndex);
+  };
+
+  const selectOption = (option: SettingsComboboxOption) => {
+    if (option.disabled) return;
+    onSelect(option.id);
+  };
+
+  const popup = expanded ? (
+    <div
+      id={listboxId}
+      className="settings-combobox-popup"
+      data-placement={placement}
+      role="listbox"
+    >
+      {filtered.length === 0 ? (
+        <div className="settings-combobox-hint">无匹配模型</div>
+      ) : (
+        filtered.map((option, index) => (
+          <div
+            key={option.id}
+            id={optionId(index)}
+            className="settings-combobox-option"
+            role="option"
+            aria-selected={index === activeIndex}
+            aria-disabled={option.disabled ? true : undefined}
+            onMouseDown={(event) => event.preventDefault()}
+            onMouseEnter={() => {
+              if (!option.disabled) setHighlight(index);
+            }}
+            onClick={() => selectOption(option)}
+          >
+            <span className="settings-combobox-option-label">{option.id}</span>
+            {option.disabled ? (
+              <span className="settings-combobox-badge">已添加</span>
+            ) : null}
+          </div>
+        ))
+      )}
+    </div>
+  ) : null;
+  const popupNode =
+    popup && popupHost ? createPortal(popup, popupHost) : popup;
+
+  return (
+    <div className="settings-combobox">
+      <input
+        id={inputId}
+        ref={inputRef}
+        className="settings-combobox-input"
+        type="text"
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-expanded={expanded}
+        aria-controls={listboxId}
+        aria-autocomplete="list"
+        aria-activedescendant={
+          activeIndex === -1 ? undefined : optionId(activeIndex)
+        }
+        aria-invalid={invalid ? true : undefined}
+        aria-describedby={describedBy}
+        placeholder={placeholder}
+        maxLength={maxLength}
+        disabled={disabled}
+        value={value}
+        onChange={(event) => {
+          onChange(event.currentTarget.value);
+          if (!open) openPopup();
+        }}
+        onFocus={openPopup}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            moveHighlight(1);
+            return;
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            moveHighlight(-1);
+            return;
+          }
+          if (event.key === "Escape") {
+            if (open) {
+              event.preventDefault();
+              setOpen(false);
+            }
+            return;
+          }
+          if (event.key === "Tab") {
+            setOpen(false);
+            return;
+          }
+          if (event.key !== "Enter") return;
+          if (activeIndex !== -1) {
+            event.preventDefault();
+            selectOption(filtered[activeIndex]);
+            return;
+          }
+          const submitted = value.trim();
+          if (!submitted || !onSubmit) return;
+          event.preventDefault();
+          onSubmit(submitted);
+        }}
+      />
+      {popupNode}
+    </div>
   );
 }
 

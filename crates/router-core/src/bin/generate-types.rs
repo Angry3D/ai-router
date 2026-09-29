@@ -15,7 +15,8 @@ use router_core::{
         PricingTableStatusDto, RecoveryCandidateDto, RecoveryHealthDto, RecoveryIncidentAction,
         RecoveryIncidentDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
         ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
-        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto,
+        RouteCatalogMode, RouteEditDto, RouteModelsErrorCategory, RouteModelsInputDto,
+        RouteModelsResultDto, RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto,
         RoutingSkippedRouteDto, SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
         UpdateOutboundProxySettingsInputDto, UsageAttemptDto, UsageCostDto, UsageCostStateDto,
         UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto,
@@ -101,6 +102,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     RouteActivationPreviewDto::export_all_to(&output)?;
     RouteActivationResultDto::export_all_to(&output)?;
     RouteCatalogMode::export_all_to(&output)?;
+    RouteModelsErrorCategory::export_all_to(&output)?;
+    RouteModelsInputDto::export_all_to(&output)?;
+    RouteModelsResultDto::export_all_to(&output)?;
     RouteSaveInputDto::export_all_to(&output)?;
     RouteSaveResultDto::export_all_to(&output)?;
     RoutingDecisionDto::export_all_to(&output)?;

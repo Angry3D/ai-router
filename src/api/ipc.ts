@@ -30,6 +30,8 @@ import type {
   RouteActivationResultDto,
   RouteEditDto,
   RouteId,
+  RouteModelsInputDto,
+  RouteModelsResultDto,
   RouteProtocol,
   RouteSaveInputDto,
   RouteSaveResultDto,
@@ -86,6 +88,7 @@ export const IPC_COMMANDS = {
   refreshBalance: "refresh_balance",
   refreshAllBalances: "refresh_all_balances",
   testBalanceQuery: "test_balance_query",
+  fetchRouteModels: "fetch_route_models",
   checkRouteReachability: "check_route_reachability",
   applyProxyPort: "apply_proxy_port",
   connectCodex: "connect_codex",
@@ -440,6 +443,29 @@ export async function testBalanceQuery(
     };
   }
   return invoke<BalanceResult>(IPC_COMMANDS.testBalanceQuery, { input });
+}
+
+export async function fetchRouteModels(
+  input: RouteModelsInputDto,
+): Promise<RouteModelsResultDto> {
+  if (import.meta.env.DEV && !isTauriRuntime()) {
+    return {
+      models: [
+        "glm-5.3-flash",
+        "gpt-5-nano",
+        "gpt-5.1",
+        "gpt-5.1-codex",
+        "gpt-5.2",
+        "gpt-5.2-codex",
+        "gpt-5.2-mini",
+        "gpt-5.3-codex",
+      ],
+      errorCategory: null,
+    };
+  }
+  return invoke<RouteModelsResultDto>(IPC_COMMANDS.fetchRouteModels, {
+    input,
+  });
 }
 
 export async function checkRouteReachability(

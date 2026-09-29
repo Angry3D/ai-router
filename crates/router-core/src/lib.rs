@@ -17,6 +17,7 @@ pub mod recovery;
 pub mod runtime_log;
 pub mod state;
 pub mod storage;
+pub mod upstream_models;
 
 pub const APP_NAME: &str = "AI Router";
 

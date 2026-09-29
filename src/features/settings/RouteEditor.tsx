@@ -15,6 +15,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   checkRouteReachability,
   deleteRoute,
+  fetchRouteModels,
   getRouteEdit,
   normalizeIpcError,
   saveRoute,
@@ -28,6 +29,7 @@ import type {
   ReachabilityResult,
   RouteEditDto,
   RouteId,
+  RouteModelsErrorCategory,
   RouteProtocol,
   RouteSaveInputDto,
 } from "../../generated";
@@ -38,6 +40,7 @@ import { formatBalanceScript } from "./formatBalanceScript";
 import {
   SettingsActionGroup,
   SettingsButton,
+  SettingsCombobox,
   SettingsConfirmDialog,
   SettingsDivider,
   SettingsFieldRow,
@@ -148,6 +151,45 @@ export interface RouteEditorHealthDetail {
 type BalanceTestFeedback =
   | { kind: "result"; result: BalanceResult }
   | { kind: "error"; message: string };
+
+type ModelsFetchState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; models: string[] }
+  | { kind: "error"; message: string };
+
+const modelsErrorCopy: Record<RouteModelsErrorCategory, string> = {
+  unauthorized: "获取失败：鉴权失败，请检查 API Key",
+  not_found: "获取失败：上游未提供 /models 接口",
+  network: "获取失败：无法连接上游",
+  timeout: "获取失败：请求超时",
+  http_status: "获取失败：上游响应不可用",
+  too_large: "获取失败：上游响应不可用",
+  invalid_response: "获取失败：上游响应不可用",
+};
+
+function modelsFetchStatusFor(state: ModelsFetchState): {
+  text: string;
+  tone: SettingsTone;
+  alert: boolean;
+} {
+  switch (state.kind) {
+    case "loading":
+      return { text: "正在获取模型列表…", tone: "neutral", alert: false };
+    case "ready":
+      return state.models.length === 0
+        ? { text: "上游未返回模型", tone: "warning", alert: false }
+        : {
+            text: `已获取 ${state.models.length} 个模型`,
+            tone: "neutral",
+            alert: false,
+          };
+    case "error":
+      return { text: state.message, tone: "danger", alert: true };
+    default:
+      return { text: "未获取模型列表", tone: "neutral", alert: false };
+  }
+}
 
 const emptyRouteForm: RouteFormState = {
   name: "",
@@ -269,13 +311,20 @@ function RouteForm(props: {
   const [fallbackModelError, setFallbackModelError] = useState<string | null>(
     null,
   );
+  const [modelsFetch, setModelsFetch] = useState<ModelsFetchState>({
+    kind: "idle",
+  });
+  const [fallbackPopupHost, setFallbackPopupHost] = useState<HTMLElement | null>(
+    null,
+  );
+  const [modelIdInput, setModelIdInput] = useState("");
   const [retryToken, setRetryToken] = useState<string | null>(null);
   const [modelSuccess, setModelSuccess] = useState<string | null>(null);
   const nextModelKey = useRef(props.initial.models.length);
-  const pendingModelFocusKey = useRef<string | null>(null);
-  const modelIdRefs = useRef(new Map<string, HTMLInputElement>());
   const fallbackModelInputRef = useRef<HTMLInputElement>(null);
+  const modelIdComboboxRef = useRef<HTMLInputElement>(null);
   const probeGeneration = useRef(0);
+  const modelsGeneration = useRef(0);
   const dirty =
     retryToken !== null ||
     fallbackModelInput.trim().length > 0 ||
@@ -290,12 +339,6 @@ function RouteForm(props: {
   const locked = busy || props.externalBusy;
 
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
-  useEffect(() => {
-    const key = pendingModelFocusKey.current;
-    if (!key) return;
-    modelIdRefs.current.get(key)?.focus();
-    pendingModelFocusKey.current = null;
-  }, [form.models]);
 
   const baseUrlPreview = useMemo(
     () => previewBaseUrl(form.baseUrl, form.protocol),
@@ -318,6 +361,17 @@ function RouteForm(props: {
     }
   }, [form.baseUrl]);
 
+  const fetchedModels = modelsFetch.kind === "ready" ? modelsFetch.models : [];
+  const customModelOptions = fetchedModels.map((id) => ({
+    id,
+    disabled: form.models.some((row) => row.modelId.trim() === id),
+  }));
+  const fallbackModelOptions = fetchedModels.map((id) => ({
+    id,
+    disabled: form.fallbackExcludedModels.includes(id),
+  }));
+  const modelsFetchStatus = modelsFetchStatusFor(modelsFetch);
+
   const patchForm = <K extends keyof RouteFormState>(
     key: K,
     value: RouteFormState[K],
@@ -326,6 +380,10 @@ function RouteForm(props: {
     if (key === "baseUrl" || key === "protocol") {
       probeGeneration.current += 1;
       setReachability(null);
+    }
+    if (key === "baseUrl" || key === "protocol" || key === "apiKey") {
+      modelsGeneration.current += 1;
+      setModelsFetch({ kind: "idle" });
     }
     if (["baseUrl", "protocol", "apiKey", "queryMode", "customSource"].includes(key)) {
       setBalanceFeedback(null);
@@ -348,18 +406,21 @@ function RouteForm(props: {
     setModelSuccess(null);
   };
 
-  const addModel = () => {
+  const addModelWithId = (value: string) => {
+    const modelId = value.trim();
+    if (!modelId) return;
     const key = `new-model-${nextModelKey.current++}`;
-    pendingModelFocusKey.current = key;
     setForm((current) => ({
       ...current,
       models: [
         ...current.models,
-        { key, modelId: "", displayName: "", contextWindow: "" },
+        { key, modelId, displayName: "", contextWindow: "" },
       ],
     }));
+    setModelIdInput("");
     setError(null);
     setModelSuccess(null);
+    requestAnimationFrame(() => modelIdComboboxRef.current?.focus());
   };
 
   const removeModel = (key: string) => {
@@ -386,8 +447,8 @@ function RouteForm(props: {
     return null;
   };
 
-  const addFallbackModel = () => {
-    const modelId = fallbackModelInput.trim();
+  const addFallbackModel = (value: string = fallbackModelInput) => {
+    const modelId = value.trim();
     if (!modelId) return;
     const validation = validateFallbackModel(modelId);
     if (validation) {
@@ -578,6 +639,34 @@ function RouteForm(props: {
     }
   };
 
+  const fetchModels = async () => {
+    const generation = ++modelsGeneration.current;
+    setBusy(true);
+    setError(null);
+    setModelsFetch({ kind: "loading" });
+    try {
+      const result = await fetchRouteModels({
+        baseUrl: form.baseUrl,
+        apiKey: form.apiKey,
+        protocol: form.protocol,
+      });
+      if (generation !== modelsGeneration.current) return;
+      setModelsFetch(
+        result.errorCategory
+          ? { kind: "error", message: modelsErrorCopy[result.errorCategory] }
+          : { kind: "ready", models: result.models },
+      );
+    } catch (reason) {
+      if (generation !== modelsGeneration.current) return;
+      setModelsFetch({
+        kind: "error",
+        message: normalizeIpcError(reason).message,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const formatScript = async () => {
     setBusy(true);
     setError(null);
@@ -747,6 +836,26 @@ function RouteForm(props: {
               </SettingsStatus>
             ) : null}
           </SettingsActionGroup>
+          <SettingsActionGroup className="route-probe-actions">
+            <SettingsButton
+              type="button"
+              disabled={
+                busy ||
+                !form.baseUrl ||
+                !form.apiKey ||
+                modelsFetch.kind === "loading"
+              }
+              onClick={() => void fetchModels()}
+            >
+              {modelsFetch.kind === "loading" ? "获取中…" : "获取模型列表"}
+            </SettingsButton>
+            <SettingsStatus
+              tone={modelsFetchStatus.tone}
+              role={modelsFetchStatus.alert ? "alert" : undefined}
+            >
+              {modelsFetchStatus.text}
+            </SettingsStatus>
+          </SettingsActionGroup>
           <SettingsDivider />
           <section
             className="route-fallback-model-section"
@@ -769,64 +878,68 @@ function RouteForm(props: {
               当前路由收到这些模型时不会自动切换；作为候选路由时会被跳过。
             </p>
             <div
-              className="fallback-model-field"
-              data-invalid={fallbackModelError ? "true" : undefined}
+              className="fallback-model-popup-host"
+              ref={setFallbackPopupHost}
             >
-              <div className="fallback-model-tags" role="list">
-                {form.fallbackExcludedModels.map((modelId) => (
-                  <span
-                    className="fallback-model-tag"
-                    role="listitem"
-                    key={modelId}
-                  >
-                    <span>{modelId}</span>
-                    <button
-                      type="button"
-                      className="fallback-model-remove"
-                      aria-label={`移除跳过 Fallback 的模型：${modelId}`}
-                      title={`移除 ${modelId}`}
-                      onClick={() => removeFallbackModel(modelId)}
-                    >
-                      <X aria-hidden="true" size={13} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-              <input
-                ref={fallbackModelInputRef}
-                className="fallback-model-input"
-                aria-label="添加跳过 Fallback 的模型"
-                aria-invalid={Boolean(fallbackModelError)}
-                aria-describedby={
-                  fallbackModelError ? "fallback-model-error" : undefined
-                }
-                maxLength={256}
-                placeholder={
-                  form.fallbackExcludedModels.length === 0
-                    ? "输入模型 ID"
-                    : undefined
-                }
-                value={fallbackModelInput}
-                onChange={(event) => {
-                  setFallbackModelInput(event.currentTarget.value);
-                  setFallbackModelError(null);
-                  setError(null);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter") return;
-                  event.preventDefault();
-                  addFallbackModel();
-                }}
-              />
-              <SettingsIconButton
-                type="button"
-                label="添加模型"
-                title="添加模型"
-                disabled={!fallbackModelInput.trim()}
-                onClick={addFallbackModel}
+              <div
+                className="fallback-model-field"
+                data-invalid={fallbackModelError ? "true" : undefined}
               >
-                <Plus aria-hidden="true" size={14} />
-              </SettingsIconButton>
+                <div className="fallback-model-tags" role="list">
+                  {form.fallbackExcludedModels.map((modelId) => (
+                    <span
+                      className="fallback-model-tag"
+                      role="listitem"
+                      key={modelId}
+                    >
+                      <span>{modelId}</span>
+                      <button
+                        type="button"
+                        className="fallback-model-remove"
+                        aria-label={`移除跳过 Fallback 的模型：${modelId}`}
+                        title={`移除 ${modelId}`}
+                        onClick={() => removeFallbackModel(modelId)}
+                      >
+                        <X aria-hidden="true" size={13} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <SettingsCombobox
+                  inputRef={fallbackModelInputRef}
+                  value={fallbackModelInput}
+                  onChange={(value) => {
+                    setFallbackModelInput(value);
+                    setFallbackModelError(null);
+                    setError(null);
+                  }}
+                  options={fallbackModelOptions}
+                  onSelect={addFallbackModel}
+                  onSubmit={addFallbackModel}
+                  ariaLabel="添加跳过 Fallback 的模型"
+                  placeholder={
+                    form.fallbackExcludedModels.length === 0
+                      ? "输入模型 ID"
+                      : undefined
+                  }
+                  describedBy={
+                    fallbackModelError ? "fallback-model-error" : undefined
+                  }
+                  maxLength={256}
+                  invalid={Boolean(fallbackModelError)}
+                  popupHost={fallbackPopupHost}
+                  placement="below"
+                />
+                <SettingsIconButton
+                  type="button"
+                  label="添加模型"
+                  title="添加模型"
+                  disabled={!fallbackModelInput.trim()}
+                  onClick={() => addFallbackModel()}
+                >
+                  <Plus aria-hidden="true" size={14} />
+                </SettingsIconButton>
+              </div>
             </div>
             <div className="fallback-model-error-slot">
               {fallbackModelError ? (
@@ -880,10 +993,6 @@ function RouteForm(props: {
                     <div className="codex-model-row" key={row.key}>
                       <div className="codex-model-field">
                         <SettingsTextInput
-                          ref={(node: HTMLInputElement | null) => {
-                            if (node) modelIdRefs.current.set(row.key, node);
-                            else modelIdRefs.current.delete(row.key);
-                          }}
                           aria-label={`模型 ID ${index + 1}`}
                           aria-invalid={Boolean(rowErrors.modelId)}
                           value={row.modelId}
@@ -956,8 +1065,26 @@ function RouteForm(props: {
               </div>
             )}
             <div className="codex-model-actions route-model-actions">
-              <SettingsButton type="button" disabled={busy} onClick={addModel}>
-                <Plus aria-hidden="true" size={15} />
+              <SettingsCombobox
+                inputRef={modelIdComboboxRef}
+                value={modelIdInput}
+                onChange={(value) => {
+                  setModelIdInput(value);
+                  setError(null);
+                }}
+                options={customModelOptions}
+                onSelect={addModelWithId}
+                onSubmit={addModelWithId}
+                ariaLabel="搜索或输入模型 ID"
+                placeholder="搜索或输入模型 ID"
+                placement="above"
+                disabled={busy}
+              />
+              <SettingsButton
+                type="button"
+                disabled={busy || !modelIdInput.trim()}
+                onClick={() => addModelWithId(modelIdInput)}
+              >
                 添加模型
               </SettingsButton>
             </div>

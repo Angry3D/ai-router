@@ -21,6 +21,7 @@ const checkOnly = process.argv.includes("--check");
 const apiKeyDtoAllowlist = new Set([
   "BalanceTestInputDto.ts",
   "RouteEditDto.ts",
+  "RouteModelsInputDto.ts",
   "RouteSaveInputDto.ts",
 ]);
 

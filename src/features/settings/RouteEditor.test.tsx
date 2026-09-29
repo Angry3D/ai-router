@@ -26,6 +26,7 @@ const ipc = vi.hoisted(() => ({
   connectCodex: vi.fn(),
   createRecoveryPoint: vi.fn(),
   deleteRoute: vi.fn(),
+  fetchRouteModels: vi.fn(),
   getRecoverySnapshot: vi.fn(),
   getRouteEdit: vi.fn(),
   getSettingsSnapshot: vi.fn(),
@@ -60,6 +61,7 @@ vi.mock("../../api/ipc", () => ({
   connectCodex: ipc.connectCodex,
   createRecoveryPoint: ipc.createRecoveryPoint,
   deleteRoute: ipc.deleteRoute,
+  fetchRouteModels: ipc.fetchRouteModels,
   getPricingTable: vi.fn(async () => ({
     rows: [],
     syncedAtMs: null,
@@ -208,6 +210,7 @@ beforeEach(() => {
   ipc.clearRequestHistory.mockReset();
   ipc.clearRuntimeLogs.mockReset();
   ipc.checkRouteReachability.mockReset();
+  ipc.fetchRouteModels.mockReset();
   ipc.connectCodex.mockReset();
   ipc.createRecoveryPoint.mockReset();
   ipc.getRecoverySnapshot.mockReset();
@@ -599,10 +602,20 @@ describe("RouteEditor interactions", () => {
       .getByRole("heading", { name: "自定义模型", level: 3 })
       .closest("section");
     if (!customModelSection) throw new Error("custom model section not found");
-    fireEvent.click(
-      within(customModelSection).getByRole("button", { name: "添加模型" }),
+    const addModelButton = within(customModelSection).getByRole("button", {
+      name: "添加模型",
+    });
+    const search = within(customModelSection).getByLabelText(
+      "搜索或输入模型 ID",
     );
-    expect(screen.getByLabelText("模型 ID 3")).toHaveFocus();
+    expect(addModelButton).toBeDisabled();
+    fireEvent.change(search, { target: { value: "manual-relay-model" } });
+    fireEvent.click(addModelButton);
+    expect(screen.getByLabelText("模型 ID 3")).toHaveValue(
+      "manual-relay-model",
+    );
+    expect(search).toHaveValue("");
+    await waitFor(() => expect(search).toHaveFocus());
     expect(screen.getByRole("button", { name: "删除模型 3" })).toHaveAttribute(
       "title",
       "删除模型 3",
@@ -624,14 +637,15 @@ describe("RouteEditor interactions", () => {
     const addModelButton = within(customModelSection).getByRole("button", {
       name: "添加模型",
     });
+    const search = within(customModelSection).getByLabelText(
+      "搜索或输入模型 ID",
+    );
+    fireEvent.change(search, { target: { value: "duplicate" } });
     fireEvent.click(addModelButton);
-    fireEvent.change(screen.getByLabelText("模型 ID 1"), {
-      target: { value: "duplicate" },
-    });
+    expect(screen.getByLabelText("模型 ID 1")).toHaveValue("duplicate");
+    fireEvent.change(search, { target: { value: "duplicate" } });
     fireEvent.click(addModelButton);
-    fireEvent.change(screen.getByLabelText("模型 ID 2"), {
-      target: { value: "duplicate" },
-    });
+    expect(screen.getByLabelText("模型 ID 2")).toHaveValue("duplicate");
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     expect(screen.getByText("模型 ID 不能重复。")).toBeInTheDocument();
     expect(ipc.saveRoute).not.toHaveBeenCalled();
@@ -670,6 +684,195 @@ describe("RouteEditor interactions", () => {
       }),
     );
     expect(within(section).queryByRole("listitem")).not.toBeInTheDocument();
+  });
+
+  it("fetches the upstream model list with the unsaved draft route values", async () => {
+    ipc.fetchRouteModels.mockResolvedValue({
+      models: ["gpt-5.3-codex", "gpt-5.2"],
+      errorCategory: null,
+    });
+    await renderSettings();
+
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://draft.example/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "draft-key" },
+    });
+    fireEvent.click(
+      within(screen.getByRole("radiogroup", { name: "上游协议" })).getByRole(
+        "radio",
+        { name: "Chat Completions" },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+
+    const status = await screen.findByText("已获取 2 个模型");
+    expect(status).toHaveClass("settings-status-neutral");
+    expect(status).not.toHaveAttribute("role");
+    expect(ipc.fetchRouteModels).toHaveBeenCalledWith({
+      baseUrl: "https://draft.example/v1",
+      apiKey: "draft-key",
+      protocol: "chat_completions",
+    });
+  });
+
+  it.each([
+    ["unauthorized", "获取失败：鉴权失败，请检查 API Key"],
+    ["not_found", "获取失败：上游未提供 /models 接口"],
+    ["network", "获取失败：无法连接上游"],
+    ["timeout", "获取失败：请求超时"],
+    ["http_status", "获取失败：上游响应不可用"],
+    ["too_large", "获取失败：上游响应不可用"],
+    ["invalid_response", "获取失败：上游响应不可用"],
+  ])(
+    "maps the %s model list failure to bounded danger copy",
+    async (errorCategory, message) => {
+      ipc.fetchRouteModels.mockResolvedValue({
+        models: [],
+        errorCategory,
+      });
+      await renderSettings();
+
+      fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+
+      const status = await screen.findByText(message);
+      expect(status).toHaveAttribute("role", "alert");
+      expect(status).toHaveClass("settings-status-danger");
+      expect(screen.getByRole("button", { name: "获取模型列表" })).toBeEnabled();
+    },
+  );
+
+  it("warns when the upstream returns an empty model list", async () => {
+    ipc.fetchRouteModels.mockResolvedValue({ models: [], errorCategory: null });
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+
+    const status = await screen.findByText("上游未返回模型");
+    expect(status).toHaveClass("settings-status-warning");
+    expect(status).not.toHaveAttribute("role");
+  });
+
+  it("reports a rejected model list request with the bounded IPC message", async () => {
+    ipc.fetchRouteModels.mockRejectedValueOnce(new Error("injected"));
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+
+    const status = await screen.findByText("测试失败");
+    expect(status).toHaveAttribute("role", "alert");
+    expect(status).toHaveClass("settings-status-danger");
+  });
+
+  it("drops a stale model list response after the Base URL changes", async () => {
+    let resolveFetch:
+      | ((result: { models: string[]; errorCategory: null }) => void)
+      | undefined;
+    ipc.fetchRouteModels.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+    await renderSettings();
+
+    const fetch = screen.getByRole("button", { name: "获取模型列表" });
+    fireEvent.click(fetch);
+    expect(fetch).toBeDisabled();
+    expect(screen.getByText("正在获取模型列表…")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://changed.example/v1" },
+    });
+    resolveFetch?.({ models: ["gpt-5.2"], errorCategory: null });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "获取模型列表" })).toBeEnabled(),
+    );
+    expect(screen.getByText("未获取模型列表")).toBeInTheDocument();
+    expect(screen.queryByText("已获取 1 个模型")).not.toBeInTheDocument();
+
+    fireEvent.focus(screen.getByLabelText("搜索或输入模型 ID"));
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+    fireEvent.focus(screen.getByLabelText("添加跳过 Fallback 的模型"));
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+  });
+
+  it("appends a suggested model as a draft row and marks it as added", async () => {
+    ipc.fetchRouteModels.mockResolvedValue({
+      models: ["relay-custom-model", "gpt-5.3-codex"],
+      errorCategory: null,
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    await screen.findByText("已获取 2 个模型");
+
+    const search = screen.getByLabelText("搜索或输入模型 ID");
+    fireEvent.focus(search);
+    expect(
+      screen.getByRole("option", { name: /relay-custom-model/ }),
+    ).toHaveAttribute("aria-disabled", "true");
+
+    fireEvent.click(screen.getByRole("option", { name: /gpt-5\.3-codex/ }));
+
+    expect(screen.getByLabelText("模型 ID 3")).toHaveValue("gpt-5.3-codex");
+    expect(search).toHaveValue("");
+    const added = screen.getByRole("option", { name: /gpt-5\.3-codex/ });
+    expect(added).toHaveAttribute("aria-disabled", "true");
+    expect(within(added).getByText("已添加")).toBeInTheDocument();
+    await waitFor(() => expect(search).toHaveFocus());
+  });
+
+  it("adds a fallback-excluded tag from the suggestions and keeps input focus", async () => {
+    ipc.fetchRouteModels.mockResolvedValue({
+      models: ["gpt-5.3-codex", "gpt-5.2"],
+      errorCategory: null,
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    await screen.findByText("已获取 2 个模型");
+
+    const section = screen
+      .getByRole("heading", { name: "跳过 Fallback 的模型", level: 3 })
+      .closest("section");
+    if (!section) throw new Error("fallback model section not found");
+    const input = within(section).getByLabelText("添加跳过 Fallback 的模型");
+
+    fireEvent.change(input, { target: { value: "gpt-5.3-codex" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+
+    const tag = within(section).getByRole("listitem");
+    expect(tag).toHaveTextContent("gpt-5.3-codex");
+    expect(input).toHaveValue("");
+    expect(section).toHaveTextContent("1 个 · 未保存");
+    const disabled = screen.getByRole("option", { name: /gpt-5\.3-codex/ });
+    expect(disabled).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("option", { name: /gpt-5\.2/ })).not.toHaveAttribute(
+      "aria-disabled",
+    );
+    const popup = screen.getByRole("listbox");
+    expect(popup.closest(".fallback-model-field")).toBeNull();
+    expect(popup.closest(".fallback-model-popup-host")).not.toBeNull();
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it("disables the model fetch until the draft has a Base URL and API Key", async () => {
+    await renderRouteEditor(true, null);
+
+    const fetch = screen.getByRole("button", { name: "获取模型列表" });
+    expect(screen.getByText("未获取模型列表")).toBeInTheDocument();
+    expect(fetch).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://draft.example/v1" },
+    });
+    expect(fetch).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "draft-key" },
+    });
+    expect(fetch).toBeEnabled();
   });
 
   it("includes valid pending fallback-excluded input in the route save", async () => {

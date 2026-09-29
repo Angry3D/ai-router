@@ -871,6 +871,36 @@ pub struct BalanceTestInputDto {
     pub custom_source: String,
 }
 
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct RouteModelsInputDto {
+    pub base_url: String,
+    pub api_key: String,
+    pub protocol: RouteProtocol,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct RouteModelsResultDto {
+    pub models: Vec<String>,
+    pub error_category: Option<RouteModelsErrorCategory>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum RouteModelsErrorCategory {
+    Unauthorized,
+    NotFound,
+    Network,
+    Timeout,
+    HttpStatus,
+    TooLarge,
+    InvalidResponse,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]

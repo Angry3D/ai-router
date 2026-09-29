@@ -24,6 +24,7 @@ const ipc = vi.hoisted(() => ({
   connectCodex: vi.fn(),
   createRecoveryPoint: vi.fn(),
   deleteRoute: vi.fn(),
+  fetchRouteModels: vi.fn(),
   getRecoverySnapshot: vi.fn(),
   getPricingTable: vi.fn(async () => ({
     rows: [],
@@ -69,6 +70,7 @@ vi.mock("../../api/ipc", () => ({
   connectCodex: ipc.connectCodex,
   createRecoveryPoint: ipc.createRecoveryPoint,
   deleteRoute: ipc.deleteRoute,
+  fetchRouteModels: ipc.fetchRouteModels,
   getBootstrapSnapshot: vi.fn(),
   getMenuSnapshot: vi.fn(),
   getRecoverySnapshot: ipc.getRecoverySnapshot,
@@ -176,6 +178,7 @@ beforeEach(() => {
   ipc.clearRequestHistory.mockReset();
   ipc.clearRuntimeLogs.mockReset();
   ipc.checkRouteReachability.mockReset();
+  ipc.fetchRouteModels.mockReset();
   ipc.connectCodex.mockReset();
   ipc.createRecoveryPoint.mockReset();
   ipc.getRecoverySnapshot.mockReset();

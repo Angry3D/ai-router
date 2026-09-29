@@ -277,6 +277,11 @@ impl BaseUrl {
     }
 
     #[must_use]
+    pub fn models_url(&self) -> String {
+        format!("{}/models", self.0)
+    }
+
+    #[must_use]
     pub fn host(&self) -> String {
         Url::parse(&self.0)
             .ok()
@@ -1025,6 +1030,45 @@ mod tests {
                     protocol.terminal_endpoint()
                 )
             );
+        }
+    }
+
+    #[test]
+    fn base_url_derives_models_from_the_canonical_prefix() {
+        for (input, protocol, expected) in [
+            (
+                "https://example.com",
+                RouteProtocol::Responses,
+                "https://example.com/models",
+            ),
+            (
+                "https://example.com/",
+                RouteProtocol::Responses,
+                "https://example.com/models",
+            ),
+            (
+                "https://example.com/v1",
+                RouteProtocol::Responses,
+                "https://example.com/v1/models",
+            ),
+            (
+                "https://example.com/openai/v1/",
+                RouteProtocol::ChatCompletions,
+                "https://example.com/openai/v1/models",
+            ),
+            (
+                "https://example.com/v1/responses",
+                RouteProtocol::Responses,
+                "https://example.com/v1/models",
+            ),
+            (
+                "https://example.com/v1/chat/completions",
+                RouteProtocol::ChatCompletions,
+                "https://example.com/v1/models",
+            ),
+        ] {
+            let base = BaseUrl::parse(input, protocol).expect("valid URL");
+            assert_eq!(base.models_url(), expected, "input: {input}");
         }
     }
 
