@@ -1,0 +1,130 @@
+{
+  "ok": true,
+  "thresholds": [],
+  "standard": [
+    {
+      "id": "gpt-6-astra",
+      "short": {
+        "input": "$10.00",
+        "cachedInput": "$1.00",
+        "cacheWrite": "$12.50",
+        "output": "$50.00"
+      },
+      "long": {
+        "input": "$20.00",
+        "cachedInput": "$2.00",
+        "cacheWrite": "$25.00",
+        "output": "$75.00"
+      }
+    },
+    {
+      "id": "gpt-6-sol",
+      "short": {
+        "input": "$2.00",
+        "cachedInput": "$0.20",
+        "cacheWrite": "$2.50",
+        "output": "$10.00"
+      },
+      "long": {
+        "input": "$4.00",
+        "cachedInput": "$0.40",
+        "cacheWrite": "$5.00",
+        "output": "$15.00"
+      }
+    },
+    {
+      "id": "gpt-6-luna",
+      "short": {
+        "input": "$0.10",
+        "cachedInput": "$0.01",
+        "cacheWrite": "$0.125",
+        "output": "$0.50"
+      },
+      "long": {
+        "input": "$0.20",
+        "cachedInput": "$0.02",
+        "cacheWrite": "$0.25",
+        "output": "$0.75"
+      }
+    },
+    {
+      "id": "chat-latest",
+      "short": {
+        "input": "$5.00",
+        "cachedInput": "$0.50",
+        "output": "$30.00"
+      }
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "short": {
+        "input": "$1.75",
+        "cachedInput": "$0.175",
+        "output": "$14.00"
+      }
+    },
+    {
+      "id": "gpt-rosalind-research",
+      "short": {
+        "input": "$5.00",
+        "cachedInput": "$0.50",
+        "output": "$25.00"
+      }
+    }
+  ],
+  "priority": [
+    {
+      "id": "gpt-6-astra",
+      "short": {
+        "input": "$20.00",
+        "cachedInput": "$2.00",
+        "cacheWrite": "$25.00",
+        "output": "$100.00"
+      },
+      "long": {
+        "input": "$40.00",
+        "cachedInput": "$4.00",
+        "cacheWrite": "$50.00",
+        "output": "$150.00"
+      }
+    },
+    {
+      "id": "gpt-6-sol",
+      "short": {
+        "input": "$4.00",
+        "cachedInput": "$0.40",
+        "cacheWrite": "$5.00",
+        "output": "$20.00"
+      },
+      "long": {
+        "input": "$8.00",
+        "cachedInput": "$0.80",
+        "cacheWrite": "$10.00",
+        "output": "$30.00"
+      }
+    },
+    {
+      "id": "gpt-6-luna",
+      "short": {
+        "input": "$0.20",
+        "cachedInput": "$0.02",
+        "cacheWrite": "$0.25",
+        "output": "$1.00"
+      },
+      "long": {
+        "input": "$0.40",
+        "cachedInput": "$0.04",
+        "cacheWrite": "$0.50",
+        "output": "$1.50"
+      }
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "short": {
+        "input": "$3.50",
+        "cachedInput": "$0.35",
+        "output": "$28.00"
+      }
+    }
+  ]
+}

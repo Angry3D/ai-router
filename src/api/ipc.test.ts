@@ -13,11 +13,13 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import {
   IPC_COMMANDS,
+  getPricingTable,
   getRouteEdit,
   getUsageHistory,
   getUsageRequestDetail,
   getUsageRouteOptions,
   normalizeIpcError,
+  openPricingSource,
   openProjectRepository,
   testOutboundProxy,
   updateOutboundProxySettings,
@@ -63,6 +65,34 @@ describe("project repository command", () => {
     expect(IPC_COMMANDS.openProjectRepository).toBe("open_project_repository");
     expect(tauri.invoke).toHaveBeenCalledOnce();
     expect(tauri.invoke).toHaveBeenCalledWith("open_project_repository");
+  });
+});
+
+describe("pricing table commands", () => {
+  it("invokes the fixed no-argument pricing source command", async () => {
+    tauri.invoke.mockResolvedValueOnce(undefined);
+
+    await openPricingSource();
+
+    expect(IPC_COMMANDS.openPricingSource).toBe("open_pricing_source");
+    expect(tauri.invoke).toHaveBeenCalledOnce();
+    expect(tauri.invoke).toHaveBeenCalledWith("open_pricing_source");
+  });
+
+  it("requests the pricing snapshot with no payload", async () => {
+    const snapshot = {
+      rows: [],
+      syncedAtMs: null,
+      sourceUrl: null,
+      localState: "missing",
+      status: "idle",
+    };
+    tauri.invoke.mockResolvedValueOnce(snapshot);
+
+    await expect(getPricingTable()).resolves.toEqual(snapshot);
+
+    expect(IPC_COMMANDS.getPricingTable).toBe("get_pricing_table");
+    expect(tauri.invoke).toHaveBeenCalledWith("get_pricing_table");
   });
 });
 

@@ -10,18 +10,20 @@ use router_core::{
         CodexModelsActivation, CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto,
         CodexRecoveryUpdatePreviewDto, CodexRestartNoticeDto, FallbackStopReasonDto,
         HistorySummaryDto, ImagesGenerationSettingsDto, McpImageCapacityDto, MenuBarSettingsDto,
-        MenuSnapshotDto, MetadataFailureDto, OutboundProxySettingsDto, RecoveryCandidateDto,
-        RecoveryHealthDto, RecoveryIncidentAction, RecoveryIncidentDto, RecoverySnapshotDto,
-        ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
-        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
-        RouteSaveResultDto, RoutingDecisionDto, RoutingSkippedRouteDto, SettingsSnapshotDto,
-        UpdateImagesGenerationSettingsInputDto, UpdateOutboundProxySettingsInputDto,
-        UsageAttemptDto, UsageCostDto, UsageCostStateDto, UsageFastStatusDto,
-        UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto, UsageHistoryRowDto,
-        UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsAttributionDimensionDto,
-        UsageStatisticsAttributionDto, UsageStatisticsAttributionMetricDto,
-        UsageStatisticsBucketDto, UsageStatisticsDto, UsageStatisticsGranularityDto,
-        UsageStatisticsQueryDto, UsageStatisticsTokensDto, UsageTokensDto,
+        MenuSnapshotDto, MetadataFailureDto, OutboundProxySettingsDto, PricingBandDto,
+        PricingLocalStateDto, PricingRowSourceDto, PricingTableDto, PricingTableRowDto,
+        PricingTableStatusDto, RecoveryCandidateDto, RecoveryHealthDto, RecoveryIncidentAction,
+        RecoveryIncidentDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
+        ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
+        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, RoutingDecisionDto,
+        RoutingSkippedRouteDto, SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
+        UpdateOutboundProxySettingsInputDto, UsageAttemptDto, UsageCostDto, UsageCostStateDto,
+        UsageFastStatusDto, UsageHistoryCursorDto, UsageHistoryPageDto, UsageHistoryQueryDto,
+        UsageHistoryRowDto, UsageRequestDetailDto, UsageRouteOptionDto,
+        UsageStatisticsAttributionDimensionDto, UsageStatisticsAttributionDto,
+        UsageStatisticsAttributionMetricDto, UsageStatisticsBucketDto, UsageStatisticsDto,
+        UsageStatisticsGranularityDto, UsageStatisticsQueryDto, UsageStatisticsTokensDto,
+        UsageTokensDto,
     },
     balance::{
         BalanceBatchPhase, BalanceDisplaySnapshot, BalanceDisplayStatus, BalanceError,
@@ -80,6 +82,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     ImagesGenerationSettingsDto::export_all_to(&output)?;
     McpImageCapacityDto::export_all_to(&output)?;
     OutboundProxySettingsDto::export_all_to(&output)?;
+    PricingBandDto::export_all_to(&output)?;
+    PricingLocalStateDto::export_all_to(&output)?;
+    PricingRowSourceDto::export_all_to(&output)?;
+    PricingTableDto::export_all_to(&output)?;
+    PricingTableRowDto::export_all_to(&output)?;
+    PricingTableStatusDto::export_all_to(&output)?;
     MenuSnapshotDto::export_all_to(&output)?;
     MetadataFailureDto::export_all_to(&output)?;
     RecoveryCandidateDto::export_all_to(&output)?;

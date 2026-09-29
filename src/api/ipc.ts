@@ -20,6 +20,7 @@ import type {
   MenuSnapshotDto,
   MenuBarSettingsDto,
   MutationResultDto,
+  PricingTableDto,
   UpdateOutboundProxySettingsInputDto,
   ReachabilityResult,
   RecoveryHealthDto,
@@ -53,7 +54,10 @@ export const IPC_COMMANDS = {
     "download_and_install_application_update",
   openApplicationUpdateRelease: "open_application_update_release",
   openProjectRepository: "open_project_repository",
+  openPricingSource: "open_pricing_source",
   restartForApplicationUpdate: "restart_for_application_update",
+  getPricingTable: "get_pricing_table",
+  syncPricingFromWeb: "sync_pricing_from_web",
   getUsageHistory: "get_usage_history",
   getUsageStatistics: "get_usage_statistics",
   getUsageRouteOptions: "get_usage_route_options",
@@ -203,6 +207,24 @@ export async function openApplicationUpdateRelease(): Promise<void> {
 
 export async function openProjectRepository(): Promise<void> {
   return invoke<void>(IPC_COMMANDS.openProjectRepository);
+}
+
+export async function openPricingSource(): Promise<void> {
+  return invoke<void>(IPC_COMMANDS.openPricingSource);
+}
+
+export async function getPricingTable(): Promise<PricingTableDto> {
+  return invoke<PricingTableDto>(IPC_COMMANDS.getPricingTable);
+}
+
+/**
+ * Runs one manual synchronization of the local pricing table.
+ *
+ * The backend answers with the resulting snapshot, including a failed capture
+ * (reported in `status`), so the caller always keeps the table in effect.
+ */
+export async function syncPricingFromWeb(): Promise<PricingTableDto> {
+  return invoke<PricingTableDto>(IPC_COMMANDS.syncPricingFromWeb);
 }
 
 export async function restartForApplicationUpdate(): Promise<void> {

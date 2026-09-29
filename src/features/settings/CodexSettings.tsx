@@ -20,7 +20,12 @@ import {
   updateMcpImageCapacityThreshold,
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
-import type { CodexConfigStatus, SettingsSnapshotDto } from "../../generated";
+import type {
+  CodexConfigStatus,
+  PricingTableDto,
+  SettingsSnapshotDto,
+} from "../../generated";
+import { PricingTableSettings } from "./PricingTableSettings";
 import {
   IMAGE_MODEL_PRESETS,
   imageModelTooltipLines,
@@ -71,11 +76,13 @@ const codexLabels: Record<CodexConfigStatus, string> = {
 export function CodexSettings({
   snapshot,
   proxyStatus,
+  pricingTable = null,
   focusImageGeneration = false,
   onImageGenerationFocused,
 }: {
   snapshot: SettingsSnapshotDto;
   proxyStatus: string;
+  pricingTable?: PricingTableDto | null;
   focusImageGeneration?: boolean;
   onImageGenerationFocused?: () => void;
 }) {
@@ -439,6 +446,7 @@ export function CodexSettings({
           </p>
         ) : null}
       </SettingsSection>
+      <PricingTableSettings snapshot={pricingTable} />
       {error ? (
         <p className="settings-error" role="alert">
           {error}

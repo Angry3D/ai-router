@@ -2597,6 +2597,103 @@ body[data-view="settings"] .app-variant-badge {
   margin: 9px 0 0 calc(var(--settings-label-width) + var(--settings-field-gap));
 }
 
+.pricing-status-line {
+  min-height: 18px;
+  margin: 3px 0 4px;
+}
+
+.pricing-status-line .settings-status {
+  margin-left: 0;
+}
+
+.pricing-caption {
+  margin: 0 0 7px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.pricing-source-link {
+  padding: 0;
+  color: var(--blue);
+  font: inherit;
+  background: none;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.pricing-source-link:hover {
+  text-decoration: underline;
+}
+
+.pricing-source-link:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.pricing-table-viewport {
+  max-height: 300px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.pricing-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.pricing-table th,
+.pricing-table td {
+  height: 30px;
+  overflow: hidden;
+  padding: 4px 6px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--surface);
+  border-bottom: 1px solid var(--settings-divider, var(--border));
+}
+
+.pricing-table th {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.pricing-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.pricing-table .source {
+  color: var(--text-secondary);
+}
+
+.pricing-table th:nth-child(1) {
+  width: 30%;
+}
+
+.pricing-table th:nth-child(2) {
+  width: 9%;
+}
+
+.pricing-table th:nth-child(3),
+.pricing-table th:nth-child(4),
+.pricing-table th:nth-child(5),
+.pricing-table th:nth-child(6) {
+  width: 12%;
+}
+
+.pricing-table th:nth-child(7) {
+  width: 13%;
+}
+
 .parameter-actions {
   margin-left: calc(var(--settings-label-width) + var(--settings-field-gap));
 }

@@ -15,6 +15,7 @@ AI Router 不提供账户或云同步。数据主要位于当前 macOS 用户目
 | 恢复点       | 应用数据目录下的 `recovery/`                                      |
 | MCP 图片资产 | 应用数据目录下的 `mcp-images/<assetId>.png`                       |
 | 派生模型目录 | 应用数据目录下的 `codex-model-catalog.json`（存在自定义模型时）   |
+| 本地价格表   | 应用数据目录下的 `pricing/local-pricing.json`（手动同步官网后）   |
 | 运行日志     | `~/Library/Logs/com.relax.airouter/`                              |
 | 事故记录     | 运行日志目录下的 `incident-<毫秒时间戳>.json`                     |
 | Codex 配置   | `~/.codex/config.toml`（由 Codex 所有，AI Router 只做受保护投影） |
@@ -35,7 +36,11 @@ API Key 和 gateway token 以原始字节保存在 SQLite 中。数据库、WAL�
 用户文件读取权限的人仍可能读取这些密钥。
 
 请求历史不保存原始请求 body、提示词、完整响应、Authorization header 或任意上游 header。费用是
-根据带日期的本地价格快照计算的估算，不是账单或当前价格承诺。
+根据带日期的本地价格快照计算的估算，不是账单或当前价格承诺。价格快照有两条来源：内嵌基线（随
+应用发布）与用户在设置中手动触发的「同步官网」。同步只在一个隐藏、无 capability、无痕的只读
+WebView 中访问固定官方定价页，回传内容仅限模型 id 与价格，落盘为 `pricing/local-pricing.json`
+（含来源 URL 与同步时间）；不上传本地数据、不导出 cookie、不读取页面其他内容，失败时保留上一次
+的本地价格表。已写入历史的请求保留自己的 catalog 版本，不会因为后来同步而重新计价。
 
 图片 MCP 会将成功生成并验证的 PNG 作为本地资产写入 `mcp-images/`，再只返回文件路径、实际尺寸、
 字节数和 SHA-256。图片可以来自上游 Base64 或受控下载的 URL；两种来源都经过相同的 PNG 校验。

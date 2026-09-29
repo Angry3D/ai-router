@@ -1093,6 +1093,120 @@ pub struct MenuBarSettingsDto {
     pub activity_animation_enabled: bool,
 }
 
+/// Context band shown in the settings pricing table.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PricingBandDto {
+    Short,
+    Long,
+}
+
+/// Whether one pricing row comes from the synchronized or the bundled catalog.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PricingRowSourceDto {
+    Official,
+    Bundled,
+}
+
+/// Availability of the local pricing override.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PricingLocalStateDto {
+    Missing,
+    Loaded,
+    Corrupt,
+}
+
+/// Transient state of the manual pricing synchronization.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PricingTableStatusDto {
+    Idle,
+    Syncing,
+    Error,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct PricingTableRowDto {
+    pub model_id: String,
+    pub band: PricingBandDto,
+    /// Micro-USD per million input Tokens.
+    #[ts(type = "number")]
+    pub input_micro_usd: i64,
+    /// Micro-USD per million cached input Tokens.
+    #[ts(type = "number")]
+    pub cached_input_micro_usd: i64,
+    /// Micro-USD per million cache-write Tokens; absent when unwritten Tokens
+    /// are charged as ordinary uncached input.
+    #[ts(type = "number | null")]
+    pub cache_write_micro_usd: Option<i64>,
+    /// Micro-USD per million output Tokens.
+    #[ts(type = "number")]
+    pub output_micro_usd: i64,
+    pub source: PricingRowSourceDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct PricingTableDto {
+    pub rows: Vec<PricingTableRowDto>,
+    #[ts(type = "number | null")]
+    pub synced_at_ms: Option<i64>,
+    pub source_url: Option<String>,
+    pub local_state: PricingLocalStateDto,
+    pub status: PricingTableStatusDto,
+}
+
+impl From<crate::pricing::CatalogRowSource> for PricingRowSourceDto {
+    fn from(value: crate::pricing::CatalogRowSource) -> Self {
+        match value {
+            crate::pricing::CatalogRowSource::Official => Self::Official,
+            crate::pricing::CatalogRowSource::Bundled => Self::Bundled,
+        }
+    }
+}
+
+impl From<crate::pricing::CatalogBand> for PricingBandDto {
+    fn from(value: crate::pricing::CatalogBand) -> Self {
+        match value {
+            crate::pricing::CatalogBand::Short => Self::Short,
+            crate::pricing::CatalogBand::Long => Self::Long,
+        }
+    }
+}
+
+impl From<crate::pricing_local::LocalPricingStatus> for PricingLocalStateDto {
+    fn from(value: crate::pricing_local::LocalPricingStatus) -> Self {
+        match value {
+            crate::pricing_local::LocalPricingStatus::Missing => Self::Missing,
+            crate::pricing_local::LocalPricingStatus::Loaded => Self::Loaded,
+            crate::pricing_local::LocalPricingStatus::Corrupt => Self::Corrupt,
+        }
+    }
+}
+
+impl From<crate::pricing::CatalogTableRow> for PricingTableRowDto {
+    fn from(value: crate::pricing::CatalogTableRow) -> Self {
+        Self {
+            model_id: value.model_id,
+            band: value.band.into(),
+            input_micro_usd: value.input,
+            cached_input_micro_usd: value.cached_input,
+            cache_write_micro_usd: value.cache_write,
+            output_micro_usd: value.output,
+            source: value.source.into(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
