@@ -19,8 +19,9 @@ use router_core::{
         MenuBarSettingsDto, MenuSnapshotDto, MetadataFailureDto, PricingTableDto,
         RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
         ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
-        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
-        RouteSaveResultDto, SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
+        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteModelsErrorCategory,
+        RouteModelsInputDto, RouteModelsResultDto, RouteSaveInputDto, RouteSaveResultDto,
+        SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
         UpdateOutboundProxySettingsInputDto, UsageHistoryPageDto, UsageHistoryQueryDto,
         UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsDto, UsageStatisticsQueryDto,
     },
@@ -80,6 +81,7 @@ use router_core::{
         normalize_codex_model_records, normalize_fallback_excluded_models,
     },
     storage::{DatabaseExecutor, SecretStore, SqliteBalanceRouteSource, SqliteSecretStore},
+    upstream_models::{UpstreamModelsClient, UpstreamModelsErrorKind},
 };
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, plugin::TauriPlugin};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
@@ -2084,6 +2086,28 @@ impl DesktopLifecycleServices {
             .map_err(map_balance_error)
     }
 
+    pub async fn fetch_route_models(
+        &self,
+        input: RouteModelsInputDto,
+    ) -> Result<RouteModelsResultDto, IpcErrorDto> {
+        let api_key =
+            ApiKey::parse(&input.api_key).map_err(|error| map_validation_error(&error))?;
+        let base_url = BaseUrl::parse(&input.base_url, input.protocol)
+            .map_err(|error| map_validation_error(&error))?;
+        let client = UpstreamModelsClient::new_with_outbound_proxy(&self.outbound_proxy)
+            .map_err(|_| ipc_error("models_unavailable", "模型列表服务尚未就绪。", true))?;
+        Ok(match client.list(&api_key, &base_url).await {
+            Ok(models) => RouteModelsResultDto {
+                models,
+                error_category: None,
+            },
+            Err(error) => RouteModelsResultDto {
+                models: Vec::new(),
+                error_category: Some(route_models_error_category(error.kind)),
+            },
+        })
+    }
+
     pub async fn check_reachability(
         &self,
         base_url: String,
@@ -4030,6 +4054,14 @@ pub async fn test_balance_query(
 }
 
 #[tauri::command]
+pub async fn fetch_route_models(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+    input: RouteModelsInputDto,
+) -> Result<RouteModelsResultDto, IpcErrorDto> {
+    services.fetch_route_models(input).await
+}
+
+#[tauri::command]
 pub async fn check_route_reachability(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     base_url: String,
@@ -4608,6 +4640,18 @@ fn map_balance_error(_error: router_core::balance::BalanceError) -> IpcErrorDto 
     ipc_error("balance_query_failed", "余额查询失败。", true)
 }
 
+const fn route_models_error_category(kind: UpstreamModelsErrorKind) -> RouteModelsErrorCategory {
+    match kind {
+        UpstreamModelsErrorKind::Unauthorized => RouteModelsErrorCategory::Unauthorized,
+        UpstreamModelsErrorKind::NotFound => RouteModelsErrorCategory::NotFound,
+        UpstreamModelsErrorKind::Network => RouteModelsErrorCategory::Network,
+        UpstreamModelsErrorKind::Timeout => RouteModelsErrorCategory::Timeout,
+        UpstreamModelsErrorKind::HttpStatus => RouteModelsErrorCategory::HttpStatus,
+        UpstreamModelsErrorKind::TooLarge => RouteModelsErrorCategory::TooLarge,
+        UpstreamModelsErrorKind::InvalidResponse => RouteModelsErrorCategory::InvalidResponse,
+    }
+}
+
 fn map_proxy_port_error(error: &ProxyPortError) -> IpcErrorDto {
     match error {
         ProxyPortError::InvalidPort => {
@@ -4784,6 +4828,103 @@ mod tests {
             Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink))),
             Arc::new(NoopDiagnosticSink),
         )
+    }
+
+    async fn models_upstream_fixture(
+        status: &'static str,
+        body: &'static str,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("models fixture listener");
+        let address = listener.local_addr().expect("models fixture address");
+        let task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+                    let mut request = [0_u8; 1024];
+                    let _ = stream.read(&mut request).await;
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn route_models_query_validates_input_and_reports_soft_failures() {
+        let directory = TempDir::new().expect("app data fixture");
+        let services = isolated_services(&directory);
+
+        let invalid = services
+            .fetch_route_models(RouteModelsInputDto {
+                base_url: "not-a-url".to_owned(),
+                api_key: "route-secret".to_owned(),
+                protocol: RouteProtocol::Responses,
+            })
+            .await
+            .expect_err("invalid base URL");
+        assert_eq!(invalid.code, "base_url_invalid");
+        assert_eq!(invalid.field.as_deref(), Some("baseUrl"));
+
+        let missing_key = services
+            .fetch_route_models(RouteModelsInputDto {
+                base_url: "https://example.test/v1".to_owned(),
+                api_key: "   ".to_owned(),
+                protocol: RouteProtocol::Responses,
+            })
+            .await
+            .expect_err("missing API key");
+        assert_eq!(missing_key.code, "api_key_required");
+        assert_eq!(missing_key.field.as_deref(), Some("apiKey"));
+
+        let (address, task) = models_upstream_fixture(
+            "200 OK",
+            r#"{"object":"list","data":[{"id":"gpt-5"},{"id":" gpt-4o "},{"id":"gpt-5"}]}"#,
+        )
+        .await;
+        let success = services
+            .fetch_route_models(RouteModelsInputDto {
+                base_url: format!("http://{address}/v1"),
+                api_key: "route-secret".to_owned(),
+                protocol: RouteProtocol::Responses,
+            })
+            .await
+            .expect("model list");
+        assert_eq!(
+            success.models,
+            vec!["gpt-5".to_owned(), "gpt-4o".to_owned()]
+        );
+        assert_eq!(success.error_category, None);
+        task.abort();
+
+        for (status, expected) in [
+            ("401 Unauthorized", RouteModelsErrorCategory::Unauthorized),
+            ("404 Not Found", RouteModelsErrorCategory::NotFound),
+            (
+                "500 Internal Server Error",
+                RouteModelsErrorCategory::HttpStatus,
+            ),
+        ] {
+            let (address, task) = models_upstream_fixture(status, "{}").await;
+            let result = services
+                .fetch_route_models(RouteModelsInputDto {
+                    base_url: format!("http://{address}/v1"),
+                    api_key: "route-secret".to_owned(),
+                    protocol: RouteProtocol::Responses,
+                })
+                .await
+                .expect("soft failure");
+            assert!(result.models.is_empty(), "status: {status}");
+            assert_eq!(result.error_category, Some(expected), "status: {status}");
+            task.abort();
+        }
     }
 
     #[tokio::test]
