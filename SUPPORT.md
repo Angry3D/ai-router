@@ -13,6 +13,8 @@ AI Router 是早期个人维护项目，提供简体中文官方 DMG 与源码�
   Responses 契约，但只覆盖已记录的兼容行为；不透明 reasoning、更丰富的 `web_search` 声明、
   远程压缩和非流式客户端请求会失败关闭，详见
   [路由与韧性](./docs/engineering/routing-resilience.md#chat-completions-上游兼容)；
+- 设置中的「同步官网」是纯手动操作：它访问 `developers.openai.com` 的公开定价页并只保存 GPT 模型
+  价格；不登录、不采集账号信息，失败时保留上一次的本地价格表；
 - 使用 canonical GitHub Release 的官方 DMG，或项目原始源码和未修改的生产/QA 配置。
 
 Windows、Linux、Intel Mac、其他语言、广域网代理、多人共享网关、Developer ID 签名、Apple 公证、

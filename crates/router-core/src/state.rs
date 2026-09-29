@@ -101,6 +101,7 @@ pub enum StateArea {
     Appearance,
     MenuBar,
     ApplicationUpdate,
+    PricingTable,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

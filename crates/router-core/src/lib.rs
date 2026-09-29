@@ -9,6 +9,8 @@ pub mod domain;
 pub mod incident;
 pub mod lifecycle;
 pub mod pricing;
+pub mod pricing_capture;
+pub mod pricing_local;
 pub mod proxy;
 pub mod qa_acceptance;
 pub mod recovery;

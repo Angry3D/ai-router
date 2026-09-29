@@ -26,12 +26,16 @@ user-configured upstream Responses APIs
 - `storage.rs` 在专用 SQLite executor 后维护 schema、事务、密钥和查询；
 - `proxy.rs` 与 `proxy/` 负责 loopback ingress、Responses 流式转发、历史和回退；
 - `codex_config.rs` 与 `codex_catalog.rs` 管理受保护的 Codex 投影和派生模型目录；
+- `pricing.rs`、`pricing_local.rs` 与 `pricing_capture.rs` 管理内嵌/本地价格目录、定价计算与
+  抓取负载的解析校验（金额语法、分档无缝、模型 id 过滤、失败关闭）；
 - `recovery.rs` 负责关键配置恢复点；`runtime_log.rs` 负责有界日志维护；
 - `app_api.rs`、`state.rs` 和其他带 `TS` 导出的 Rust 类型构成 IPC 契约。
 
 `src-tauri/` 是桌面组合边界。它可以创建服务、映射安全错误、发布状态事件、管理托盘/窗口并调用
 macOS API，但不应拥有 SQL 或复制核心路由规则。`application_update.rs` 是 Tauri updater 的唯一
 应用边界：它拥有远端元数据校验、pending update、单操作 gate、进度、安装与 graceful restart 意图。
+`pricing_sync.rs` 拥有手动「同步官网」的隐藏 WebView 生命周期：窗口只从 Rust 创建、不加入任何
+capability、只允许官方定价页与 capture scheme 的导航，并把抓取负载交给 `router-core` 校验后才落盘。
 
 `src/` 按功能组织菜单、设置和共享展示组件。`src/api/ipc.ts` 集中命令调用，`src/api/query.ts`
 管理 React Query 快照和状态失效。`src/generated/` 来自 Rust，不能手工修改。

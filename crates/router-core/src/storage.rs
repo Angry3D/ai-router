@@ -31,7 +31,9 @@ use crate::domain::{
     RouteMoveDirection, RouteName, RouteProtocol, SecretId, UpstreamAttemptId, ValidationError,
     model_verdict,
 };
-use crate::pricing::{CostStatus, PricedUsage, UsageObservation, fold_request_cost, price_usage};
+use crate::pricing::{
+    CatalogProvider, CostStatus, PricedUsage, UsageObservation, fold_request_cost,
+};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
 pub const SCHEMA_VERSION: i64 = 27;
@@ -73,6 +75,7 @@ pub struct DatabaseExecutor {
     sender: mpsc::Sender<DatabaseJob>,
     path: Arc<PathBuf>,
     critical_revision_sender: watch::Sender<u64>,
+    pricing: CatalogProvider,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -793,6 +796,19 @@ impl DatabaseExecutor {
     /// Returns an error when private paths cannot be prepared, `SQLite` cannot be
     /// opened or migrated, or required PRAGMA/integrity checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Self::open_with_pricing(path, CatalogProvider::baseline())
+    }
+
+    /// Opens the database with the effective pricing catalog used for history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private paths cannot be prepared, `SQLite` cannot be
+    /// opened or migrated, or required PRAGMA/integrity checks fail.
+    pub fn open_with_pricing(
+        path: impl AsRef<Path>,
+        pricing: CatalogProvider,
+    ) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
         prepare_database_path(&path)?;
 
@@ -826,6 +842,7 @@ impl DatabaseExecutor {
             sender,
             path: Arc::new(path),
             critical_revision_sender,
+            pricing,
         })
     }
 
@@ -3145,6 +3162,7 @@ impl DatabaseExecutor {
         &self,
         record: RequestHistoryRecord,
     ) -> Result<(), StorageError> {
+        let pricing = self.pricing.clone();
         self.call(move |connection| {
             let transaction = connection.transaction()?;
             let request_id = record.request_id;
@@ -3222,7 +3240,7 @@ impl DatabaseExecutor {
                 ],
             )?;
             for attempt in record.attempts {
-                let priced = price_usage(&UsageObservation {
+                let priced = pricing.price(&UsageObservation {
                     requested_model: record.requested_model.as_deref(),
                     actual_model: attempt.actual_model.as_deref(),
                     forwarded_service_tier: attempt.forwarded_service_tier.as_deref(),
@@ -3281,15 +3299,9 @@ impl DatabaseExecutor {
                     .query_map([&request_id], |row| {
                         let status = row.get::<_, String>(0)?;
                         Ok(PricedUsage {
-                            catalog_version: match row.get::<_, Option<String>>(2)?.as_deref() {
-                                Some(crate::pricing::CATALOG_VERSION) => {
-                                    Some(crate::pricing::CATALOG_VERSION)
-                                }
-                                Some(crate::pricing::PRIORITY_CATALOG_VERSION) => {
-                                    Some(crate::pricing::PRIORITY_CATALOG_VERSION)
-                                }
-                                _ => None,
-                            },
+                            catalog_version: persisted_catalog_version(
+                                row.get::<_, Option<String>>(2)?,
+                            ),
                             status: CostStatus::parse(&status).unwrap_or(CostStatus::Unavailable),
                             amount_pico_usd: row.get(1)?,
                         })
@@ -5019,6 +5031,23 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<(), std::io::Error> {
     Ok(())
+}
+
+/// Reads back one persisted catalog version without a closed version whitelist.
+///
+/// Synchronized catalogs carry their own `openai-*-synced-*` version, so every
+/// non-empty version within the accepted length is retained; only empty or
+/// oversized values are dropped as unusable provenance.
+fn persisted_catalog_version(value: Option<String>) -> Option<Arc<str>> {
+    match value {
+        Some(version)
+            if !version.is_empty()
+                && version.len() <= crate::pricing::MAX_CATALOG_VERSION_BYTES =>
+        {
+            Some(Arc::from(version))
+        }
+        _ => None,
+    }
 }
 
 fn now_millis() -> i64 {
@@ -10782,6 +10811,186 @@ mod tests {
         assert_eq!(
             detail.attempts[0].pricing_catalog_version.as_deref(),
             Some(crate::pricing::CATALOG_VERSION)
+        );
+    }
+
+    const SYNCED_STANDARD_VERSION: &str = "openai-standard-synced-2026-09-30";
+    const SYNCED_PRIORITY_VERSION: &str = "openai-priority-synced-2026-09-30";
+
+    fn local_pricing_table() -> crate::pricing_local::LocalPricingTable {
+        let row = |model_id: &str, input: i64| crate::pricing::ModelRate {
+            model_id: model_id.to_owned(),
+            minimum_input_tokens: None,
+            maximum_input_tokens: None,
+            input,
+            cached_input: input / 10,
+            cache_write: None,
+            output: input * 5,
+        };
+        crate::pricing_local::LocalPricingTable {
+            schema_version: crate::pricing_local::LOCAL_PRICING_SCHEMA_VERSION,
+            synced_at_ms: 1_790_000_000_000,
+            source_url: "https://developers.openai.com/api/docs/pricing/".to_owned(),
+            tiers: crate::pricing_local::LocalPricingTiers {
+                standard: crate::pricing_local::LocalPricingTier {
+                    version: SYNCED_STANDARD_VERSION.to_owned(),
+                    models: vec![row("gpt-5", 1_000_000)],
+                },
+                priority: crate::pricing_local::LocalPricingTier {
+                    version: SYNCED_PRIORITY_VERSION.to_owned(),
+                    models: vec![row("gpt-5", 2_000_000)],
+                },
+            },
+        }
+    }
+
+    async fn record_local_pricing_request(database: &DatabaseExecutor, request_id: &str) {
+        let route_id = RouteId::new();
+        database
+            .record_request_history(super::RequestHistoryRecord {
+                request_id: request_id.to_owned(),
+                started_at_ms: 100,
+                finished_at_ms: 200,
+                turn_id: None,
+                requested_model: Some("gpt-5".to_owned()),
+                reasoning_effort: None,
+                requested_service_tier: None,
+                actual_model: Some("gpt-5".to_owned()),
+                actual_service_tier: Some("default".to_owned()),
+                final_route_id: Some(route_id.clone()),
+                final_route_name: Some("Synced route".to_owned()),
+                streaming: false,
+                completion_state: crate::domain::CompletionState::Completed,
+                http_status: Some(200),
+                error_category: None,
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                total_tokens: Some(12),
+                cached_input_tokens: Some(4),
+                cache_write_input_tokens: None,
+                total_latency_ms: Some(100),
+                first_output_latency_ms: None,
+                metadata_complete: true,
+                fallback_stop_reason: None,
+                fallback_stop_target_route_id: None,
+                fallback_stop_target_route_name: None,
+                attempts: vec![super::AttemptHistoryRecord {
+                    attempt_id: crate::domain::UpstreamAttemptId::new(),
+                    attempt_index: 0,
+                    attempt_role: super::AttemptRole::Ordinary,
+                    route_id,
+                    route_name: "Synced route".to_owned(),
+                    started_at_ms: 100,
+                    finished_at_ms: 200,
+                    http_status: Some(200),
+                    error_category: None,
+                    delivery_state: crate::domain::DeliveryState::Completed,
+                    actual_model: Some("gpt-5".to_owned()),
+                    forwarded_service_tier: None,
+                    actual_service_tier: Some("default".to_owned()),
+                    input_tokens: Some(10),
+                    output_tokens: Some(2),
+                    total_tokens: Some(12),
+                    cached_input_tokens: Some(4),
+                    cache_write_input_tokens: None,
+                }],
+            })
+            .await
+            .expect("local pricing history");
+    }
+
+    #[tokio::test]
+    async fn usage_history_prices_new_requests_with_the_installed_local_catalog() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let pricing = crate::pricing::CatalogProvider::baseline();
+        pricing.install(crate::pricing_local::LocalPricingLoad::Loaded(
+            local_pricing_table(),
+        ));
+        let database = DatabaseExecutor::open_with_pricing(
+            directory.path().join("router.sqlite3"),
+            pricing.clone(),
+        )
+        .expect("database opens");
+
+        record_local_pricing_request(&database, "synced-request").await;
+        let detail = database
+            .usage_request_detail("synced-request".to_owned())
+            .await
+            .expect("synced usage detail");
+        // 6 regular Tokens at $1.00, 4 cached at $0.10, 2 output at $5.00.
+        assert_eq!(detail.attempts[0].cost_pico_usd, Some(16_400_000));
+        assert_eq!(
+            detail.attempts[0].pricing_catalog_version.as_deref(),
+            Some(SYNCED_STANDARD_VERSION)
+        );
+        let page = database
+            .usage_history(super::UsageHistoryQuery {
+                finished_at_or_after_ms: None,
+                finished_at_or_before_ms: 200,
+                completion_state: None,
+                route_id: None,
+                model_contains: None,
+                cursor: None,
+                limit: 50,
+            })
+            .await
+            .expect("usage page");
+        // The dynamic version survives the attempt read-back that folds request cost.
+        assert_eq!(
+            page.rows[0].pricing_catalog_version.as_deref(),
+            Some(SYNCED_STANDARD_VERSION)
+        );
+        assert_eq!(page.rows[0].upstream_cost_pico_usd, Some(16_400_000));
+        assert_eq!(
+            crate::pricing::catalog_service_tier(SYNCED_STANDARD_VERSION),
+            Some("default")
+        );
+
+        pricing.install(crate::pricing_local::LocalPricingLoad::Missing);
+        record_local_pricing_request(&database, "bundled-request").await;
+        let detail = database
+            .usage_request_detail("bundled-request".to_owned())
+            .await
+            .expect("bundled usage detail");
+        assert_eq!(detail.attempts[0].cost_pico_usd, Some(28_000_000));
+        assert_eq!(
+            detail.attempts[0].pricing_catalog_version.as_deref(),
+            Some(crate::pricing::CATALOG_VERSION)
+        );
+        // History is never repriced: the earlier row keeps its synchronized catalog.
+        let detail = database
+            .usage_request_detail("synced-request".to_owned())
+            .await
+            .expect("synced usage detail");
+        assert_eq!(detail.attempts[0].cost_pico_usd, Some(16_400_000));
+        assert_eq!(
+            detail.attempts[0].pricing_catalog_version.as_deref(),
+            Some(SYNCED_STANDARD_VERSION)
+        );
+    }
+
+    #[test]
+    fn persisted_catalog_versions_are_bounded_but_not_whitelisted() {
+        for version in [
+            crate::pricing::CATALOG_VERSION,
+            crate::pricing::PRIORITY_CATALOG_VERSION,
+            SYNCED_STANDARD_VERSION,
+            SYNCED_PRIORITY_VERSION,
+            "openai-standard-synced-2027-01-01",
+        ] {
+            assert_eq!(
+                super::persisted_catalog_version(Some(version.to_owned())).as_deref(),
+                Some(version)
+            );
+        }
+
+        assert_eq!(super::persisted_catalog_version(None), None);
+        assert_eq!(super::persisted_catalog_version(Some(String::new())), None);
+        assert_eq!(
+            super::persisted_catalog_version(Some(
+                "v".repeat(crate::pricing::MAX_CATALOG_VERSION_BYTES + 1)
+            )),
+            None
         );
     }
 

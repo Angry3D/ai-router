@@ -16,13 +16,13 @@ use router_core::{
         CodexImagesMcpRepairPreviewDto, CodexModelDto, CodexModelsActivation,
         CodexRecoveryResetPreviewDto, CodexRecoverySummaryDto, CodexRecoveryUpdatePreviewDto,
         CodexRestartNoticeDto, HistorySummaryDto, ImagesGenerationSettingsDto, McpImageCapacityDto,
-        MenuBarSettingsDto, MenuSnapshotDto, MetadataFailureDto, RecoveryCandidateDto,
-        RecoveryHealthDto, RecoverySnapshotDto, ReorderRoutesAndFallbackInputDto,
-        ReplaceCodexModelsResult, RouteActivationPreviewDto, RouteActivationResultDto,
-        RouteCatalogMode, RouteEditDto, RouteSaveInputDto, RouteSaveResultDto, SettingsSnapshotDto,
-        UpdateImagesGenerationSettingsInputDto, UpdateOutboundProxySettingsInputDto,
-        UsageHistoryPageDto, UsageHistoryQueryDto, UsageRequestDetailDto, UsageRouteOptionDto,
-        UsageStatisticsDto, UsageStatisticsQueryDto,
+        MenuBarSettingsDto, MenuSnapshotDto, MetadataFailureDto, PricingTableDto,
+        RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
+        ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
+        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteSaveInputDto,
+        RouteSaveResultDto, SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
+        UpdateOutboundProxySettingsInputDto, UsageHistoryPageDto, UsageHistoryQueryDto,
+        UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsDto, UsageStatisticsQueryDto,
     },
     balance::{
         BalanceCoordinator, BalanceDisplaySnapshot, BalanceExecutor, BalanceQueryConfig,
@@ -45,6 +45,8 @@ use router_core::{
         AppCoordinator, AppLifecycleIssue, AppLifecyclePhase, AppLifecycleServices,
         AppLifecycleSnapshot, LifecycleFailure,
     },
+    pricing::CatalogProvider,
+    pricing_local::{LocalPricingLoad, LocalPricingStore},
     proxy::{
         ActivatedSkipHealth, AsyncHistoryRecorder, FallbackActivationError, FallbackActivationMode,
         FallbackActivationRequest, FallbackActivator, HealthActivationProof, ImageAssetChangeSink,
@@ -83,6 +85,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State, plugin::TauriPlugin};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
 use crate::application_update::ApplicationUpdateCoordinator;
+use crate::pricing_sync::PricingSyncCoordinator;
 
 #[cfg(test)]
 struct ReplaceCodexModelsInput {
@@ -96,13 +99,14 @@ pub enum DesktopRuntimeProfile {
     Isolated,
 }
 
-const STARTUP_STATE_AREAS: [StateArea; 6] = [
+const STARTUP_STATE_AREAS: [StateArea; 7] = [
     StateArea::Routes,
     StateArea::Route,
     StateArea::Fallback,
     StateArea::ImagesGeneration,
     StateArea::McpImageAssets,
     StateArea::MenuBar,
+    StateArea::PricingTable,
 ];
 
 impl DesktopRuntimeProfile {
@@ -370,6 +374,8 @@ pub struct DesktopLifecycleServices {
     routing: RoutingSnapshotStore,
     route_health: Arc<RouteHealthRegistry>,
     outbound_proxy: OutboundProxyTransport,
+    pricing: CatalogProvider,
+    pricing_sync: PricingSyncCoordinator,
     routing_write_gate: Arc<tokio::sync::Mutex<()>>,
     codex_projection_gate: Arc<tokio::sync::Mutex<()>>,
     balance_settings_write_gate: tokio::sync::Mutex<()>,
@@ -469,6 +475,13 @@ impl DesktopLifecycleServices {
             app_data_dir.join("mcp-images"),
             Arc::new(tokio::sync::Semaphore::new(1)),
         );
+        let pricing = CatalogProvider::baseline();
+        let pricing_sync = PricingSyncCoordinator::new(
+            LocalPricingStore::new(app_data_dir.clone()),
+            pricing.clone(),
+            runtime_state.clone(),
+            profile.is_isolated(),
+        );
         Arc::new(Self {
             app_data_dir,
             codex_home,
@@ -489,6 +502,8 @@ impl DesktopLifecycleServices {
             routing: RoutingSnapshotStore::default(),
             route_health,
             outbound_proxy: OutboundProxyTransport::default(),
+            pricing,
+            pricing_sync,
             routing_write_gate: Arc::new(tokio::sync::Mutex::new(())),
             codex_projection_gate: Arc::new(tokio::sync::Mutex::new(())),
             balance_settings_write_gate: tokio::sync::Mutex::new(()),
@@ -550,6 +565,35 @@ impl DesktopLifecycleServices {
     #[must_use]
     pub fn outbound_proxy(&self) -> OutboundProxyTransport {
         self.outbound_proxy.clone()
+    }
+
+    /// Installs the outcome of loading the local pricing table.
+    ///
+    /// A corrupt table is reported in Settings and never fails startup: the
+    /// bundled baseline keeps pricing every request.
+    fn install_local_pricing(&self, load: LocalPricingLoad) {
+        if matches!(load, LocalPricingLoad::Corrupt) {
+            log::warn!(target: "ai_router::pricing", "code=pricing_local_table_corrupt");
+        }
+        self.pricing.install(load);
+    }
+
+    /// Projects the effective pricing table for the read-only Settings view.
+    ///
+    /// The manual synchronization owns the transient `syncing`/`error` states;
+    /// until it runs, every snapshot is `idle`.
+    #[must_use]
+    pub fn pricing_table(&self) -> PricingTableDto {
+        self.pricing_sync.snapshot()
+    }
+
+    /// Runs one manual synchronization of the official pricing table.
+    ///
+    /// Concurrent calls share a single capture run and return the snapshot that
+    /// run produced; a failure is reported in the snapshot status and keeps the
+    /// previously effective table.
+    pub async fn sync_pricing_from_web(&self, app: &AppHandle) -> PricingTableDto {
+        self.pricing_sync.sync(app).await
     }
 
     async fn recovery_for_ipc(&self) -> Result<Arc<RecoveryCoordinator>, IpcErrorDto> {
@@ -2749,10 +2793,21 @@ impl DesktopLifecycleServices {
         manager: RecoveryManager,
         force_current_point: bool,
     ) -> Result<(), LifecycleFailure> {
-        let database = tokio::task::spawn_blocking(move || DatabaseExecutor::open(path))
+        // Install the local pricing table before the database opens so every
+        // request recorded afterwards is priced with the effective catalog.
+        let store = LocalPricingStore::new(self.app_data_dir.clone());
+        let pricing = self.pricing.clone();
+        let load = tokio::task::spawn_blocking(move || store.load())
             .await
-            .map_err(|_| LifecycleFailure::Database)?
-            .map_err(|error| map_database_startup_failure(&error))?;
+            .map_err(|_| LifecycleFailure::Database)?;
+        self.install_local_pricing(load);
+        let provider = pricing;
+        let database = tokio::task::spawn_blocking(move || {
+            DatabaseExecutor::open_with_pricing(path, provider)
+        })
+        .await
+        .map_err(|_| LifecycleFailure::Database)?
+        .map_err(|error| map_database_startup_failure(&error))?;
         let recovery = RecoveryCoordinator::start_with_activity(
             manager,
             database.clone(),
@@ -3883,6 +3938,28 @@ pub async fn test_outbound_proxy(
 }
 
 #[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command state injection requires State<T> by value"
+)]
+pub fn get_pricing_table(services: State<'_, Arc<DesktopLifecycleServices>>) -> PricingTableDto {
+    services.pricing_table()
+}
+
+/// Synchronizes the local pricing table from the official pricing page.
+///
+/// The outcome, including a failed capture, is reported in the snapshot status
+/// so the settings view keeps showing the table that stays in effect.
+#[tauri::command]
+pub async fn sync_pricing_from_web(app: AppHandle) -> PricingTableDto {
+    app.state::<Arc<DesktopLifecycleServices>>()
+        .inner()
+        .clone()
+        .sync_pricing_from_web(&app)
+        .await
+}
+
+#[tauri::command]
 pub async fn update_appearance_preference(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     appearance_preference: AppearancePreference,
@@ -4621,7 +4698,7 @@ fn ipc_error(code: &str, message: &str, retryable: bool) -> IpcErrorDto {
     }
 }
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -4640,6 +4717,9 @@ mod tests {
         time::Duration,
     };
 
+    use router_core::app_api::{
+        PricingBandDto, PricingLocalStateDto, PricingRowSourceDto, PricingTableStatusDto,
+    };
     use router_core::state::{StateChangedEventDto, StateEventError, StateEventSink};
     use tempfile::TempDir;
 
@@ -4667,6 +4747,128 @@ mod tests {
 
     impl RuntimeDiagnosticSink for NoopDiagnosticSink {
         fn emit(&self, _event: RuntimeDiagnosticEvent) {}
+    }
+
+    fn local_pricing_fixture() -> router_core::pricing_local::LocalPricingTable {
+        let row = |model_id: &str, input: i64| router_core::pricing::ModelRate {
+            model_id: model_id.to_owned(),
+            minimum_input_tokens: None,
+            maximum_input_tokens: None,
+            input,
+            cached_input: input / 10,
+            cache_write: None,
+            output: input * 5,
+        };
+        router_core::pricing_local::LocalPricingTable {
+            schema_version: router_core::pricing_local::LOCAL_PRICING_SCHEMA_VERSION,
+            synced_at_ms: 1_790_000_000_000,
+            source_url: "https://developers.openai.com/api/docs/pricing/".to_owned(),
+            tiers: router_core::pricing_local::LocalPricingTiers {
+                standard: router_core::pricing_local::LocalPricingTier {
+                    version: "openai-standard-synced-2026-09-30".to_owned(),
+                    models: vec![row("gpt-5", 1_000_000)],
+                },
+                priority: router_core::pricing_local::LocalPricingTier {
+                    version: "openai-priority-synced-2026-09-30".to_owned(),
+                    models: vec![row("gpt-5", 2_000_000)],
+                },
+            },
+        }
+    }
+
+    fn isolated_services(directory: &TempDir) -> Arc<DesktopLifecycleServices> {
+        DesktopLifecycleServices::new(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink))),
+            Arc::new(NoopDiagnosticSink),
+        )
+    }
+
+    #[tokio::test]
+    async fn startup_installs_the_local_pricing_table_and_reports_its_state() {
+        let directory = TempDir::new().expect("app data fixture");
+        let services = isolated_services(&directory);
+
+        let baseline = services.pricing_table();
+        assert_eq!(baseline.status, PricingTableStatusDto::Idle);
+        assert_eq!(baseline.local_state, PricingLocalStateDto::Missing);
+        assert_eq!(baseline.synced_at_ms, None);
+        assert_eq!(baseline.source_url, None);
+        assert!(
+            baseline
+                .rows
+                .iter()
+                .all(|row| row.source == PricingRowSourceDto::Bundled)
+        );
+        assert!(baseline.rows.iter().any(|row| {
+            row.model_id == "gpt-5"
+                && row.band == PricingBandDto::Short
+                && row.input_micro_usd == 1_250_000
+        }));
+
+        router_core::pricing_local::LocalPricingStore::new(directory.path().to_path_buf())
+            .publish(&local_pricing_fixture())
+            .expect("publish local pricing table");
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+
+        let synced = services.pricing_table();
+        assert_eq!(synced.status, PricingTableStatusDto::Idle);
+        assert_eq!(synced.local_state, PricingLocalStateDto::Loaded);
+        assert_eq!(synced.synced_at_ms, Some(1_790_000_000_000));
+        assert_eq!(
+            synced.source_url.as_deref(),
+            Some("https://developers.openai.com/api/docs/pricing/")
+        );
+        assert!(
+            synced
+                .rows
+                .iter()
+                .any(|row| row.source == PricingRowSourceDto::Official)
+        );
+        assert_eq!(
+            synced.rows[0].model_id, "gpt-5",
+            "synchronized rows come first"
+        );
+        assert_eq!(synced.rows[0].input_micro_usd, 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn startup_falls_back_to_the_bundled_catalog_when_the_local_table_is_corrupt() {
+        let directory = TempDir::new().expect("app data fixture");
+        let store =
+            router_core::pricing_local::LocalPricingStore::new(directory.path().to_path_buf());
+        fs::create_dir_all(store.directory()).expect("pricing directory");
+        fs::write(store.path(), b"{ not json").expect("corrupt local table");
+        let services = isolated_services(&directory);
+
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+
+        let snapshot = services.pricing_table();
+        assert_eq!(snapshot.status, PricingTableStatusDto::Idle);
+        assert_eq!(snapshot.local_state, PricingLocalStateDto::Corrupt);
+        assert_eq!(snapshot.synced_at_ms, None);
+        assert_eq!(snapshot.source_url, None);
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .all(|row| row.source == PricingRowSourceDto::Bundled)
+        );
+        // A rejected local table is exactly the bundled baseline.
+        assert_eq!(
+            snapshot.rows.len(),
+            router_core::pricing::EffectiveCatalog::baseline()
+                .rows()
+                .len()
+        );
     }
 
     #[test]

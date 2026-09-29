@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Pricing | OpenAI</title>
+  </head>
+  <body>
+    <!--
+      Offline replica of the structure the C4 harness captured from
+      https://developers.openai.com/api/docs/pricing/ in WKWebView (2026-09-29):
+
+      * one `.content-switcher-root` per model family;
+      * segmented controls rendered as `button[role="radio"]` labelled
+        `Standard / Batch / Flex / Fast mode` (the Specialized family drops
+        `Batch` and `Flex`); `Fast mode` is the renamed Priority tier;
+      * every unselected pane carries `hidden`, so its rows stay in the DOM and
+        must be filtered by visibility. The hidden `Batch`/`Flex` rows bill
+        different amounts on purpose: they must never reach the payload;
+      * the flagship tables group the short and long context bands side by side:
+        the first header row is `["", "Short context"(colspan 4),
+        "Long context"(colspan 4)]` and the second header row names all nine
+        columns, `Model` included: `Model, Input, Cached input, Cache writes,
+        Output` twice;
+      * the Specialized tables have a single header row,
+        `Category, Model, Input, Cached input, Output`: no cache-write column and
+        no long context band, so those rows bill three rates;
+      * the page does not render the 272K boundary anywhere; it is fixed in Rust.
+
+      `fixtures/pricing-capture-script.js` extracts this page into
+      `fixtures/pricing-capture-payload.json`; `crates/router-core` parses that
+      payload in tests. Keep the three files consistent.
+    -->
+    <main>
+      <h1>Pricing</h1>
+      <p>
+        Priority processing was renamed Fast mode on July 30, 2026. You can use
+        either `service_tier: "priority"` or the Fast mode control below.
+      </p>
+
+      <section class="pricing-family" aria-labelledby="flagship-heading">
+        <h2 id="flagship-heading">Flagship models</h2>
+        <div class="content-switcher-root">
+          <div class="content-switcher" role="radiogroup" aria-label="Service tier">
+            <button type="button" role="radio" aria-checked="true">Standard</button>
+            <button type="button" role="radio" aria-checked="false">Batch</button>
+            <button type="button" role="radio" aria-checked="false">Flex</button>
+            <button type="button" role="radio" aria-checked="false">Fast mode</button>
+          </div>
+          <!-- Selected pane: no `hidden` attribute. -->
+          <div class="content-pane">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"></th>
+                  <th scope="colgroup" colspan="4">Short context</th>
+                  <th scope="colgroup" colspan="4">Long context</th>
+                </tr>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>gpt-6-astra</td>
+                  <td>$10.00</td><td>$1.00</td><td>$12.50</td><td>$50.00</td>
+                  <td>$20.00</td><td>$2.00</td><td>$25.00</td><td>$75.00</td>
+                </tr>
+                <tr>
+                  <td>gpt-6-sol</td>
+                  <td>$2.00</td><td>$0.20</td><td>$2.50</td><td>$10.00</td>
+                  <td>$4.00</td><td>$0.40</td><td>$5.00</td><td>$15.00</td>
+                </tr>
+                <tr>
+                  <td>gpt-6-luna</td>
+                  <td>$0.10</td><td>$0.01</td><td>$0.125</td><td>$0.50</td>
+                  <td>$0.20</td><td>$0.02</td><td>$0.25</td><td>$0.75</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="content-pane" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"></th>
+                  <th scope="colgroup" colspan="4">Short context</th>
+                  <th scope="colgroup" colspan="4">Long context</th>
+                </tr>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>gpt-6-astra</td>
+                  <td>$5.00</td><td>$0.50</td><td>$6.25</td><td>$25.00</td>
+                  <td>$10.00</td><td>$1.00</td><td>$12.50</td><td>$37.50</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="content-pane" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"></th>
+                  <th scope="colgroup" colspan="4">Short context</th>
+                  <th scope="colgroup" colspan="4">Long context</th>
+                </tr>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>gpt-6-astra</td>
+                  <td>$12.00</td><td>$1.20</td><td>$15.00</td><td>$60.00</td>
+                  <td>$24.00</td><td>$2.40</td><td>$30.00</td><td>$90.00</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="content-pane" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"></th>
+                  <th scope="colgroup" colspan="4">Short context</th>
+                  <th scope="colgroup" colspan="4">Long context</th>
+                </tr>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>gpt-6-astra</td>
+                  <td>$20.00</td><td>$2.00</td><td>$25.00</td><td>$100.00</td>
+                  <td>$40.00</td><td>$4.00</td><td>$50.00</td><td>$150.00</td>
+                </tr>
+                <tr>
+                  <td>gpt-6-sol</td>
+                  <td>$4.00</td><td>$0.40</td><td>$5.00</td><td>$20.00</td>
+                  <td>$8.00</td><td>$0.80</td><td>$10.00</td><td>$30.00</td>
+                </tr>
+                <tr>
+                  <td>gpt-6-luna</td>
+                  <td>$0.20</td><td>$0.02</td><td>$0.25</td><td>$1.00</td>
+                  <td>$0.40</td><td>$0.04</td><td>$0.50</td><td>$1.50</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="pricing-family" aria-labelledby="specialized-heading">
+        <h2 id="specialized-heading">Specialized models</h2>
+        <div class="content-switcher-root">
+          <div class="content-switcher" role="radiogroup" aria-label="Service tier">
+            <button type="button" role="radio" aria-checked="true">Standard</button>
+            <button type="button" role="radio" aria-checked="false">Fast mode</button>
+          </div>
+          <div class="content-pane">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Category</th>
+                  <th scope="col">Model</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Chat</td><td>chat-latest</td><td>$5.00</td><td>$0.50</td><td>$30.00</td>
+                </tr>
+                <tr>
+                  <td>Codex</td><td>gpt-5.3-codex</td><td>$1.75</td><td>$0.175</td><td>$14.00</td>
+                </tr>
+                <tr>
+                  <td>Research</td><td>gpt-rosalind-research</td><td>$5.00</td><td>$0.50</td><td>$25.00</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="content-pane" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Category</th>
+                  <th scope="col">Model</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Codex</td><td>gpt-5.3-codex</td><td>$3.50</td><td>$0.35</td><td>$28.00</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

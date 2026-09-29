@@ -65,6 +65,13 @@ vi.mock("../../api/ipc", () => ({
   connectCodex: ipc.connectCodex,
   createRecoveryPoint: ipc.createRecoveryPoint,
   deleteRoute: ipc.deleteRoute,
+  getPricingTable: vi.fn(async () => ({
+    rows: [],
+    syncedAtMs: null,
+    sourceUrl: null,
+    localState: "missing",
+    status: "idle",
+  })),
   getApplicationUpdateSnapshot: vi.fn(async () => ({
     currentVersion: "0.1.0",
     operation: "idle",
@@ -101,6 +108,7 @@ vi.mock("../../api/ipc", () => ({
     field: null,
   }),
   openCodexConfig: vi.fn(),
+  openPricingSource: vi.fn(),
   openRuntimeLogDirectory: vi.fn(),
   reconnectCodex: vi.fn(),
   restoreCodex: ipc.restoreCodex,

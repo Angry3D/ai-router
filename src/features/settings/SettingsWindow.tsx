@@ -17,6 +17,7 @@ import {
   isDatabaseSnapshotBlocked,
   useApplicationUpdateSnapshot,
   useBootstrapSnapshot,
+  usePricingTableSnapshot,
   useRecoverySnapshot,
   useSettingsSnapshot,
 } from "../../api/query";
@@ -45,6 +46,7 @@ export function SettingsWindow() {
   const bootstrapReady = bootstrap.isSuccess;
   const settings = useSettingsSnapshot(bootstrapReady && !databaseBlocked);
   const applicationUpdate = useApplicationUpdateSnapshot(bootstrapReady);
+  const pricingTable = usePricingTableSnapshot(bootstrapReady && !databaseBlocked);
   const recovery = useRecoverySnapshot(bootstrapReady && databaseBlocked);
   const [section, setSection] = useState<SettingsSectionId>(() => {
     if (!import.meta.env.DEV) return "routes";
@@ -269,6 +271,7 @@ export function SettingsWindow() {
           key={`codex-${editorKey}`}
           snapshot={settings.data}
           proxyStatus={bootstrap.data?.proxyStatus ?? "starting"}
+          pricingTable={pricingTable.data ?? null}
           focusImageGeneration={navigationTarget === "image_generation"}
           onImageGenerationFocused={() => setNavigationTarget(null)}
         />

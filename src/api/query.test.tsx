@@ -187,6 +187,25 @@ describe("router state synchronization", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.settings });
   });
 
+  it("invalidates only the pricing snapshot for pricing boundaries", async () => {
+    const client = createRouterQueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    render(
+      <QueryClientProvider client={client}>
+        <StateSyncProbe />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(ipc.listener).toBeDefined());
+    invalidate.mockClear();
+
+    act(() => ipc.listener?.({ revision: 15, areas: ["pricing_table"] }));
+
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: queryKeys.pricingTable,
+    });
+  });
+
   it("invalidates only the application update snapshot for update boundaries", async () => {
     const client = createRouterQueryClient();
     const invalidate = vi.spyOn(client, "invalidateQueries");

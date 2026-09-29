@@ -11,6 +11,7 @@ import {
   getBootstrapSnapshot,
   getApplicationUpdateSnapshot,
   getMenuSnapshot,
+  getPricingTable,
   getRecoverySnapshot,
   getSettingsSnapshot,
   getUsageHistory,
@@ -45,6 +46,7 @@ export const queryKeys = {
   runtimeLogs: ["runtime-logs"] as const,
   recovery: ["recovery"] as const,
   applicationUpdate: ["application-update"] as const,
+  pricingTable: ["pricing-table"] as const,
 };
 
 const keysByArea: Record<StateArea, ReadonlyArray<readonly unknown[]>> = {
@@ -98,6 +100,7 @@ const keysByArea: Record<StateArea, ReadonlyArray<readonly unknown[]>> = {
   appearance: [queryKeys.bootstrap],
   menu_bar: [queryKeys.settings],
   application_update: [queryKeys.applicationUpdate],
+  pricing_table: [queryKeys.pricingTable],
 };
 
 export function isDatabaseSnapshotBlocked(
@@ -145,6 +148,14 @@ export function useApplicationUpdateSnapshot(enabled = true) {
   return useQuery({
     queryKey: queryKeys.applicationUpdate,
     queryFn: getApplicationUpdateSnapshot,
+    enabled: isTauriRuntime() && enabled,
+  });
+}
+
+export function usePricingTableSnapshot(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.pricingTable,
+    queryFn: getPricingTable,
     enabled: isTauriRuntime() && enabled,
   });
 }
