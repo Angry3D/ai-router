@@ -102,7 +102,8 @@ Release 同时提供 updater 归档、`.sig`、`latest.json`、`SHA256SUMS` 和 
 - 恢复点保存关键配置，包括路由密钥和 Codex 配置恢复信息；不包含请求历史、用量行或日志。
 - AI Router 不提供云同步。所有外发流量来自用户配置的上游请求、Codex 自身行为，或用户在设置中
   手动触发的「同步官网」——它只在隐藏的只读窗口中访问 OpenAI 官方定价页，把 GPT 模型的价格行写入
-  本地价格表；不上传任何本地数据，也不携带 API Key。
+  本地价格表；不上传任何本地数据，也不携带 API Key。同步的网络出口跟随 macOS 系统代理/PAC，
+  不受设置中的「全局出站代理」影响。
 
 具体路径、备份范围和恢复限制见
 [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)。安全问题不要提交到公开 Issue，
