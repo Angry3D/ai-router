@@ -83,6 +83,59 @@ async function capture(pageHtml: string): Promise<CapturePayload> {
 }
 
 describe("pricing capture script", () => {
+  /**
+   * A minimal one-family page: the given tier controls plus one pane per tier
+   * that bill `$1.00` (standard) and `$2.00` (priority). Any outcome other than
+   * a successful capture therefore means the matcher missed a control.
+   */
+  function tierPage(standardControl: string, priorityControl: string): string {
+    return `<!doctype html>
+<html lang="en">
+  <body>
+    <div class="content-switcher-root">
+      <div role="radiogroup" aria-label="Service tier">
+        ${standardControl}
+        ${priorityControl}
+      </div>
+      <div class="content-pane">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Model</th>
+              <th scope="col">Input</th>
+              <th scope="col">Cached input</th>
+              <th scope="col">Output</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>gpt-6-astra</td><td>$1.00</td><td>$0.10</td><td>$4.00</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="content-pane" hidden>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Model</th>
+              <th scope="col">Input</th>
+              <th scope="col">Cached input</th>
+              <th scope="col">Output</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>gpt-6-astra</td><td>$2.00</td><td>$0.20</td><td>$8.00</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </body>
+</html>`;
+  }
+
+  function option(attributes: string, label: string, checked = false): string {
+    return `<button type="button" role="radio" ${attributes} aria-checked="${checked}">${label}</button>`;
+  }
+
   it("extracts both synced tiers from the visible panes of the fixture page", async () => {
     const captured = await capture(pageFixture);
 
@@ -101,7 +154,7 @@ describe("pricing capture script", () => {
       (model) => model.id === "gpt-6-astra",
     );
     // `$10.00` is the Standard pane; the hidden Batch pane renders `$5.00` and
-    // the hidden Flex pane renders `$12.00`.
+    // the hidden Ultrafast pane renders `$60.00`.
     expect(standard?.short.input).toBe("$10.00");
     expect(
       captured.priority?.find((model) => model.id === "gpt-6-astra")?.short
@@ -144,13 +197,19 @@ describe("pricing capture script", () => {
     expect(astra?.short.input).toBe("$10.00");
     // Other models in the same table keep their long band.
     expect(
-      captured.standard?.find((model) => model.id === "gpt-6-sol")?.long?.input,
+      captured.standard?.find((model) => model.id === "gpt-6.1-sol")?.long
+        ?.input,
     ).toBe("$4.00");
   });
 
   it("reports a failure instead of guessing when a tier control is missing", async () => {
     const captured = await capture(
-      pageFixture.replaceAll("Fast mode", "Priority"),
+      // Dropping the priority control changes both its identity and its copy;
+      // the family is then skipped and nothing is captured.
+      pageFixture.replaceAll(
+        'data-content-switcher-option="true" data-value="fast" aria-checked="false">Fast<',
+        'data-content-switcher-option="true" data-value="turbo" aria-checked="false">Turbo<',
+      ),
     );
 
     expect(captured.ok).toBe(false);
@@ -186,12 +245,101 @@ describe("pricing capture script", () => {
   it("reports a failure when the selected pane renders no visible table", async () => {
     const captured = await capture(
       pageFixture.replace(
-        '<div class="content-pane">\n            <table>',
-        '<div class="content-pane">\n            <table hidden>',
+        '<div class="content-pane" data-content-switcher-pane="true" data-value="standard">\n            <table>',
+        '<div class="content-pane" data-content-switcher-pane="true" data-value="standard">\n            <table hidden>',
       ),
     );
 
     expect(captured.ok).toBe(false);
     expect(captured.reason).toBe("pricing-table-not-found:standard");
+  });
+
+  describe("tier matcher", () => {
+    const STANDARD_VALUE =
+      'data-content-switcher-option="true" data-value="standard"';
+    const PRIORITY_VALUE =
+      'data-content-switcher-option="true" data-value="fast"';
+
+    it("matches on `data-value` when the copy is `Fast`", async () => {
+      const captured = await capture(
+        tierPage(
+          option(STANDARD_VALUE, "Standard", true),
+          option(PRIORITY_VALUE, "Fast"),
+        ),
+      );
+
+      expect(captured.ok).toBe(true);
+      expect(captured.standard?.[0].short.input).toBe("$1.00");
+      expect(captured.priority?.[0].short.input).toBe("$2.00");
+    });
+
+    it("prefers `data-value` over a copy that names the other tier", async () => {
+      // Both radios render `Fast`; only `data-value` tells them apart.
+      const captured = await capture(
+        tierPage(
+          option(STANDARD_VALUE, "Fast", true),
+          option(PRIORITY_VALUE, "Fast"),
+        ),
+      );
+
+      expect(captured.ok).toBe(true);
+      expect(captured.standard?.[0].short.input).toBe("$1.00");
+      expect(captured.priority?.[0].short.input).toBe("$2.00");
+    });
+
+    it("falls back to the 2026-09-29 `Fast mode` copy without `data-value`", async () => {
+      const captured = await capture(
+        tierPage(option("", "Standard", true), option("", "Fast mode")),
+      );
+
+      expect(captured.ok).toBe(true);
+      expect(captured.standard?.[0].short.input).toBe("$1.00");
+      expect(captured.priority?.[0].short.input).toBe("$2.00");
+    });
+
+    it("falls back to `aria-label` without `data-value`", async () => {
+      const captured = await capture(
+        tierPage(
+          option('aria-label="Standard"', "Select a tier", true),
+          option('aria-label="Fast"', "Select a tier"),
+        ),
+      );
+
+      expect(captured.ok).toBe(true);
+      expect(captured.standard?.[0].short.input).toBe("$1.00");
+      expect(captured.priority?.[0].short.input).toBe("$2.00");
+    });
+
+    it("accepts the legacy `priority` `data-value`", async () => {
+      const captured = await capture(
+        tierPage(
+          option(STANDARD_VALUE, "Standard", true),
+          option(
+            'data-content-switcher-option="true" data-value="priority"',
+            "Priority",
+          ),
+        ),
+      );
+
+      expect(captured.ok).toBe(true);
+      expect(captured.priority?.[0].short.input).toBe("$2.00");
+    });
+
+    it("reports `pricing-families-not-found` without a recognizable control", async () => {
+      const captured = await capture(
+        tierPage(
+          option(
+            'data-content-switcher-option="true" data-value="batch"',
+            "Batch",
+            true,
+          ),
+          option("", "Turbo"),
+        ),
+      );
+
+      expect(captured.ok).toBe(false);
+      expect(captured.reason).toBe("pricing-families-not-found");
+      expect(captured.standard).toBeUndefined();
+    });
   });
 });

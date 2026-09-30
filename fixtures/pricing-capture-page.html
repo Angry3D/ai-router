@@ -6,24 +6,37 @@
   </head>
   <body>
     <!--
-      Offline replica of the structure the C4 harness captured from
-      https://developers.openai.com/api/docs/pricing/ in WKWebView (2026-09-29):
+      Offline replica of the model families the live pricing page renders, as
+      captured from https://developers.openai.com/api/docs/pricing/ on
+      2026-09-30 with `curl -sSL --compressed` and cross-checked against the
+      Chromium injection probe recorded in
+      `.trellis/tasks/09-30-pricing-sync-contract-drift/research/live-page-drift-2026-09-30.md`:
 
-      * one `.content-switcher-root` per model family;
-      * segmented controls rendered as `button[role="radio"]` labelled
-        `Standard / Batch / Flex / Fast mode` (the Specialized family drops
-        `Batch` and `Flex`); `Fast mode` is the renamed Priority tier;
+      * one `.content-switcher-root` per family, in page order: `latest-pricing`
+        (Standard / Batch / Flex / Fast / Ultrafast), `multimodal-image-pricing`
+        (Standard / Batch), `specialized-pricing` (Standard / Fast) and
+        `ft-pricing` (Standard / Batch);
+      * every tier control is a `button[role="radio"]` carrying
+        `data-content-switcher-option="true"` and its `data-value`; the visible
+        copy is `Standard`, `Batch`, `Flex`, `Fast`, `Ultrafast`. The script
+        matches that identity first and only falls back to the copy, so the
+        2026-09-29 `Fast mode` label keeps working too;
+      * only the families that render both a standard and a priority control are
+        synchronized: the image and ft families have no `data-value="fast"`
+        control and are skipped, exactly like on the live page;
       * every unselected pane carries `hidden`, so its rows stay in the DOM and
-        must be filtered by visibility. The hidden `Batch`/`Flex` rows bill
-        different amounts on purpose: they must never reach the payload;
+        must be filtered by visibility. The hidden Batch / Flex / Ultrafast rows
+        bill different amounts on purpose: they must never reach the payload;
       * the flagship tables group the short and long context bands side by side:
         the first header row is `["", "Short context"(colspan 4),
-        "Long context"(colspan 4)]` and the second header row names all nine
-        columns, `Model` included: `Model, Input, Cached input, Cache writes,
-        Output` twice;
-      * the Specialized tables have a single header row,
-        `Category, Model, Input, Cached input, Output`: no cache-write column and
-        no long context band, so those rows bill three rates;
+        "Long context"(colspan 4)]`, the second names all nine columns,
+        `Model` included;
+      * the Specialized tables have a single header row, `Category, Model,
+        Input, Cached input, Output`: no cache-write column and no long band, so
+        those rows bill three rates. The Fast pane bills a single Codex row;
+      * the image and ft families keep their real column shapes (`Modality`,
+        `Training`) and their real rows; the matcher never reads them because
+        those families lack a priority control;
       * the page does not render the 272K boundary anywhere; it is fixed in Rust.
 
       `fixtures/pricing-capture-script.js` extracts this page into
@@ -33,21 +46,22 @@
     <main>
       <h1>Pricing</h1>
       <p>
-        Priority processing was renamed Fast mode on July 30, 2026. You can use
-        either `service_tier: "priority"` or the Fast mode control below.
+        Priority processing runs the same models with faster responses. Prices
+        are per 1M tokens; select a tier to see its rates.
       </p>
 
-      <section class="pricing-family" aria-labelledby="flagship-heading">
-        <h2 id="flagship-heading">Flagship models</h2>
-        <div class="content-switcher-root">
+      <section class="pricing-family" aria-labelledby="latest-heading">
+        <h2 id="latest-heading">Latest models</h2>
+        <div class="content-switcher-root" id="content-switcher-latest-pricing">
           <div class="content-switcher" role="radiogroup" aria-label="Service tier">
-            <button type="button" role="radio" aria-checked="true">Standard</button>
-            <button type="button" role="radio" aria-checked="false">Batch</button>
-            <button type="button" role="radio" aria-checked="false">Flex</button>
-            <button type="button" role="radio" aria-checked="false">Fast mode</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="standard" aria-checked="true">Standard</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="batch" aria-checked="false">Batch</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="flex" aria-checked="false">Flex</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="fast" aria-checked="false">Fast</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="ultrafast" aria-checked="false">Ultrafast</button>
           </div>
           <!-- Selected pane: no `hidden` attribute. -->
-          <div class="content-pane">
+          <div class="content-pane" data-content-switcher-pane="true" data-value="standard">
             <table>
               <thead>
                 <tr>
@@ -74,9 +88,9 @@
                   <td>$20.00</td><td>$2.00</td><td>$25.00</td><td>$75.00</td>
                 </tr>
                 <tr>
-                  <td>gpt-6-sol</td>
-                  <td>$2.00</td><td>$0.20</td><td>$2.50</td><td>$10.00</td>
-                  <td>$4.00</td><td>$0.40</td><td>$5.00</td><td>$15.00</td>
+                  <td>gpt-6.1-sol</td>
+                  <td>$2.00</td><td>$0.10</td><td>$2.50</td><td>$10.00</td>
+                  <td>$4.00</td><td>$0.20</td><td>$5.00</td><td>$15.00</td>
                 </tr>
                 <tr>
                   <td>gpt-6-luna</td>
@@ -86,7 +100,7 @@
               </tbody>
             </table>
           </div>
-          <div class="content-pane" hidden>
+          <div class="content-pane" data-content-switcher-pane="true" data-value="batch" hidden>
             <table>
               <thead>
                 <tr>
@@ -112,10 +126,21 @@
                   <td>$5.00</td><td>$0.50</td><td>$6.25</td><td>$25.00</td>
                   <td>$10.00</td><td>$1.00</td><td>$12.50</td><td>$37.50</td>
                 </tr>
+                <tr>
+                  <td>gpt-6.1-sol</td>
+                  <td>$1.00</td><td>$0.05</td><td>$1.25</td><td>$5.00</td>
+                  <td>$2.00</td><td>$0.10</td><td>$2.50</td><td>$7.50</td>
+                </tr>
+                <tr>
+                  <td>gpt-6-luna</td>
+                  <td>$0.05</td><td>$0.005</td><td>$0.0625</td><td>$0.25</td>
+                  <td>$0.10</td><td>$0.01</td><td>$0.125</td><td>$0.375</td>
+                </tr>
               </tbody>
             </table>
           </div>
-          <div class="content-pane" hidden>
+          <!-- The live Flex pane bills the Batch amounts. -->
+          <div class="content-pane" data-content-switcher-pane="true" data-value="flex" hidden>
             <table>
               <thead>
                 <tr>
@@ -138,13 +163,23 @@
               <tbody>
                 <tr>
                   <td>gpt-6-astra</td>
-                  <td>$12.00</td><td>$1.20</td><td>$15.00</td><td>$60.00</td>
-                  <td>$24.00</td><td>$2.40</td><td>$30.00</td><td>$90.00</td>
+                  <td>$5.00</td><td>$0.50</td><td>$6.25</td><td>$25.00</td>
+                  <td>$10.00</td><td>$1.00</td><td>$12.50</td><td>$37.50</td>
+                </tr>
+                <tr>
+                  <td>gpt-6.1-sol</td>
+                  <td>$1.00</td><td>$0.05</td><td>$1.25</td><td>$5.00</td>
+                  <td>$2.00</td><td>$0.10</td><td>$2.50</td><td>$7.50</td>
+                </tr>
+                <tr>
+                  <td>gpt-6-luna</td>
+                  <td>$0.05</td><td>$0.005</td><td>$0.0625</td><td>$0.25</td>
+                  <td>$0.10</td><td>$0.01</td><td>$0.125</td><td>$0.375</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <div class="content-pane" hidden>
+          <div class="content-pane" data-content-switcher-pane="true" data-value="fast" hidden>
             <table>
               <thead>
                 <tr>
@@ -171,9 +206,9 @@
                   <td>$40.00</td><td>$4.00</td><td>$50.00</td><td>$150.00</td>
                 </tr>
                 <tr>
-                  <td>gpt-6-sol</td>
-                  <td>$4.00</td><td>$0.40</td><td>$5.00</td><td>$20.00</td>
-                  <td>$8.00</td><td>$0.80</td><td>$10.00</td><td>$30.00</td>
+                  <td>gpt-6.1-sol</td>
+                  <td>$4.00</td><td>$0.20</td><td>$5.00</td><td>$20.00</td>
+                  <td>$8.00</td><td>$0.40</td><td>$10.00</td><td>$30.00</td>
                 </tr>
                 <tr>
                   <td>gpt-6-luna</td>
@@ -183,17 +218,107 @@
               </tbody>
             </table>
           </div>
+          <div class="content-pane" data-content-switcher-pane="true" data-value="ultrafast" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"></th>
+                  <th scope="colgroup" colspan="4">Short context</th>
+                  <th scope="colgroup" colspan="4">Long context</th>
+                </tr>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Cache writes</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>gpt-6-astra</td>
+                  <td>$60.00</td><td>$6.00</td><td>$75.00</td><td>$300.00</td>
+                  <td>$120.00</td><td>$12.00</td><td>$150.00</td><td>$450.00</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="pricing-family" aria-labelledby="image-heading">
+        <h2 id="image-heading">Multimodal image models</h2>
+        <div class="content-switcher-root" id="content-switcher-multimodal-image-pricing">
+          <div class="content-switcher" role="radiogroup" aria-label="Service tier">
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="standard" aria-checked="true">Standard</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="batch" aria-checked="false">Batch</button>
+          </div>
+          <div class="content-pane" data-content-switcher-pane="true" data-value="standard">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Modality</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td rowspan="2">gpt-image-2.5-sunburst</td>
+                  <td>Image</td><td>$8.00</td><td>$2.00</td><td>$30.00</td>
+                </tr>
+                <tr>
+                  <td>Text</td><td>$5.00</td><td>$1.25</td><td>-</td>
+                </tr>
+                <tr>
+                  <td rowspan="2">gpt-image-2.5-flare</td>
+                  <td>Image</td><td>$8.00</td><td>$2.00</td><td>$30.00</td>
+                </tr>
+                <tr>
+                  <td>Text</td><td>$5.00</td><td>$1.25</td><td>-</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="content-pane" data-content-switcher-pane="true" data-value="batch" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Modality</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td rowspan="2">gpt-image-2</td>
+                  <td>Image</td><td>$4.00</td><td>$1.00</td><td>$15.00</td>
+                </tr>
+                <tr>
+                  <td>Text</td><td>$2.50</td><td>$0.625</td><td>-</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 
       <section class="pricing-family" aria-labelledby="specialized-heading">
         <h2 id="specialized-heading">Specialized models</h2>
-        <div class="content-switcher-root">
+        <div class="content-switcher-root" id="content-switcher-specialized-pricing">
           <div class="content-switcher" role="radiogroup" aria-label="Service tier">
-            <button type="button" role="radio" aria-checked="true">Standard</button>
-            <button type="button" role="radio" aria-checked="false">Fast mode</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="standard" aria-checked="true">Standard</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="fast" aria-checked="false">Fast</button>
           </div>
-          <div class="content-pane">
+          <div class="content-pane" data-content-switcher-pane="true" data-value="standard">
             <table>
               <thead>
                 <tr>
@@ -206,18 +331,18 @@
               </thead>
               <tbody>
                 <tr>
-                  <td>Chat</td><td>chat-latest</td><td>$5.00</td><td>$0.50</td><td>$30.00</td>
+                  <td>ChatGPT</td><td>chat-latest</td><td>$5.00</td><td>$0.50</td><td>$30.00</td>
                 </tr>
                 <tr>
                   <td>Codex</td><td>gpt-5.3-codex</td><td>$1.75</td><td>$0.175</td><td>$14.00</td>
                 </tr>
                 <tr>
-                  <td>Research</td><td>gpt-rosalind-research</td><td>$5.00</td><td>$0.50</td><td>$25.00</td>
+                  <td>Life Sciences</td><td>gpt-rosalind-research</td><td>$5.00</td><td>$0.50</td><td>$25.00</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <div class="content-pane" hidden>
+          <div class="content-pane" data-content-switcher-pane="true" data-value="fast" hidden>
             <table>
               <thead>
                 <tr>
@@ -231,6 +356,62 @@
               <tbody>
                 <tr>
                   <td>Codex</td><td>gpt-5.3-codex</td><td>$3.50</td><td>$0.35</td><td>$28.00</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="pricing-family" aria-labelledby="ft-heading">
+        <h2 id="ft-heading">Fine-tuning</h2>
+        <div class="content-switcher-root" id="content-switcher-ft-pricing">
+          <div class="content-switcher" role="radiogroup" aria-label="Service tier">
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="standard" aria-checked="true">Standard</button>
+            <button type="button" role="radio" data-content-switcher-option="true" data-value="batch" aria-checked="false">Batch</button>
+          </div>
+          <div class="content-pane" data-content-switcher-pane="true" data-value="standard">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Training</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>o4-mini-2025-04-16</td>
+                  <td>$100.00 / hour</td><td>$4.00</td><td>$1.00</td><td>$16.00</td>
+                </tr>
+                <tr>
+                  <td>o4-mini-2025-04-16<br /><small>with data sharing</small></td>
+                  <td>$100.00 / hour</td><td>$2.00</td><td>$0.50</td><td>$8.00</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="content-pane" data-content-switcher-pane="true" data-value="batch" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Model</th>
+                  <th scope="col">Training</th>
+                  <th scope="col">Input</th>
+                  <th scope="col">Cached input</th>
+                  <th scope="col">Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>o4-mini-2025-04-16</td>
+                  <td>$100.00 / hour</td><td>$2.00</td><td>$0.50</td><td>$8.00</td>
+                </tr>
+                <tr>
+                  <td>o4-mini-2025-04-16<br /><small>with data sharing</small></td>
+                  <td>$100.00 / hour</td><td>$1.00</td><td>$0.25</td><td>$4.00</td>
                 </tr>
               </tbody>
             </table>

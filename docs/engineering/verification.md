@@ -48,10 +48,16 @@ cargo test --workspace
   校验、取消期间共享许可、六字段错误状态来源，以及成功八字段兼容和 HTTP 字节透传。网络测试只使用
   合成响应与本地 TLS 服务，测试连接映射不能成为生产环境的本机地址例外。
 - Codex 配置：基线不可变、provider identity、无关字段保留、symlink、fingerprint 竞态和精确恢复。
-- 价格同步：脚本契约在 jsdom 中对 fixture 页面逐字节比对负载、解析负例（缺列/坏数字/重复/阈值
-  冲突/超限）、loopback fixture 的端到端替换与 `StateArea::PricingTable` 发布、单飞等待者回归，
-  以及隐藏窗口/导航取消的隔离断言；自动化不访问真实官网。真实站点的可达性与 DOM 兼容属于人工 QA
-  （QA bundle 手动同步一次），页面结构变化必须失败关闭并保留旧表。
+- 价格同步：档位匹配器矩阵（`data-value` 稳定标识优先于可见文案，2026-09-29 的 `Fast mode`
+  形态仍能命中）、脚本契约在 jsdom 中对刷新后的复刻页抽取并与重新生成的负载 fixture 逐字节
+  比对、解析负例（缺列/坏数字/重复/阈值冲突/超限）、loopback fixture 的端到端替换与
+  `StateArea::PricingTable` 发布、单飞等待者回归，以及隐藏窗口/导航取消的隔离断言；失败分类与
+  快照不变量由不访问真实站点的单测证明（`CaptureError` 全变体 → 类别与 reason、仅 `error` 暴露
+  `failure`、成功后清除、页面未加载的脚本失败归 `Transport`、页面加载完成后的预算超时归 `Page`
+  且 reason 为 `capture-no-report`）。自动化不访问真实官网。真实站点的
+  可达性与 DOM 兼容属于人工 QA：用 QA bundle（隔离身份与数据）对真站手动同步一次，并各核对一次
+  Page 与 Transport 两类失败文案，在 `920 x 640` 与 `760 x 560`、明/暗两套主题下确认状态行不折行
+  推动布局且无横向溢出。任何页面结构变化必须失败关闭并保留旧表。
 - 原生生命周期：只使用 QA identity，验证隐藏/重开、主线程 generation、菜单聚焦和生产连续性。
 - 发布：锁定工具链、稳定 tag/ref/version/commit、ad-hoc bundle 身份、arm64/minimum OS、updater
   签名、DMG 内容、`latest.json`、checksums、draft 回读、provenance、secret/path scan 和公开原子性。

@@ -87,6 +87,7 @@ vi.mock("../../api/ipc", () => ({
     sourceUrl: null,
     localState: "missing",
     status: "idle",
+    failure: null,
   })),
   getApplicationUpdateSnapshot: vi.fn(async () => ({
     currentVersion: "0.1.0",

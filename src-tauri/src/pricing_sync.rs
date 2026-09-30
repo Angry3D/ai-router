@@ -24,26 +24,36 @@
 //! command from it. Every navigation except the capture target itself is
 //! cancelled.
 //!
+//! A run also records whether the capture target itself finished loading
+//! (`PageLoadEvent::Finished` for that page, not for the blank document the
+//! webview starts with): the evidence separates a page problem from a
+//! transport problem when the extractor reports nothing or reports a failure.
+//!
 //! QA builds may point the capture at a loopback fixture with
 //! `AI_ROUTER_QA_PRICING_URL`; an override that is not an `http(s)` loopback
 //! page is ignored with an error and the production page is used instead.
 
 use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Duration;
 
 use router_core::{
-    app_api::{PricingTableDto, PricingTableStatusDto},
+    app_api::{
+        PricingTableDto, PricingTableFailureDto, PricingTableFailureKindDto, PricingTableStatusDto,
+    },
     pricing::CatalogProvider,
     pricing_capture::{
-        CAPTURE_SCHEME, CaptureError, CaptureHint, decode_capture_navigation, parse_capture_payload,
+        CAPTURE_SCHEME, CaptureError, CaptureFailure, CaptureHint, decode_capture_navigation,
+        parse_capture_payload,
     },
     pricing_local::{LocalPricingLoad, LocalPricingStore},
     state::{AppRuntimeState, StateArea},
 };
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, webview::PageLoadEvent,
+};
 use tokio::sync::{
     mpsc::{UnboundedSender, unbounded_channel},
     watch,
@@ -240,6 +250,8 @@ pub struct PricingSyncCoordinator {
     pricing: CatalogProvider,
     runtime_state: Arc<AppRuntimeState>,
     status: AtomicU8,
+    /// The last failure, kept so a snapshot can explain the error status.
+    failure: Mutex<Option<CaptureFailure>>,
     inflight: tokio::sync::Mutex<Option<Arc<SyncRun>>>,
     production: Url,
     override_allowed: bool,
@@ -263,6 +275,7 @@ impl PricingSyncCoordinator {
             pricing,
             runtime_state,
             status: AtomicU8::new(SyncStatus::Idle as u8),
+            failure: Mutex::new(None),
             inflight: tokio::sync::Mutex::new(None),
             production: Url::parse(crate::PRICING_SOURCE_URL)
                 .expect("the embedded pricing source URL is valid"),
@@ -274,13 +287,49 @@ impl PricingSyncCoordinator {
     #[must_use]
     pub fn snapshot(&self) -> PricingTableDto {
         let state = self.pricing.state();
+        let status = SyncStatus::load(&self.status);
+        // The failure is projected only while it explains an error status; a
+        // successful run clears it before the status leaves `error`.
+        let failure = if status == SyncStatus::Error {
+            self.stored_failure().map(|failure| PricingTableFailureDto {
+                kind: failure.category.into(),
+                reason: failure.reason,
+            })
+        } else {
+            None
+        };
         PricingTableDto {
             rows: state.catalog.rows().into_iter().map(Into::into).collect(),
             synced_at_ms: state.synced_at_ms,
             source_url: state.source_url.clone(),
             local_state: state.local.into(),
-            status: SyncStatus::load(&self.status).dto(),
+            status: status.dto(),
+            failure,
         }
+    }
+
+    /// The failure the last run recorded, without panicking on a poison.
+    fn stored_failure(&self) -> Option<CaptureFailure> {
+        self.failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records the failure of the run that just ended.
+    fn store_failure(&self, failure: CaptureFailure) {
+        *self
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(failure);
+    }
+
+    /// Clears the failure a successful run superseded.
+    fn clear_failure(&self) {
+        *self
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Runs one manual synchronization, joining an in-flight run if there is one.
@@ -372,31 +421,51 @@ impl PricingSyncCoordinator {
         }
         let url = target.url().clone();
         SyncStatus::Syncing.store(&self.status);
-        let payload = match self.render(app, &url).await {
+        // One run's loading evidence: only `PageLoadEvent::Finished` sets it.
+        let page_loaded = Arc::new(AtomicBool::new(false));
+        let payload = match self.render(app, &url, Arc::clone(&page_loaded)).await {
             Ok(payload) => payload,
-            Err(error) => return self.report_failure(&url, &error),
+            Err(error) => {
+                return self.report_failure(&url, &error, page_loaded.load(Ordering::Acquire));
+            }
         };
         match self.apply_capture(&payload, crate::runtime::now_millis(), url.as_str()) {
-            Ok(hints) => {
-                for hint in &hints {
-                    log::warn!(
-                        target: "ai_router::pricing",
-                        "code=pricing_sync_ratio_hint {hint}"
-                    );
-                }
-                SyncStatus::Idle.store(&self.status);
-            }
-            Err(error) => return self.report_failure(&url, &error),
+            Ok(hints) => self.report_success(&hints),
+            Err(error) => self.report_failure(&url, &error, page_loaded.load(Ordering::Acquire)),
         }
+    }
+
+    /// Reports a successful run and clears the failure it superseded.
+    fn report_success(&self, hints: &[CaptureHint]) -> PricingTableDto {
+        for hint in hints {
+            log::warn!(
+                target: "ai_router::pricing",
+                "code=pricing_sync_ratio_hint {hint}"
+            );
+        }
+        // The status stops projecting the stored failure before it is cleared,
+        // so a snapshot never pairs `error` with no failure.
+        SyncStatus::Idle.store(&self.status);
+        self.clear_failure();
         self.snapshot()
     }
 
     /// Reports a failed run in the settings snapshot without losing the table.
-    fn report_failure(&self, source: &Url, error: &CaptureError) -> PricingTableDto {
+    fn report_failure(
+        &self,
+        source: &Url,
+        error: &CaptureError,
+        page_loaded: bool,
+    ) -> PricingTableDto {
+        let failure = error.failure_with_loaded_page(page_loaded);
         log::warn!(
             target: "ai_router::pricing",
-            "code=pricing_sync_failed error={error} source={source}"
+            "code=pricing_sync_failed error={error} kind={} reason={} page_loaded={page_loaded} source={source}",
+            failure_kind(failure.category.into()),
+            failure.reason.as_deref().unwrap_or("-"),
         );
+        // The failure is stored before the status starts projecting it.
+        self.store_failure(failure);
         SyncStatus::Error.store(&self.status);
         self.snapshot()
     }
@@ -411,13 +480,18 @@ impl PricingSyncCoordinator {
     }
 
     /// Renders one URL in the hidden window and waits for the script's report.
-    async fn render(&self, app: &AppHandle, url: &Url) -> Result<Vec<u8>, CaptureError> {
+    async fn render(
+        &self,
+        app: &AppHandle,
+        url: &Url,
+        page_loaded: Arc<AtomicBool>,
+    ) -> Result<Vec<u8>, CaptureError> {
         // A leaked window from an aborted run must never block the next one.
         if let Some(existing) = app.get_webview_window(SYNC_WINDOW_LABEL) {
             let _ = existing.destroy();
         }
         let (signals, mut receiver) = unbounded_channel();
-        let window = build_capture_window(app, url, signals).map_err(|error| {
+        let window = build_capture_window(app, url, signals, page_loaded).map_err(|error| {
             log::warn!(
                 target: "ai_router::pricing",
                 "code=pricing_sync_window_failed error={error}"
@@ -435,13 +509,24 @@ impl PricingSyncCoordinator {
     }
 }
 
+/// The log token of one failure class; the DTO keeps the same spellings.
+const fn failure_kind(kind: PricingTableFailureKindDto) -> &'static str {
+    match kind {
+        PricingTableFailureKindDto::Transport => "transport",
+        PricingTableFailureKindDto::Page => "page",
+        PricingTableFailureKindDto::Store => "store",
+    }
+}
+
 /// Builds the hidden, isolated window that renders the capture target.
 fn build_capture_window(
     app: &AppHandle,
     target: &Url,
     signals: UnboundedSender<CaptureSignal>,
+    page_loaded: Arc<AtomicBool>,
 ) -> tauri::Result<WebviewWindow> {
     let navigation_target = target.clone();
+    let page_target = target.clone();
     WebviewWindowBuilder::new(app, SYNC_WINDOW_LABEL, WebviewUrl::External(target.clone()))
         .title(SYNC_WINDOW_TITLE)
         .visible(false)
@@ -453,6 +538,19 @@ fn build_capture_window(
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .on_download(|_, _| false)
         .initialization_script(CAPTURE_SCRIPT)
+        // `Finished` for the capture target itself is evidence the document
+        // loaded; it says nothing about whether the page rendered the pricing
+        // controls, so it only ever feeds failure classification and never a
+        // success. The webview also finishes the blank document it starts with,
+        // and a failed navigation keeps that document, so any other URL is not
+        // evidence that the target page was reachable.
+        .on_page_load(move |_, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished)
+                && same_page(&page_target, payload.url())
+            {
+                page_loaded.store(true, Ordering::Release);
+            }
+        })
         .on_navigation(
             move |url| match navigation_decision(&navigation_target, url) {
                 NavigationDecision::Allow => true,
@@ -490,6 +588,8 @@ mod tests {
     const SYNCED_AT_MS: i64 = 1_790_000_000_000;
     const PAGE: &str = include_str!("../../fixtures/pricing-capture-page.html");
     const PAYLOAD: &[u8] = include_bytes!("../../fixtures/pricing-capture-payload.json");
+    /// The loopback page `serve_fixture` stands in for in a capture run.
+    const LOOPBACK_FIXTURE: &str = "http://127.0.0.1:8080/api/docs/pricing/";
 
     #[derive(Default)]
     struct RecordingEventSink(Mutex<Vec<StateChangedEventDto>>);
@@ -682,23 +782,22 @@ mod tests {
     }
 
     #[test]
-    fn the_loopback_fixture_synchronizes_the_local_table_end_to_end() {
-        let fixture = Fixture::new();
+    fn the_fixture_page_is_the_source_the_capture_payload_bills() {
         let (base, server) = serve_fixture();
-        let target = resolve_capture_url(production(), Some(&base));
-        let CaptureTarget::Override(url) = target else {
-            panic!("a loopback override must be accepted");
-        };
-        assert_eq!(url.as_str(), base);
+        let url = Url::parse(&base).expect("the fixture URL parses");
 
         // The fixture really is the page the extraction script reads: it renders
         // the segmented controls, keeps the unselected panes hidden, and names
-        // every model the reported payload bills.
+        // every model the reported payload bills. The visible tier labels are
+        // the 2026-09-30 ones (`Fast`, plus the unsynchronized `Ultrafast`); the
+        // script matches on `data-value`, so renaming a label cannot break it.
         let page = fetch(&url);
         for marker in [
             "class=\"content-switcher-root\"",
             "role=\"radio\"",
-            ">Fast mode<",
+            "data-value=\"fast\"",
+            ">Fast<",
+            ">Ultrafast<",
             "hidden",
         ] {
             assert!(page.contains(marker), "the fixture page renders {marker}");
@@ -711,12 +810,37 @@ mod tests {
                 assert!(page.contains(id), "the fixture page renders {id}");
             }
         }
+        server.join().expect("the fixture server stops");
+    }
+
+    #[test]
+    fn the_loopback_fixture_synchronizes_the_local_table_end_to_end() {
+        let fixture = Fixture::new();
+        // A QA loopback override is the page a run renders; the companion test
+        // above proves the fixture it serves is the page the payload bills.
+        let CaptureTarget::Override(url) =
+            resolve_capture_url(production(), Some(LOOPBACK_FIXTURE))
+        else {
+            panic!("a loopback override must be accepted");
+        };
+        assert_eq!(url.as_str(), LOOPBACK_FIXTURE);
 
         let hints = fixture
             .coordinator
             .apply_capture(PAYLOAD, SYNCED_AT_MS, url.as_str())
             .expect("the captured payload applies");
-        assert!(hints.is_empty(), "{hints:?}");
+        // The regenerated page prices `gpt-6.1-sol` cached input at 5% of its
+        // input rate in both bands of both tiers; the advisory ratio check
+        // records that without rejecting the capture.
+        let advisories: Vec<_> = hints
+            .iter()
+            .map(|hint| (hint.model_id.as_str(), hint.detail))
+            .collect();
+        assert_eq!(
+            advisories,
+            [("gpt-6.1-sol", "cached_input_is_not_10_percent_of_input"); 4],
+            "the ratio advisories stay advisory"
+        );
         assert!(matches!(
             fixture.store().load(),
             LocalPricingLoad::Loaded(_)
@@ -727,6 +851,10 @@ mod tests {
         assert_eq!(snapshot.local_state, PricingLocalStateDto::Loaded);
         assert_eq!(snapshot.synced_at_ms, Some(SYNCED_AT_MS));
         assert_eq!(snapshot.source_url.as_deref(), Some(url.as_str()));
+        assert_eq!(
+            snapshot.failure, None,
+            "a successful run records no failure"
+        );
         // A family the page bills under another id keeps pricing with the
         // bundled baseline: the captured `chat-latest` row never reaches the
         // local table.
@@ -742,6 +870,9 @@ mod tests {
             .iter()
             .filter(|row| row.source == PricingRowSourceDto::Official)
             .collect();
+        // The settings table projects the default tier: the payload's six
+        // Standard models expand to nine band rows, and dropping the non-GPT
+        // `chat-latest` leaves these eight official rows.
         assert_eq!(official.len(), 8);
         assert!(official.iter().all(|row| row.model_id.starts_with("gpt-")));
         assert!(official.iter().any(|row| {
@@ -785,7 +916,6 @@ mod tests {
         assert_eq!(priced.amount_pico_usd, Some(2_770_000_000_000));
 
         assert_eq!(fixture.published_areas(), vec![StateArea::PricingTable]);
-        server.join().expect("the fixture server stops");
     }
 
     #[test]
@@ -828,6 +958,103 @@ mod tests {
             }
             other => panic!("expected the first capture on disk, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_script_failure_without_a_finished_page_load_is_a_transport_failure() {
+        let fixture = Fixture::new();
+        let script = CaptureError::Failed("pricing-families-not-found".to_owned());
+
+        // The script reads an error document exactly like it reads the pricing
+        // page, so the coordinator only reports a page failure once the document
+        // finished loading.
+        let unloaded = fixture
+            .coordinator
+            .report_failure(&production(), &script, false);
+        assert_eq!(unloaded.status, PricingTableStatusDto::Error);
+        assert_eq!(
+            unloaded.failure,
+            Some(PricingTableFailureDto {
+                kind: PricingTableFailureKindDto::Transport,
+                reason: None,
+            })
+        );
+
+        let loaded = fixture
+            .coordinator
+            .report_failure(&production(), &script, true);
+        assert_eq!(
+            loaded.failure,
+            Some(PricingTableFailureDto {
+                kind: PricingTableFailureKindDto::Page,
+                reason: Some("pricing-families-not-found".to_owned()),
+            })
+        );
+
+        // A budget expiry after a finished load is a page problem too: the site
+        // was reachable, the page just never produced a report.
+        let timed_out =
+            fixture
+                .coordinator
+                .report_failure(&production(), &CaptureError::Timeout, true);
+        assert_eq!(
+            timed_out.failure,
+            Some(PricingTableFailureDto {
+                kind: PricingTableFailureKindDto::Page,
+                reason: Some("capture-no-report".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn the_snapshot_exposes_a_failure_only_while_the_status_is_error() {
+        let fixture = Fixture::new();
+        let initial = fixture.coordinator.snapshot();
+        assert_eq!(initial.status, PricingTableStatusDto::Idle);
+        assert_eq!(initial.failure, None, "nothing has failed yet");
+
+        let failed =
+            fixture
+                .coordinator
+                .report_failure(&production(), &CaptureError::Structure, true);
+        assert_eq!(failed.status, PricingTableStatusDto::Error);
+        assert_eq!(
+            failed.failure,
+            Some(PricingTableFailureDto {
+                kind: PricingTableFailureKindDto::Page,
+                reason: Some("capture-structure".to_owned()),
+            })
+        );
+        assert_eq!(
+            fixture.coordinator.snapshot().failure,
+            failed.failure,
+            "the stored failure is what the error status explains"
+        );
+
+        // A successful capture supersedes it: the status leaves `error` and the
+        // failure stops being projected.
+        let hints = fixture
+            .coordinator
+            .apply_capture(PAYLOAD, SYNCED_AT_MS, PRODUCTION)
+            .expect("the captured payload applies");
+        let recovered = fixture.coordinator.report_success(&hints);
+        assert_eq!(recovered.status, PricingTableStatusDto::Idle);
+        assert_eq!(recovered.failure, None);
+        assert_eq!(fixture.coordinator.snapshot().failure, None);
+
+        // The cleared failure is gone, not merely hidden: a later failure is
+        // the one the snapshot explains.
+        let failed =
+            fixture
+                .coordinator
+                .report_failure(&production(), &CaptureError::Timeout, false);
+        assert_eq!(
+            failed.failure,
+            Some(PricingTableFailureDto {
+                kind: PricingTableFailureKindDto::Transport,
+                reason: None,
+            })
+        );
     }
 
     #[tokio::test]

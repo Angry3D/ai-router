@@ -18,16 +18,16 @@
       }
     },
     {
-      "id": "gpt-6-sol",
+      "id": "gpt-6.1-sol",
       "short": {
         "input": "$2.00",
-        "cachedInput": "$0.20",
+        "cachedInput": "$0.10",
         "cacheWrite": "$2.50",
         "output": "$10.00"
       },
       "long": {
         "input": "$4.00",
-        "cachedInput": "$0.40",
+        "cachedInput": "$0.20",
         "cacheWrite": "$5.00",
         "output": "$15.00"
       }
@@ -89,16 +89,16 @@
       }
     },
     {
-      "id": "gpt-6-sol",
+      "id": "gpt-6.1-sol",
       "short": {
         "input": "$4.00",
-        "cachedInput": "$0.40",
+        "cachedInput": "$0.20",
         "cacheWrite": "$5.00",
         "output": "$20.00"
       },
       "long": {
         "input": "$8.00",
-        "cachedInput": "$0.80",
+        "cachedInput": "$0.40",
         "cacheWrite": "$10.00",
         "output": "$30.00"
       }

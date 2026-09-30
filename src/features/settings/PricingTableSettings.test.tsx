@@ -62,6 +62,7 @@ function snapshot(overrides: Partial<PricingTableDto> = {}): PricingTableDto {
     sourceUrl: "https://developers.openai.com/api/docs/pricing/",
     localState: "loaded",
     status: "idle",
+    failure: null,
     ...overrides,
   };
 }
@@ -74,7 +75,13 @@ function bundledSnapshot(): PricingTableDto {
     sourceUrl: null,
     localState: "missing",
     status: "idle",
+    failure: null,
   };
+}
+
+/** The status-line copy a failed snapshot shows for the given failure. */
+function failureCopy(failure: PricingTableDto["failure"]): string {
+  return pricingPresentation(snapshot({ status: "error", failure })).actionText;
 }
 
 function renderSection(value: PricingTableDto | null) {
@@ -161,12 +168,54 @@ describe("pricing presentation", () => {
       actionText: "正在访问官网…",
       actionTone: "neutral",
     });
-    expect(pricingPresentation(snapshot({ status: "error" }))).toEqual({
+    expect(pricingPresentation(snapshot({ status: "error", failure: null }))).toEqual({
       sectionLabel: "已同步 · 2026-09-29 21:40",
       sectionTone: "neutral",
       actionText: "同步失败：官网暂时无法访问，已保留上次数据。",
       actionTone: "danger",
     });
+  });
+
+  it("maps every failure kind to the approved copy", () => {
+    expect(failureCopy({ kind: "page", reason: "pricing-families-not-found" })).toBe(
+      "同步失败：官网页面结构变化（pricing-families-not-found），已保留上次数据。",
+    );
+    expect(failureCopy({ kind: "page", reason: null })).toBe(
+      "同步失败：官网页面结构变化，已保留上次数据。",
+    );
+    expect(failureCopy({ kind: "page", reason: "" })).toBe(
+      "同步失败：官网页面结构变化，已保留上次数据。",
+    );
+    expect(failureCopy({ kind: "page", reason: "   " })).toBe(
+      "同步失败：官网页面结构变化，已保留上次数据。",
+    );
+    expect(failureCopy({ kind: "store", reason: null })).toBe(
+      "同步失败：本地价格表写入失败，已保留上次数据。",
+    );
+    expect(failureCopy({ kind: "transport", reason: null })).toBe(
+      "同步失败：官网暂时无法访问，已保留上次数据。",
+    );
+    expect(failureCopy(null)).toBe(
+      "同步失败：官网暂时无法访问，已保留上次数据。",
+    );
+    expect(
+      pricingPresentation(
+        snapshot({
+          status: "error",
+          failure: { kind: "page", reason: "pricing-families-not-found" },
+        }),
+      ).actionTone,
+    ).toBe("danger");
+  });
+
+  it("bounds the page diagnostic shown in the status line", () => {
+    const reason = "capture-missing-column-012345678";
+    expect(failureCopy({ kind: "page", reason })).toBe(
+      `同步失败：官网页面结构变化（${reason}），已保留上次数据。`,
+    );
+    expect(failureCopy({ kind: "page", reason: `${reason}9` })).toBe(
+      "同步失败：官网页面结构变化（capture-missing-column-01234567…），已保留上次数据。",
+    );
   });
 });
 
@@ -268,7 +317,7 @@ describe("pricing settings section", () => {
   });
 
   it("announces bounded failure copy without changing the table", () => {
-    renderSection(snapshot({ status: "error" }));
+    renderSection(snapshot({ status: "error", failure: null }));
 
     expect(
       screen.getByText("同步失败：官网暂时无法访问，已保留上次数据。"),
@@ -282,6 +331,54 @@ describe("pricing settings section", () => {
     expect(
       screen.getByRole("button", { name: "同步官网" }).querySelector(".spin"),
     ).toBeNull();
+  });
+
+  it("names the page failure with its bounded reason code", () => {
+    renderSection(
+      snapshot({
+        status: "error",
+        failure: {
+          kind: "page",
+          reason: "capture-missing-column-0123456789",
+        },
+      }),
+    );
+
+    const status = screen.getByText(
+      "同步失败：官网页面结构变化（capture-missing-column-01234567…），已保留上次数据。",
+    );
+    expect(status).toHaveClass("settings-status-danger");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(
+      within(screen.getByRole("table")).getAllByRole("row").slice(1),
+    ).toHaveLength(3);
+  });
+
+  it("names a store failure without leaking a page diagnostic", () => {
+    renderSection(
+      snapshot({
+        status: "error",
+        failure: { kind: "store", reason: "capture-missing-column" },
+      }),
+    );
+
+    const status = screen.getByText(
+      "同步失败：本地价格表写入失败，已保留上次数据。",
+    );
+    expect(status).toHaveClass("settings-status-danger");
+    expect(status).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("hides failure copy on snapshots that are not in error", () => {
+    // `failure` is contract-bound to `error`; the status line keys off `status`.
+    const loaded = renderSection(
+      snapshot({ failure: { kind: "transport", reason: null } }),
+    );
+    expect(loaded.queryByText(/同步失败/)).toBeNull();
+    loaded.unmount();
+
+    const syncing = renderSection(snapshot({ status: "syncing" }));
+    expect(syncing.queryByText(/同步失败/)).toBeNull();
   });
 
   it("shows only bundled rows when the local table is unusable", () => {

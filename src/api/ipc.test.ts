@@ -86,6 +86,7 @@ describe("pricing table commands", () => {
       sourceUrl: null,
       localState: "missing",
       status: "idle",
+      failure: null,
     };
     tauri.invoke.mockResolvedValueOnce(snapshot);
 

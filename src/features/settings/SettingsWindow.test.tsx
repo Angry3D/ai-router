@@ -41,6 +41,7 @@ const ipc = vi.hoisted(() => ({
     sourceUrl: null,
     localState: "missing",
     status: "idle",
+    failure: null,
   })),
   getApplicationUpdateSnapshot: vi.fn(),
   getRouteEdit: vi.fn(),
