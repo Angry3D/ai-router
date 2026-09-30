@@ -41,7 +41,12 @@ Issue。
 
 本地代理只监听 loopback。API Key 以原始字节存入私有权限的 SQLite 文件，当前不使用 Keychain 或
 应用层加密；恢复点也包含关键配置。运行日志被设计为只记录有界固定码，但完整文件仍按敏感材料处理。
-更多边界见 [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)。
+
+「Codex 凭证」功能有意引入两个本地读取面：以只读方式读取本机 Chrome 系浏览器的 Cookie 数据库，
+并通过系统钥匙串读取浏览器的安全存储密钥（`Chrome Safe Storage`）。首次读取会触发系统授权弹窗，
+用户拒绝时失败关闭并显示稳定错误码；解密的 Cookie 值与会话令牌只在内存中存在并清零，不写入日志、
+诊断、恢复点或请求历史。该功能只处理 `chatgpt.com` 的会话 Cookie，且要求用户本机已登录
+chatgpt.com。更多边界见 [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)。
 
 官方应用内更新同时依赖 canonical GitHub HTTPS 边界和项目 updater 签名。ad-hoc macOS 签名、
 SHA-256 或 provenance 都不能单独替代 updater 签名校验。签名私钥与密码只存在于需要人工批准的

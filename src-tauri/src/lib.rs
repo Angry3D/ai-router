@@ -1,4 +1,5 @@
 mod application_update;
+mod codex_auth_session;
 mod popover;
 mod pricing_sync;
 mod runtime;
@@ -31,14 +32,14 @@ use runtime::{
     DesktopLifecycleServices, DesktopRecoveryWiring, DesktopRuntimeProfile, RecoveryIdleWindow,
     RuntimeLogController, SafeRuntimeDiagnosticSink, activate_existing_instance, apply_proxy_port,
     check_route_reachability, clear_mcp_images, clear_request_history, clear_runtime_logs,
-    confirm_codex_images_mcp_repair, confirm_reset_codex_recovery_to_baseline,
-    confirm_route_activation, confirm_update_codex_recovery, connect_codex, create_recovery_point,
-    delete_route, dismiss_codex_restart_notice, dismiss_mcp_image_capacity_warning,
-    fetch_route_models, finish_runtime_log_setup, get_menu_snapshot, get_pricing_table,
-    get_recovery_snapshot, get_route_edit, get_settings_snapshot, get_usage_history,
-    get_usage_request_detail, get_usage_route_options, get_usage_statistics,
-    mark_first_run_presented, open_codex_config, open_mcp_image_directory,
-    open_runtime_log_directory, preview_codex_images_mcp_repair,
+    codex_auth_export, codex_auth_restore, confirm_codex_images_mcp_repair,
+    confirm_reset_codex_recovery_to_baseline, confirm_route_activation,
+    confirm_update_codex_recovery, connect_codex, create_recovery_point, delete_route,
+    dismiss_codex_restart_notice, dismiss_mcp_image_capacity_warning, fetch_route_models,
+    finish_runtime_log_setup, get_menu_snapshot, get_pricing_table, get_recovery_snapshot,
+    get_route_edit, get_settings_snapshot, get_usage_history, get_usage_request_detail,
+    get_usage_route_options, get_usage_statistics, mark_first_run_presented, open_codex_config,
+    open_mcp_image_directory, open_runtime_log_directory, preview_codex_images_mcp_repair,
     preview_reset_codex_recovery_to_baseline, preview_route_activation,
     preview_update_codex_recovery, quit_application, reconnect_codex, refresh_all_balances,
     refresh_balance, reorder_routes_and_fallback, restore_codex, restore_recovery_point,
@@ -830,6 +831,8 @@ pub fn run() {
             sync_pricing_from_web,
             get_menu_snapshot,
             get_settings_snapshot,
+            codex_auth_export,
+            codex_auth_restore,
             get_usage_history,
             get_usage_statistics,
             get_usage_route_options,

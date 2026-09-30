@@ -3,6 +3,7 @@ use ts_rs::TS;
 
 pub mod app_api;
 pub mod balance;
+pub mod codex_auth;
 pub mod codex_catalog;
 pub mod codex_config;
 pub mod domain;

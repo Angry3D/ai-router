@@ -9,6 +9,7 @@
 | 单个 React 组件/工具                                | 对应 Vitest、`pnpm typecheck`、`pnpm lint`                            |
 | 单个 Rust 模块                                      | 对应 `cargo test` filter、`cargo fmt --check`、受影响 crate 的 Clippy |
 | Rust/TypeScript DTO                                 | producer/consumer 测试、`pnpm generate:types`、前后端静态检查         |
+| Codex 凭证（Cookie 解密与 `auth.json` 写入）        | 对应 Rust 模块测试、前端设置测试、`pnpm generate:types`、前后端静态检查；真实 Chrome 与钥匙串授权属于人工 QA |
 | Web 入口或 bundler                                  | 前端全测、`pnpm build`                                                |
 | schema、恢复、路由并发、SSE、native lifecycle、发布 | 对应领域完整测试和 workspace 检查；必要时 QA `.app`                   |
 
@@ -48,6 +49,20 @@ cargo test --workspace
   校验、取消期间共享许可、六字段错误状态来源，以及成功八字段兼容和 HTTP 字节透传。网络测试只使用
   合成响应与本地 TLS 服务，测试连接映射不能成为生产环境的本机地址例外。
 - Codex 配置：基线不可变、provider identity、无关字段保留、symlink、fingerprint 竞态和精确恢复。
+- Codex 凭证：用测试密钥构造的合成 Cookie 数据库做 `v10` 解密往返（PBKDF2-SHA1/AES-128-CBC 与
+  host 哈希前缀校验）、未知前缀拒绝、浏览器/配置发现的三类失败关闭、`auth.json` 结构校验（字段
+  集合、三段 `id_token`、`account_id`/`expires` 映射）、`cli_auth_credentials_store` 与托管锁拒绝、
+  备份与还原字节相等、最近 5 份保留、symlink 拒绝、写入前 fingerprint 漂移和外部修改检测，以及
+  过期状态；会话端点覆盖的 QA loopback 覆写限定本机回环。测试只使用临时 `CODEX_HOME` 与合成数据，
+  不访问真实 Chrome、钥匙串、`chatgpt.com` 或真实 `~/.codex`。真实站点可达性、钥匙串授权弹窗、
+  Codex TUI 登录门和秘密扫描属于人工 QA。2026-09-30 的人工 QA（dev/QA 隔离 profile + 真实 Chrome
+  会话）：导出只落在隔离 `codex-home`（登录/凭据目标路径与生产 `~/.codex` 相互独立），
+  `codex login status` 在 `codex-cli` 0.157.1 与当前 stable 0.159.2 均报 ChatGPT 登录，pty 捕获的
+  交互式 TUI 无登录屏；日志、恢复点与 `codex-auth-meta.json` 秘密扫描无令牌材料，`pnpm security:check`
+  通过。钥匙串拒绝与"Chrome 未登录"两项未在真机重放（等价错误分类由自动化覆盖）。同次 QA 中，
+  `cli_auth_credentials_store = "keyring"` 时导出被拒绝且 `auth.json`/元数据字节与 mtime 完全未变
+  （拒绝发生在读取钥匙串与任何网络请求之前），随后「还原原凭证」写回的字节与所选备份逐字节相等，
+  导出事实被清空并回到未导出状态。
 - 价格同步：档位匹配器矩阵（`data-value` 稳定标识优先于可见文案，2026-09-29 的 `Fast mode`
   形态仍能命中）、脚本契约在 jsdom 中对刷新后的复刻页抽取并与重新生成的负载 fixture 逐字节
   比对、解析负例（缺列/坏数字/重复/阈值冲突/超限）、loopback fixture 的端到端替换与

@@ -12,6 +12,7 @@ import type {
   BalanceResult,
   BalanceTestInputDto,
   BootstrapSnapshotDto,
+  CodexAuthStatusDto,
   CodexImagesMcpRepairPreviewDto,
   CodexRecoveryResetPreviewDto,
   CodexRecoveryUpdatePreviewDto,
@@ -50,6 +51,8 @@ export const IPC_COMMANDS = {
   getBootstrapSnapshot: "get_bootstrap_snapshot",
   getMenuSnapshot: "get_menu_snapshot",
   getSettingsSnapshot: "get_settings_snapshot",
+  codexAuthExport: "codex_auth_export",
+  codexAuthRestore: "codex_auth_restore",
   getApplicationUpdateSnapshot: "get_application_update_snapshot",
   checkApplicationUpdate: "check_application_update",
   downloadAndInstallApplicationUpdate:
@@ -156,6 +159,14 @@ export async function getMenuSnapshot(): Promise<MenuSnapshotDto> {
 
 export async function getSettingsSnapshot(): Promise<SettingsSnapshotDto> {
   return invoke<SettingsSnapshotDto>(IPC_COMMANDS.getSettingsSnapshot);
+}
+
+export async function codexAuthExport(): Promise<CodexAuthStatusDto> {
+  return invoke<CodexAuthStatusDto>(IPC_COMMANDS.codexAuthExport);
+}
+
+export async function codexAuthRestore(): Promise<CodexAuthStatusDto> {
+  return invoke<CodexAuthStatusDto>(IPC_COMMANDS.codexAuthRestore);
 }
 
 export async function updateMenuBarSettings(

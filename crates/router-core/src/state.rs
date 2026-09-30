@@ -93,6 +93,7 @@ pub enum StateArea {
     Proxy,
     OutboundProxy,
     CodexConnection,
+    CodexAuth,
     CodexCatalog,
     CodexRestartNotice,
     RequestHistorySummary,

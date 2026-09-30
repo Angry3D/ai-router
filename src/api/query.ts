@@ -80,6 +80,7 @@ const keysByArea: Record<StateArea, ReadonlyArray<readonly unknown[]>> = {
     queryKeys.menu,
     queryKeys.settings,
   ],
+  codex_auth: [queryKeys.settings],
   codex_catalog: [queryKeys.route, queryKeys.menu, queryKeys.settings],
   codex_restart_notice: [queryKeys.menu],
   request_history_summary: [

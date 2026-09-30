@@ -6,6 +6,7 @@ use ts_rs::TS;
 use crate::storage::CodexModelRecord;
 use crate::{
     balance::{BalanceDisplaySnapshot, BalanceQueryMode, BalanceRefreshBatchState},
+    codex_auth::CodexAuthStatusDto,
     codex_config::CodexConfigStatus,
     domain::{
         BalanceQueryPolicy, CompletionState, DeliveryState, ModelVerdict, OutboundProxyConfig,
@@ -1103,6 +1104,7 @@ pub struct SettingsSnapshotDto {
     pub proxy_port: u16,
     pub outbound_proxy: OutboundProxySettingsDto,
     pub codex_status: CodexConfigStatus,
+    pub codex_auth: CodexAuthStatusDto,
     pub baseline: CodexBaselineSummaryDto,
     pub original_backup: CodexBaselineSummaryDto,
     pub recovery_config: CodexRecoverySummaryDto,

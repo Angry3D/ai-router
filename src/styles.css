@@ -2653,6 +2653,20 @@ body[data-view="settings"] .app-variant-badge {
   line-height: 18px;
 }
 
+.codex-auth-message {
+  margin: 8px 0 0;
+}
+
+.codex-auth-hint {
+  margin: 7px 0 0 calc(var(--settings-label-width) + var(--settings-field-gap));
+  line-height: 18px;
+}
+
+.settings-section > .codex-auth-message + .settings-action-group,
+.settings-section > .codex-auth-hint + .settings-action-group {
+  margin-top: 10px;
+}
+
 .settings-section > .codex-recovery-actions {
   margin-left: calc(var(--settings-label-width) + var(--settings-field-gap));
 }

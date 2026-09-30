@@ -29,6 +29,10 @@ use router_core::{
         BalanceCoordinator, BalanceDisplaySnapshot, BalanceExecutor, BalanceQueryConfig,
         BalanceResult, BalanceRouteSource, BalanceTrigger,
     },
+    codex_auth::{
+        CodexAuthError, CodexAuthStatusDto, CodexAuthStore, SessionOutcome, classify_session_body,
+        read_session_cookies, resolve_codex_home, select_profile,
+    },
     codex_catalog::{
         CodexCatalogError, EffectiveCodexCatalog, LocalCodexCatalog, generate_codex_model_catalog,
     },
@@ -87,6 +91,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State, plugin::TauriPlugin};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
 use crate::application_update::ApplicationUpdateCoordinator;
+use crate::codex_auth_session::{CodexAuthSessionFetcher, read_safe_storage_key};
 use crate::pricing_sync::PricingSyncCoordinator;
 
 #[cfg(test)]
@@ -358,6 +363,8 @@ impl RecoveryEventSink for DesktopRecoveryEventSink {
 pub struct DesktopLifecycleServices {
     app_data_dir: PathBuf,
     codex_home: PathBuf,
+    codex_auth_home: PathBuf,
+    user_home: PathBuf,
     profile: DesktopRuntimeProfile,
     runtime_state: Arc<AppRuntimeState>,
     diagnostics: Arc<dyn RuntimeDiagnosticSink>,
@@ -383,6 +390,8 @@ pub struct DesktopLifecycleServices {
     balance_settings_write_gate: tokio::sync::Mutex<()>,
     outbound_proxy_settings_write_gate: tokio::sync::Mutex<()>,
     menu_bar_settings_write_gate: tokio::sync::Mutex<()>,
+    /// Serializes the Codex credential write path between the two IPC commands.
+    codex_auth_write_gate: tokio::sync::Mutex<()>,
     codex_model_retry: tokio::sync::Mutex<Option<CodexModelRetryPermit>>,
     codex_model_retry_generation: AtomicU64,
     route_activation_permit: tokio::sync::Mutex<Option<RouteActivationPermit>>,
@@ -469,6 +478,13 @@ impl DesktopLifecycleServices {
         recovery_wiring: DesktopRecoveryWiring,
     ) -> Arc<Self> {
         let codex_home = profile.codex_home(&app_data_dir, user_home);
+        // The credential target honours `CODEX_HOME` in production while an
+        // isolated QA profile stays inside its own data directory.
+        let codex_auth_home = if profile.is_isolated() {
+            app_data_dir.join("codex-home")
+        } else {
+            resolve_codex_home(std::env::var("CODEX_HOME").ok().as_deref(), user_home)
+        };
         let route_health = Arc::new(RouteHealthRegistry::new(
             Arc::new(router_core::proxy::SystemMonotonicClock::default()),
             runtime_state.clone(),
@@ -487,6 +503,8 @@ impl DesktopLifecycleServices {
         Arc::new(Self {
             app_data_dir,
             codex_home,
+            codex_auth_home,
+            user_home: user_home.to_path_buf(),
             profile,
             runtime_state,
             diagnostics,
@@ -511,6 +529,7 @@ impl DesktopLifecycleServices {
             balance_settings_write_gate: tokio::sync::Mutex::new(()),
             outbound_proxy_settings_write_gate: tokio::sync::Mutex::new(()),
             menu_bar_settings_write_gate: tokio::sync::Mutex::new(()),
+            codex_auth_write_gate: tokio::sync::Mutex::new(()),
             codex_model_retry: tokio::sync::Mutex::new(None),
             codex_model_retry_generation: AtomicU64::new(0),
             route_activation_permit: tokio::sync::Mutex::new(None),
@@ -1115,6 +1134,7 @@ impl DesktopLifecycleServices {
             proxy_port: settings.proxy_port,
             outbound_proxy: (&settings.outbound_proxy).into(),
             codex_status: self.codex_status().await?,
+            codex_auth: self.codex_auth_status(),
             baseline: baseline.as_ref().map_or(
                 CodexBaselineSummaryDto {
                     exists: false,
@@ -1171,6 +1191,95 @@ impl DesktopLifecycleServices {
             recovery: RecoveryHealthDto::from(&recovery.health()),
             menu_bar,
         })
+    }
+
+    fn codex_auth_store(&self) -> CodexAuthStore {
+        CodexAuthStore::new(self.codex_auth_home.clone(), &self.app_data_dir)
+    }
+
+    /// The exclusive permit for the credential write path.
+    ///
+    /// Both credential commands take it around their store write, so two IPC
+    /// calls can never back up and replace `auth.json` concurrently; the later
+    /// caller waits for the earlier one instead of duplicating work.
+    async fn codex_auth_write_permit(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.codex_auth_write_gate.lock().await
+    }
+
+    /// Projects the Codex credential status for the settings section.
+    #[must_use]
+    pub fn codex_auth_status(&self) -> CodexAuthStatusDto {
+        self.codex_auth_store().status(now_millis())
+    }
+
+    /// Acquires the `ChatGPT` web session and replaces `$CODEX_HOME/auth.json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable codex-auth IPC error for every fail-closed guard; no
+    /// file is written unless every step, including the post-write check,
+    /// succeeds.
+    pub async fn codex_auth_export(
+        &self,
+        app: &AppHandle,
+    ) -> Result<CodexAuthStatusDto, IpcErrorDto> {
+        let store = self.codex_auth_store();
+        store
+            .preflight()
+            .map_err(|error| map_codex_auth_error(&error))?;
+        let candidate =
+            select_profile(&self.user_home).map_err(|error| map_codex_auth_error(&error))?;
+        let service = candidate.keychain_service;
+        let key = tokio::task::spawn_blocking(move || read_safe_storage_key(service, "Chrome"))
+            .await
+            .map_err(|_| map_codex_auth_error(&CodexAuthError::KeychainDenied))?
+            .map_err(|error| map_codex_auth_error(&error))?;
+        let cookies =
+            read_session_cookies(&candidate, &key).map_err(|error| map_codex_auth_error(&error))?;
+        let fetcher = CodexAuthSessionFetcher::new(self.profile.is_isolated());
+        let body = fetcher
+            .fetch(app, &cookies)
+            .await
+            .map_err(|error| map_codex_auth_error(&error))?;
+        let session = match classify_session_body(&body) {
+            SessionOutcome::Authenticated(session) => session,
+            SessionOutcome::NotLoggedIn => {
+                return Err(map_codex_auth_error(&CodexAuthError::ProfileNotLoggedIn));
+            }
+            SessionOutcome::FetchFailed => {
+                return Err(map_codex_auth_error(&CodexAuthError::SessionFetchFailed));
+            }
+            SessionOutcome::Invalid => {
+                return Err(map_codex_auth_error(&CodexAuthError::SessionInvalid));
+            }
+        };
+        let status = {
+            let _permit = self.codex_auth_write_permit().await;
+            store
+                .export(&session, now_millis())
+                .map_err(|error| map_codex_auth_error(&error))?
+        };
+        self.runtime_state
+            .publish_background_change(vec![StateArea::CodexAuth]);
+        Ok(status)
+    }
+
+    /// Restores the newest backup over `$CODEX_HOME/auth.json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable codex-auth IPC error; the current file is kept on
+    /// failure.
+    pub async fn codex_auth_restore(&self) -> Result<CodexAuthStatusDto, IpcErrorDto> {
+        let status = {
+            let _permit = self.codex_auth_write_permit().await;
+            self.codex_auth_store()
+                .restore(now_millis())
+                .map_err(|error| map_codex_auth_error(&error))?
+        };
+        self.runtime_state
+            .publish_background_change(vec![StateArea::CodexAuth]);
+        Ok(status)
     }
 
     pub async fn usage_history(
@@ -3713,6 +3822,23 @@ pub async fn get_settings_snapshot(
 }
 
 #[tauri::command]
+#[allow(clippy::needless_pass_by_value, reason = "Tauri state injection")]
+pub async fn codex_auth_export(
+    app: AppHandle,
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+) -> Result<CodexAuthStatusDto, IpcErrorDto> {
+    services.codex_auth_export(&app).await
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value, reason = "Tauri state injection")]
+pub async fn codex_auth_restore(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+) -> Result<CodexAuthStatusDto, IpcErrorDto> {
+    services.codex_auth_restore().await
+}
+
+#[tauri::command]
 pub async fn update_mcp_image_capacity_threshold(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     threshold_mib: u32,
@@ -4751,6 +4877,41 @@ pub(crate) fn now_millis() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+/// Maps one codex-auth domain error to its stable IPC code and Chinese copy.
+fn map_codex_auth_error(error: &CodexAuthError) -> IpcErrorDto {
+    let message = match error {
+        CodexAuthError::BrowserMissing => {
+            "未检测到 Chrome 系浏览器。请安装或打开 Google Chrome 后重试。"
+        }
+        CodexAuthError::BrowserUnsupported => {
+            "检测到浏览器，但当前版本仅支持已验证的 Google Chrome。未做任何修改。"
+        }
+        CodexAuthError::UnsupportedEncryption => {
+            "浏览器 Cookie 加密格式暂不支持（可能是浏览器新版本变更）。未做任何修改。"
+        }
+        CodexAuthError::KeychainDenied => {
+            "钥匙串授权被拒绝。请重试并在系统弹窗中选择「始终允许」。"
+        }
+        CodexAuthError::CookieStoreUnreadable => "无法读取浏览器 Cookie 数据库（权限不足）。",
+        CodexAuthError::ProfileNotLoggedIn => {
+            "未检测到已登录的 Chrome 会话。请先在 Chrome 中登录 chatgpt.com，然后重试。"
+        }
+        CodexAuthError::SessionFetchFailed => {
+            "获取 ChatGPT 会话失败（网络异常或被拦截）。未做任何修改。"
+        }
+        CodexAuthError::SessionInvalid => "会话响应缺少必需字段，无法生成凭证。",
+        CodexAuthError::StoreModeUnsupported => {
+            "当前 Codex 未使用 file 模式存储凭证，无法通过 auth.json 替换。请改为 file 后重试。"
+        }
+        CodexAuthError::TargetConflict => {
+            "目标文件状态异常（符号链接或在写入前被修改），已停止且未覆盖。"
+        }
+        CodexAuthError::WriteFailed => "写入失败，原文件保持不变。",
+        CodexAuthError::RestoreFailed => "还原失败，原文件保持不变。",
+    };
+    ipc_error(error.code(), message, error.retryable())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -4828,6 +4989,33 @@ mod tests {
             Arc::new(AppRuntimeState::new(Arc::new(NoopEventSink))),
             Arc::new(NoopDiagnosticSink),
         )
+    }
+
+    #[tokio::test]
+    async fn codex_auth_write_gate_serializes_concurrent_writers() {
+        let directory = TempDir::new().expect("app data fixture");
+        let services = isolated_services(&directory);
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let held = services.codex_auth_write_permit().await;
+        let waiting = {
+            let services = Arc::clone(&services);
+            let order = Arc::clone(&order);
+            tokio::spawn(async move {
+                let _permit = services.codex_auth_write_permit().await;
+                order.lock().expect("order").push("second");
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            order.lock().expect("order").is_empty(),
+            "a second credential writer must wait for the permit"
+        );
+        order.lock().expect("order").push("first");
+        drop(held);
+        waiting.await.expect("second writer");
+        assert_eq!(*order.lock().expect("order"), vec!["first", "second"]);
     }
 
     async fn models_upstream_fixture(

@@ -594,6 +594,7 @@ describe("RouteEditor interactions", () => {
       "本地代理",
       "图片生成",
       "Codex 配置",
+      "Codex 凭证",
       "断开恢复配置",
       "模型价格",
     ]);
