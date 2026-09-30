@@ -10,11 +10,19 @@
  * `airouter-pricing-capture://v1/<base64url payload>`. Rust cancels that
  * navigation and parses the payload.
  *
- * Contract (verified against the live page in the C4 harness on 2026-09-29):
- * - only the families that render both a `Standard` and a `Fast mode`
- *   `button[role="radio"]` are synchronized; `Fast mode` is the renamed
- *   Priority tier (`service_tier: "priority"`). Families without both controls
- *   (image and other non-GPT families) are skipped;
+ * Contract (verified against the live page on 2026-09-30):
+ * - the two synced tier controls are located by the identity the page declares,
+ *   not by their visible copy: a `button[role="radio"]` carrying
+ *   `data-content-switcher-option="true"` and `data-value="standard"`
+ *   (`standard`) or `data-value="fast"` (the Priority tier, legacy `priority`)
+ *   is matched first. Only when no radio carries a matching `data-value` does
+ *   the matcher fall back to the normalized (`textContent` or `aria-label`)
+ *   copy, so a rename such as the 2026-09-29 `Fast mode` to the 2026-09-30
+ *   `Fast` keeps working while the property stays stable;
+ * - only the families that render both a standard and a priority control are
+ *   synchronized; `data-value="fast"` reports `service_tier: "priority"`.
+ *   Families without both controls (image and other non-GPT families) are
+ *   skipped;
  * - only tables that are actually visible are read: an unselected pane carries
  *   `hidden` and keeps its rows in the DOM;
  * - a table's column layout comes from its header, never from a fixed offset:
@@ -52,7 +60,15 @@
     ["aria-selected", "true"],
     ["data-state", "checked"],
   ];
-  const TIER_LABELS = { standard: "Standard", priority: "Fast mode" };
+  // Stable identity first: the page declares each tier control with
+  // `data-content-switcher-option="true"` and the `data-value` the payload
+  // contract uses. The visible copy is only a fallback, because the page
+  // renames it freely (`Fast mode` became `Fast` on 2026-09-30).
+  const TIER_VALUES = { standard: ["standard"], priority: ["fast", "priority"] };
+  const TIER_COPIES = {
+    standard: ["standard"],
+    priority: ["fast", "fast mode", "priority"],
+  };
   const TIER_ORDER = ["standard", "priority"];
   const MODEL_PATTERN = /^model$/i;
   const LONG_BAND_PATTERN = /long(?:\s*|-)?context|^long$/i;
@@ -161,12 +177,29 @@
       .join("|");
   }
 
-  function findRadio(root, label) {
+  /**
+   * Locates one tier control of a family. The stable identity wins: a radio
+   * that declares `data-content-switcher-option="true"` and the tier's
+   * `data-value`. The visible copy (`textContent`, then `aria-label`) is only a
+   * fallback, so the matcher survives copy changes such as `Fast mode` to
+   * `Fast`.
+   */
+  function findRadio(root, tier) {
     const radios = Array.from(root.querySelectorAll(RADIO_SELECTOR));
+    const values = TIER_VALUES[tier];
+    const byValue = radios.find(
+      (radio) =>
+        radio.getAttribute("data-content-switcher-option") === "true" &&
+        values.includes(normalize(radio.getAttribute("data-value")).toLowerCase()),
+    );
+    if (byValue) return byValue;
+    const copies = TIER_COPIES[tier];
     return (
-      radios.find(
-        (radio) => text(radio) === label || normalize(radio.getAttribute("aria-label")) === label,
-      ) || null
+      radios.find((radio) => {
+        const copy = text(radio).toLowerCase();
+        const label = normalize(radio.getAttribute("aria-label")).toLowerCase();
+        return copies.includes(copy) || copies.includes(label);
+      }) || null
     );
   }
 
@@ -257,8 +290,8 @@
     let families = 0;
     for (const root of Array.from(document.querySelectorAll(FAMILY_SELECTOR))) {
       const controls = {
-        standard: findRadio(root, TIER_LABELS.standard),
-        priority: findRadio(root, TIER_LABELS.priority),
+        standard: findRadio(root, "standard"),
+        priority: findRadio(root, "priority"),
       };
       if (!controls.standard || !controls.priority) continue;
       families += 1;

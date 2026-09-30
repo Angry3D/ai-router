@@ -1,5 +1,8 @@
-import type { PricingTableDto } from "../../generated";
+import type { PricingTableDto, PricingTableFailureDto } from "../../generated";
 import type { SettingsTone } from "./SettingsPrimitives";
+
+/** Longest page diagnostic the status line shows; the log keeps it in full. */
+const MAX_FAILURE_REASON_CHARS = 32;
 
 export interface PricingPresentation {
   sectionLabel: string;
@@ -20,6 +23,25 @@ function syncedSectionLabel(snapshot: PricingTableDto): string {
   if (snapshot.localState !== "loaded") return "未同步";
   const syncedAt = formatSyncedAt(snapshot.syncedAtMs);
   return syncedAt ? `已同步 · ${syncedAt}` : "已同步";
+}
+
+/** Copy for a failed run; the page diagnostic is bounded for the status line. */
+function failureActionText(failure: PricingTableFailureDto | null): string {
+  if (failure?.kind === "store") {
+    return "同步失败：本地价格表写入失败，已保留上次数据。";
+  }
+  if (!failure || failure.kind !== "page") {
+    return "同步失败：官网暂时无法访问，已保留上次数据。";
+  }
+  const reason = failure.reason?.trim() ?? "";
+  if (!reason) return "同步失败：官网页面结构变化，已保留上次数据。";
+  // Clamping by character keeps a surrogate pair from being split.
+  const characters = Array.from(reason);
+  const shown =
+    characters.length > MAX_FAILURE_REASON_CHARS
+      ? `${characters.slice(0, MAX_FAILURE_REASON_CHARS - 1).join("")}…`
+      : reason;
+  return `同步失败：官网页面结构变化（${shown}），已保留上次数据。`;
 }
 
 export function pricingPresentation(
@@ -47,7 +69,7 @@ export function pricingPresentation(
     return {
       sectionLabel,
       sectionTone: "neutral",
-      actionText: "同步失败：官网暂时无法访问，已保留上次数据。",
+      actionText: failureActionText(snapshot.failure),
       actionTone: "danger",
     };
   }

@@ -12,6 +12,7 @@ use crate::{
         RouteId, RouteProtocol, ValidationError,
     },
     incident::{IncidentAction, IncidentRecord},
+    pricing_capture::CaptureFailureCategory,
     recovery::{DatabaseStartupIssue, RecoveryHealth, RecoveryHealthKind},
     state::{BootstrapSnapshotDto, FallbackStateDto, RouteSummaryDto},
     storage::{
@@ -1161,6 +1162,28 @@ pub enum PricingTableStatusDto {
     Error,
 }
 
+/// Stage of the synchronization pipeline the last failure belongs to.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PricingTableFailureKindDto {
+    Transport,
+    Page,
+    Store,
+}
+
+/// Why the last synchronization run failed, for the settings status line.
+///
+/// `reason` carries a bounded diagnostic only for a `page` failure; the other
+/// kinds never populate it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct PricingTableFailureDto {
+    pub kind: PricingTableFailureKindDto,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -1183,6 +1206,10 @@ pub struct PricingTableRowDto {
     pub source: PricingRowSourceDto,
 }
 
+/// Everything the settings pricing section renders for the local table.
+///
+/// `failure` is present only while `status` is `error`, and the next successful
+/// run clears it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -1193,6 +1220,17 @@ pub struct PricingTableDto {
     pub source_url: Option<String>,
     pub local_state: PricingLocalStateDto,
     pub status: PricingTableStatusDto,
+    pub failure: Option<PricingTableFailureDto>,
+}
+
+impl From<CaptureFailureCategory> for PricingTableFailureKindDto {
+    fn from(value: CaptureFailureCategory) -> Self {
+        match value {
+            CaptureFailureCategory::Transport => Self::Transport,
+            CaptureFailureCategory::Page => Self::Page,
+            CaptureFailureCategory::Store => Self::Store,
+        }
+    }
 }
 
 impl From<crate::pricing::CatalogRowSource> for PricingRowSourceDto {

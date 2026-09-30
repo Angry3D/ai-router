@@ -82,6 +82,95 @@ pub enum CaptureError {
     Store,
 }
 
+/// Stage of the synchronization pipeline a failed capture belongs to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureFailureCategory {
+    /// The hidden window could not reach or load the official page.
+    Transport,
+    /// The page loaded, but it did not report a usable capture.
+    Page,
+    /// The reported capture could not become the local pricing table.
+    Store,
+}
+
+/// A failed capture, classified for the settings view and the log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureFailure {
+    pub category: CaptureFailureCategory,
+    /// Diagnostic code of a page-class failure; sanitized and bounded by
+    /// [`MAX_CAPTURE_REASON_BYTES`]. Always `None` for the other categories.
+    pub reason: Option<String>,
+}
+
+impl CaptureError {
+    /// Classifies this error for the settings view.
+    ///
+    /// The category stays an enum so callers project it into their own DTO
+    /// instead of comparing strings; `reason` carries the extraction script's
+    /// own diagnostic for [`CaptureError::Failed`] and a stable kebab-case code
+    /// for every other page-class variant, so the view never renders raw error
+    /// text. It is cleaned and bounded exactly like the script-reported reason.
+    #[must_use]
+    pub fn failure(&self) -> CaptureFailure {
+        let page = |code: &str| CaptureFailure {
+            category: CaptureFailureCategory::Page,
+            reason: Some(bounded_reason(Some(code))),
+        };
+        match self {
+            Self::Window | Self::Closed | Self::Timeout => CaptureFailure {
+                category: CaptureFailureCategory::Transport,
+                reason: None,
+            },
+            Self::Failed(reason) => CaptureFailure {
+                category: CaptureFailureCategory::Page,
+                reason: Some(bounded_reason(Some(reason))),
+            },
+            Self::TooLarge => page("capture-too-large"),
+            Self::Malformed => page("capture-malformed"),
+            Self::NotCapture => page("capture-not-capture"),
+            Self::MissingColumn => page("capture-missing-column"),
+            Self::Money => page("capture-money"),
+            Self::Duplicate => page("capture-duplicate"),
+            Self::Threshold => page("capture-threshold"),
+            Self::Empty => page("capture-empty"),
+            Self::Magnitude => page("capture-magnitude"),
+            Self::Structure => page("capture-structure"),
+            Self::Store => CaptureFailure {
+                category: CaptureFailureCategory::Store,
+                reason: None,
+            },
+        }
+    }
+
+    /// Classifies this error with the page-loading evidence one run collected.
+    ///
+    /// The evidence separates a reachability problem from a page problem:
+    ///
+    /// - the extraction script reads an error document exactly like it reads the
+    ///   pricing page, so its [`CaptureError::Failed`] report only describes a
+    ///   page problem once the document actually finished loading;
+    /// - a run that never reported at all is a transport problem only while the
+    ///   document never finished loading. A page that loaded and still produced
+    ///   no report either renders no pricing controls (the script waits for them
+    ///   until its own deadline) or had its timers throttled inside the hidden
+    ///   window — neither is a network failure, so it is reported as a page
+    ///   failure carrying the `capture-no-report` diagnostic.
+    #[must_use]
+    pub fn failure_with_loaded_page(&self, page_loaded: bool) -> CaptureFailure {
+        match (self, page_loaded) {
+            (Self::Failed(_), false) => CaptureFailure {
+                category: CaptureFailureCategory::Transport,
+                reason: None,
+            },
+            (Self::Timeout, true) => CaptureFailure {
+                category: CaptureFailureCategory::Page,
+                reason: Some(bounded_reason(Some("capture-no-report"))),
+            },
+            _ => self.failure(),
+        }
+    }
+}
+
 /// One advisory ratio observation; the official page stays authoritative.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaptureHint {
@@ -546,9 +635,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        CAPTURE_SCHEME, CAPTURE_VERSION, CaptureError, CaptureHint, CaptureOutcome,
-        MAX_CAPTURE_PAYLOAD_BYTES, SHORT_BAND_MAXIMUM_TOKENS, decode_capture_navigation,
-        parse_capture_payload,
+        CAPTURE_SCHEME, CAPTURE_VERSION, CaptureError, CaptureFailure, CaptureFailureCategory,
+        CaptureHint, CaptureOutcome, MAX_CAPTURE_PAYLOAD_BYTES, MAX_CAPTURE_REASON_BYTES,
+        SHORT_BAND_MAXIMUM_TOKENS, decode_capture_navigation, parse_capture_payload,
     };
     use crate::pricing::{CatalogBand, CatalogTier, ModelRate};
 
@@ -572,6 +661,159 @@ mod tests {
         parse(mutate).expect("the capture is accepted")
     }
 
+    /// One model entry of a captured tier, found by identifier instead of by
+    /// position so a reordered page cannot silently retarget a mutation.
+    fn captured_model<'a>(payload: &'a mut Value, tier: &str, id: &str) -> &'a mut Value {
+        payload[tier]
+            .as_array_mut()
+            .expect("the tier is an array")
+            .iter_mut()
+            .find(|model| model["id"] == id)
+            .unwrap_or_else(|| panic!("the {tier} tier bills {id}"))
+    }
+
+    /// The advisory hints the regenerated payload itself records: the page
+    /// prices `gpt-6.1-sol` cached input at 5% of input in both bands.
+    fn sol_cached_ratio_hints() -> Vec<CaptureHint> {
+        [
+            (CatalogTier::Standard, CatalogBand::Short),
+            (CatalogTier::Standard, CatalogBand::Long),
+            (CatalogTier::Priority, CatalogBand::Short),
+            (CatalogTier::Priority, CatalogBand::Long),
+        ]
+        .into_iter()
+        .map(|(tier, band)| CaptureHint {
+            tier,
+            band,
+            model_id: "gpt-6.1-sol".to_owned(),
+            detail: "cached_input_is_not_10_percent_of_input",
+        })
+        .collect()
+    }
+
+    #[test]
+    fn capture_errors_classify_into_stable_failure_categories() {
+        for error in [
+            CaptureError::Window,
+            CaptureError::Closed,
+            CaptureError::Timeout,
+        ] {
+            assert_eq!(
+                error.failure(),
+                CaptureFailure {
+                    category: CaptureFailureCategory::Transport,
+                    reason: None,
+                },
+                "{error}"
+            );
+        }
+
+        assert_eq!(
+            CaptureError::Store.failure(),
+            CaptureFailure {
+                category: CaptureFailureCategory::Store,
+                reason: None,
+            }
+        );
+
+        for (error, code) in [
+            (CaptureError::TooLarge, "capture-too-large"),
+            (CaptureError::Malformed, "capture-malformed"),
+            (CaptureError::NotCapture, "capture-not-capture"),
+            (CaptureError::MissingColumn, "capture-missing-column"),
+            (CaptureError::Money, "capture-money"),
+            (CaptureError::Duplicate, "capture-duplicate"),
+            (CaptureError::Threshold, "capture-threshold"),
+            (CaptureError::Empty, "capture-empty"),
+            (CaptureError::Magnitude, "capture-magnitude"),
+            (CaptureError::Structure, "capture-structure"),
+        ] {
+            assert_eq!(
+                error.failure(),
+                CaptureFailure {
+                    category: CaptureFailureCategory::Page,
+                    reason: Some(code.to_owned()),
+                },
+                "{error}"
+            );
+        }
+
+        // The script's own diagnostic stays the reason, sanitized and bounded
+        // exactly like the capture path bounds it.
+        assert_eq!(
+            CaptureError::Failed("pricing-families-not-found".to_owned()).failure(),
+            CaptureFailure {
+                category: CaptureFailureCategory::Page,
+                reason: Some("pricing-families-not-found".to_owned()),
+            }
+        );
+        assert_eq!(
+            CaptureError::Failed("bad\u{0}\u{7}code".to_owned())
+                .failure()
+                .reason
+                .as_deref(),
+            Some("badcode"),
+            "control characters never reach the view"
+        );
+        let overlong = CaptureError::Failed("x".repeat(MAX_CAPTURE_REASON_BYTES * 2)).failure();
+        assert_eq!(
+            overlong.reason.as_deref().map(str::len),
+            Some(MAX_CAPTURE_REASON_BYTES),
+            "an over-long script reason is capped"
+        );
+    }
+
+    #[test]
+    fn loading_evidence_separates_transport_from_page_failures() {
+        // A report from a document that never finished loading describes the
+        // error document the script ran on, not the pricing page.
+        assert_eq!(
+            CaptureError::Failed("pricing-families-not-found".to_owned())
+                .failure_with_loaded_page(false),
+            CaptureFailure {
+                category: CaptureFailureCategory::Transport,
+                reason: None,
+            }
+        );
+        assert_eq!(
+            CaptureError::Failed("pricing-families-not-found".to_owned())
+                .failure_with_loaded_page(true),
+            CaptureFailure {
+                category: CaptureFailureCategory::Page,
+                reason: Some("pricing-families-not-found".to_owned()),
+            }
+        );
+
+        // A run that never reported is a transport failure only while the page
+        // never loaded; once it did, the page simply rendered no control the
+        // extraction waits for (or the hidden window throttled its timers),
+        // which is a page problem rather than an unreachable site.
+        assert_eq!(
+            CaptureError::Timeout.failure_with_loaded_page(false),
+            CaptureFailure {
+                category: CaptureFailureCategory::Transport,
+                reason: None,
+            }
+        );
+        assert_eq!(
+            CaptureError::Timeout.failure_with_loaded_page(true),
+            CaptureFailure {
+                category: CaptureFailureCategory::Page,
+                reason: Some("capture-no-report".to_owned()),
+            }
+        );
+
+        // Evidence never overrides a category the page cannot influence.
+        assert_eq!(
+            CaptureError::Store.failure_with_loaded_page(true),
+            CaptureError::Store.failure()
+        );
+        assert_eq!(
+            CaptureError::Structure.failure_with_loaded_page(false),
+            CaptureError::Structure.failure()
+        );
+    }
+
     #[test]
     fn fixture_payload_parses_into_the_synchronized_local_table() {
         let outcome = accepted(|_| {});
@@ -586,7 +828,10 @@ mod tests {
         );
         assert_eq!(outcome.table.synced_at_ms, SYNCED_AT_MS);
         assert_eq!(outcome.table.source_url, SOURCE_URL);
-        assert!(outcome.hints.is_empty(), "{:?}", outcome.hints);
+        // The 2026-09-30 page bills `gpt-6.1-sol` cached input at 5% of its
+        // input rate; the advisory ratio check records that without rejecting
+        // the capture, because the official page stays authoritative.
+        assert_eq!(outcome.hints, sol_cached_ratio_hints());
         assert!(outcome.table.validate().is_ok());
 
         let standard = &outcome.table.tiers.standard.models;
@@ -600,8 +845,8 @@ mod tests {
             [
                 "gpt-6-astra",
                 "gpt-6-astra",
-                "gpt-6-sol",
-                "gpt-6-sol",
+                "gpt-6.1-sol",
+                "gpt-6.1-sol",
                 "gpt-6-luna",
                 "gpt-6-luna",
                 "gpt-5.3-codex",
@@ -704,7 +949,7 @@ mod tests {
         for column in ["input", "cachedInput", "output"] {
             assert_eq!(
                 parse(|payload| {
-                    payload["standard"][0]["short"]
+                    captured_model(payload, "standard", "gpt-6-astra")["short"]
                         .as_object_mut()
                         .expect("the short band is an object")
                         .remove(column);
@@ -715,11 +960,12 @@ mod tests {
         }
         // A table that renders no cache-write column bills no cache-write rate.
         let without_cache_write = accepted(|payload| {
-            payload["standard"][0]["short"]
+            let astra = captured_model(payload, "standard", "gpt-6-astra");
+            astra["short"]
                 .as_object_mut()
                 .expect("the short band is an object")
                 .remove("cacheWrite");
-            payload["standard"][0]["long"]
+            astra["long"]
                 .as_object_mut()
                 .expect("the long band is an object")
                 .remove("cacheWrite");
@@ -733,15 +979,24 @@ mod tests {
             None
         );
         assert_eq!(
-            parse(|payload| payload["standard"][0]["short"]["input"] = json!("$1e3")),
+            parse(|payload| {
+                captured_model(payload, "standard", "gpt-6-astra")["short"]["input"] =
+                    json!("$1e3");
+            }),
             Err(CaptureError::Money)
         );
         assert_eq!(
-            parse(|payload| payload["standard"][0]["short"]["cachedInput"] = json!("-")),
+            parse(|payload| {
+                captured_model(payload, "standard", "gpt-6-astra")["short"]["cachedInput"] =
+                    json!("-");
+            }),
             Err(CaptureError::Money)
         );
         assert_eq!(
-            parse(|payload| payload["standard"][0]["short"]["volume"] = json!("$0.01")),
+            parse(|payload| {
+                captured_model(payload, "standard", "gpt-6-astra")["short"]["volume"] =
+                    json!("$0.01");
+            }),
             Err(CaptureError::Malformed)
         );
         assert_eq!(
@@ -781,7 +1036,9 @@ mod tests {
     #[test]
     fn parse_rejects_duplicate_or_missing_models() {
         assert_eq!(
-            parse(|payload| payload["standard"][1]["id"] = json!("gpt-6-astra")),
+            parse(|payload| {
+                captured_model(payload, "standard", "gpt-6.1-sol")["id"] = json!("gpt-6-astra");
+            }),
             Err(CaptureError::Duplicate)
         );
         assert_eq!(
@@ -838,7 +1095,10 @@ mod tests {
         // The embedded `gpt-6-luna` short input is `$0.10`; `$100.01` is more
         // than 1000 times that, so the capture is rejected instead of applied.
         assert_eq!(
-            parse(|payload| payload["standard"][2]["short"]["input"] = json!("$100.01")),
+            parse(|payload| {
+                captured_model(payload, "standard", "gpt-6-luna")["short"]["input"] =
+                    json!("$100.01");
+            }),
             Err(CaptureError::Magnitude)
         );
         // A model the embedded baseline does not know has nothing to compare.
@@ -861,32 +1121,36 @@ mod tests {
     #[test]
     fn parse_records_ratio_hints_without_rejecting_the_capture() {
         let outcome = accepted(|payload| {
-            payload["priority"][2]["short"]["cachedInput"] = json!("$0.03");
+            captured_model(payload, "priority", "gpt-6-luna")["short"]["cachedInput"] =
+                json!("$0.03");
         });
 
-        assert_eq!(
-            outcome.hints,
-            vec![CaptureHint {
-                tier: CatalogTier::Priority,
-                band: CatalogBand::Short,
-                model_id: "gpt-6-luna".to_owned(),
-                detail: "cached_input_is_not_10_percent_of_input",
-            }]
-        );
+        let mut expected = sol_cached_ratio_hints();
+        expected.push(CaptureHint {
+            tier: CatalogTier::Priority,
+            band: CatalogBand::Short,
+            model_id: "gpt-6-luna".to_owned(),
+            detail: "cached_input_is_not_10_percent_of_input",
+        });
+        assert_eq!(outcome.hints, expected);
         assert_eq!(outcome.table.tiers.priority.models[4].cached_input, 30_000);
 
         let long_band = accepted(|payload| {
-            payload["standard"][0]["long"]["output"] = json!("$80.00");
+            captured_model(payload, "standard", "gpt-6-astra")["long"]["output"] = json!("$80.00");
         });
-        assert_eq!(
-            long_band.hints,
-            vec![CaptureHint {
+        // `gpt-6-astra` is the first model of the first tier, so its long-band
+        // hint precedes the ones the payload itself records.
+        let mut expected = sol_cached_ratio_hints();
+        expected.insert(
+            0,
+            CaptureHint {
                 tier: CatalogTier::Standard,
                 band: CatalogBand::Long,
                 model_id: "gpt-6-astra".to_owned(),
                 detail: "long_output_is_not_1_5x_short_output",
-            }]
+            },
         );
+        assert_eq!(long_band.hints, expected);
         assert_eq!(long_band.table.tiers.standard.models[1].output, 80_000_000);
     }
 }

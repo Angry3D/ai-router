@@ -57,6 +57,8 @@ export type { PricingBandDto } from "./PricingBandDto";
 export type { PricingLocalStateDto } from "./PricingLocalStateDto";
 export type { PricingRowSourceDto } from "./PricingRowSourceDto";
 export type { PricingTableDto } from "./PricingTableDto";
+export type { PricingTableFailureDto } from "./PricingTableFailureDto";
+export type { PricingTableFailureKindDto } from "./PricingTableFailureKindDto";
 export type { PricingTableRowDto } from "./PricingTableRowDto";
 export type { PricingTableStatusDto } from "./PricingTableStatusDto";
 export type { ProxyRequestId } from "./ProxyRequestId";
