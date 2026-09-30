@@ -10,12 +10,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aes = "0.9.3"
 async-trait = "0.1"
 arc-swap = "1"
 axum = "0.8"
 base64 = "0.22"
 brotli = "8"
 bytes = "1"
+cbc = "0.2.1"
 chrono = { version = "0.4.45", default-features = false }
 chrono-tz = "0.10.4"
 flate2 = "1"
@@ -23,6 +25,7 @@ futures-util = "0.3"
 getrandom = "0.3"
 hex = "0.4"
 http-body = "1"
+pbkdf2 = "0.13.0"
 png = "0.18.1"
 reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "socks", "stream"] }
 rmcp = { version = "3.1.2", default-features = false, features = ["base64", "server", "transport-streamable-http-server"] }
@@ -31,6 +34,7 @@ rustix = { version = "1", features = ["fs"] }
 rusqlite = { version = "0.40", features = ["backup", "bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+sha1 = "0.11.0"
 sha2 = "0.11"
 subtle = "2"
 thiserror = "2"

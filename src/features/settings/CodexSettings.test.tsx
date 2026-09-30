@@ -10,7 +10,10 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createRouterQueryClient, queryKeys } from "../../api/query";
-import type { SettingsSnapshotDto } from "../../generated";
+import type {
+  CodexAuthStatusDto,
+  SettingsSnapshotDto,
+} from "../../generated";
 import {
   previewMenuSnapshot,
   previewRouteEdits,
@@ -32,6 +35,8 @@ const ipc = vi.hoisted(() => ({
   getRecoverySnapshot: vi.fn(),
   getRouteEdit: vi.fn(),
   getSettingsSnapshot: vi.fn(),
+  codexAuthExport: vi.fn(),
+  codexAuthRestore: vi.fn(),
   getUsageHistory: vi.fn(),
   getUsageRequestDetail: vi.fn(),
   getUsageRouteOptions: vi.fn(),
@@ -97,6 +102,8 @@ vi.mock("../../api/ipc", () => ({
   getRecoverySnapshot: ipc.getRecoverySnapshot,
   getRouteEdit: ipc.getRouteEdit,
   getSettingsSnapshot: ipc.getSettingsSnapshot,
+  codexAuthExport: ipc.codexAuthExport,
+  codexAuthRestore: ipc.codexAuthRestore,
   getUsageHistory: ipc.getUsageHistory,
   getUsageRequestDetail: ipc.getUsageRequestDetail,
   getUsageRouteOptions: ipc.getUsageRouteOptions,
@@ -112,12 +119,27 @@ vi.mock("../../api/ipc", () => ({
   }),
   listenStateChanged: vi.fn(async () => vi.fn()),
   reorderRoutesAndFallback: ipc.reorderRoutesAndFallback,
-  normalizeIpcError: () => ({
-    code: "test",
-    message: "测试失败",
-    retryable: false,
-    field: null,
-  }),
+  normalizeIpcError: (error: unknown) => {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      "message" in error
+    ) {
+      return error as {
+        code: string;
+        message: string;
+        retryable: boolean;
+        field: string | null;
+      };
+    }
+    return {
+      code: "test",
+      message: "测试失败",
+      retryable: false,
+      field: null,
+    };
+  },
   openCodexConfig: ipc.openCodexConfig,
   openPricingSource: ipc.openPricingSource,
   syncPricingFromWeb: ipc.syncPricingFromWeb,
@@ -145,6 +167,34 @@ vi.mock("../../api/ipc", () => ({
 vi.mock("../../api/appVersion", () => ({
   getRunningAppVersion: ipc.getRunningAppVersion,
 }));
+
+const codexAuthIdleFixture: CodexAuthStatusDto = {
+  credentialPresent: false,
+  storeMode: "file",
+  storeModeSupported: true,
+  managedLocked: false,
+  accountEmail: null,
+  planType: null,
+  expiresAtMs: null,
+  exportedAtMs: null,
+  backupAvailable: false,
+  drifted: false,
+  expired: false,
+};
+
+const codexAuthSuccessFixture: CodexAuthStatusDto = {
+  credentialPresent: true,
+  storeMode: "file",
+  storeModeSupported: true,
+  managedLocked: false,
+  accountEmail: "te***@example.com",
+  planType: "plus",
+  expiresAtMs: Date.now() + 86_400_000,
+  exportedAtMs: Date.now() - 60_000,
+  backupAvailable: true,
+  drifted: false,
+  expired: false,
+};
 
 async function renderSettings(
   options: {
@@ -220,6 +270,10 @@ beforeEach(() => {
   ipc.getRecoverySnapshot.mockReset();
   ipc.getRouteEdit.mockReset();
   ipc.getSettingsSnapshot.mockReset();
+  ipc.codexAuthExport.mockReset();
+  ipc.codexAuthRestore.mockReset();
+  ipc.codexAuthExport.mockResolvedValue(codexAuthSuccessFixture);
+  ipc.codexAuthRestore.mockResolvedValue(codexAuthIdleFixture);
   ipc.getUsageHistory.mockReset();
   ipc.getUsageRequestDetail.mockReset();
   ipc.getUsageRouteOptions.mockReset();
@@ -1431,5 +1485,213 @@ describe("CodexSettings interactions", () => {
       expect(screen.getByText("167张（1.18G）")).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: "应用" })).toBeEnabled();
+  });
+});
+
+describe("Codex credential section", () => {
+  it("offers the one-click export when no credential is known", async () => {
+    await renderSettings({ settings: { codexAuth: codexAuthIdleFixture } });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    expect(
+      screen.getByRole("button", { name: "获取并替换 Codex 凭证" }),
+    ).toBeEnabled();
+    expect(screen.getByText("未检测")).toBeInTheDocument();
+  });
+
+  it("shows the masked account and restores the previous credential", async () => {
+    await renderSettings({ settings: { codexAuth: codexAuthSuccessFixture } });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    expect(screen.getByText("te***@example.com")).toBeInTheDocument();
+    expect(screen.getByText("plus")).toBeInTheDocument();
+    expect(screen.getByText("已写入")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "还原原凭证" }));
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "还原原凭证？",
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "还原" }));
+    await waitFor(() =>
+      expect(ipc.codexAuthRestore).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  it("disables the action for an unsupported credential store", async () => {
+    await renderSettings({
+      settings: {
+        codexAuth: {
+          ...codexAuthIdleFixture,
+          storeMode: "keyring",
+          storeModeSupported: false,
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    expect(
+      screen.getByText(/凭证存储方式是 keyring（系统钥匙串）/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/把 cli_auth_credentials_store 改为 "file"/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "获取并替换 Codex 凭证" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "打开 Codex 配置" }));
+    await waitFor(() => expect(ipc.openCodexConfig).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps a managed-locked credential store unactionable", async () => {
+    await renderSettings({
+      settings: {
+        codexAuth: {
+          ...codexAuthIdleFixture,
+          storeMode: "keyring",
+          storeModeSupported: false,
+          managedLocked: true,
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    expect(screen.getByText(/由企业配置锁定/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "打开 Codex 配置" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "获取并替换 Codex 凭证" }),
+    ).toBeDisabled();
+  });
+
+  it("surfaces a keychain denial with a primary retry", async () => {
+    ipc.codexAuthExport.mockRejectedValueOnce({
+      code: "codex_auth_keychain_denied",
+      message: "denied",
+      retryable: true,
+      field: null,
+    });
+    await renderSettings({ settings: { codexAuth: codexAuthIdleFixture } });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "获取并替换 Codex 凭证" }),
+    );
+
+    expect(await screen.findByText(/钥匙串授权被拒绝/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重试" })).toBeEnabled();
+  });
+
+  it("reports a not-logged-in failure through the error copy", async () => {
+    ipc.codexAuthExport.mockRejectedValueOnce({
+      code: "codex_auth_profile_not_logged_in",
+      message: "not logged in",
+      retryable: true,
+      field: null,
+    });
+    await renderSettings({ settings: { codexAuth: codexAuthIdleFixture } });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "获取并替换 Codex 凭证" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "未检测到已登录的 Chrome 会话",
+    );
+    expect(screen.getByRole("button", { name: "重试" })).toBeEnabled();
+  });
+
+  it("warns about external drift without offering a restore", async () => {
+    await renderSettings({
+      settings: {
+        codexAuth: { ...codexAuthSuccessFixture, drifted: true },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    expect(screen.getByText(/已被外部修改/)).toBeInTheDocument();
+    expect(screen.queryByText("plus")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "还原原凭证" }),
+    ).toBeNull();
+  });
+
+  it("reports an expired credential", async () => {
+    await renderSettings({
+      settings: {
+        codexAuth: {
+          ...codexAuthSuccessFixture,
+          expiresAtMs: Date.now() - 1_000,
+          expired: true,
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    expect(screen.getByText("凭证已过期")).toBeInTheDocument();
+    expect(screen.getByText(/已过期（/)).toBeInTheDocument();
+  });
+
+  it("renders a warning-toned conflict inline instead of as an error", async () => {
+    ipc.codexAuthExport.mockRejectedValueOnce({
+      code: "codex_auth_target_conflict",
+      message: "conflict",
+      retryable: true,
+      field: null,
+    });
+    await renderSettings({ settings: { codexAuth: codexAuthIdleFixture } });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "获取并替换 Codex 凭证" }),
+    );
+
+    const message = await screen.findByRole("alert");
+    expect(message).toHaveTextContent(/目标文件状态异常/);
+    expect(message).toHaveClass("inline-warning");
+    expect(message).not.toHaveClass("settings-error");
+    expect(screen.getByRole("button", { name: "重试" })).toBeEnabled();
+  });
+
+  it("retries the restore that failed instead of starting an export", async () => {
+    ipc.codexAuthRestore.mockRejectedValueOnce({
+      code: "codex_auth_restore_failed",
+      message: "restore failed",
+      retryable: true,
+      field: null,
+    });
+    await renderSettings({ settings: { codexAuth: codexAuthSuccessFixture } });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "还原原凭证" }));
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "还原原凭证？",
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "还原" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/还原失败/);
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(ipc.codexAuthRestore).toHaveBeenCalledTimes(2));
+    expect(ipc.codexAuthExport).not.toHaveBeenCalled();
+  });
+
+  it("returns to idle once a restore clears the export facts", async () => {
+    await renderSettings({
+      settings: {
+        codexAuth: {
+          ...codexAuthSuccessFixture,
+          accountEmail: null,
+          planType: null,
+          expiresAtMs: null,
+          exportedAtMs: null,
+        },
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+
+    expect(screen.getByText("未检测")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "获取并替换 Codex 凭证" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "还原原凭证" }),
+    ).toBeNull();
   });
 });

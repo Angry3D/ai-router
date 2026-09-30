@@ -80,6 +80,23 @@ fsync 和替换前竞态检查。
 普通断开恢复可更新的“断开目标”；完整基线始终保留为首次接管前的所有权证据。外部编辑、symlink、
 无效 TOML、同名 MCP 冲突或 fingerprint 变化都会失败关闭，不应通过直接覆盖文件解决。
 
+## Codex 凭证（auth.json）
+
+设置中的「Codex 凭证」功能从本机 Chrome 系浏览器只读读取其 Cookie 数据库，仅解密
+`__Secure-next-auth.session-token.*` 两个分片（浏览器安全存储密钥经系统钥匙串读取），在隐藏、
+无 capability、无痕的只读 WebView 中访问固定端点 `https://chatgpt.com/api/auth/session`（遵循系统
+代理），在本地生成 `$CODEX_HOME/auth.json`（默认 `~/.codex/auth.json`）并原子替换。Cookie 值、
+会话 JSON 和生成的 token 只在内存中短暂存在并清零，不会写入运行日志、诊断、请求/尝试历史、
+SQLite、恢复点或崩溃信息；WebView 注入的 Cookie 在每次运行结束时删除。这是该功能唯一新增的出站
+流量，不上传任何本地数据。
+
+写入前会把已有的 `auth.json` 备份到应用数据目录下的 `codex-auth-backups/`（目录 `0700`、文件
+`0600`，保留最近 5 份，文件名为时间戳加短指纹），用户可在设置中「还原原凭证」取回。同一目录下的
+`codex-auth-meta.json` 只保存非秘密元数据（导出时间、过期时间、脱敏邮箱、套餐类型和写入文件的
+SHA-256），用于显示状态并检测外部修改；它不包含 Cookie、token 或会话 JSON。该目录是敏感文件，
+应按密钥材料保护。恢复点、SQLite 和请求历史都不包含凭证内容。凭证为一次性：Codex 的刷新端点
+（`auth.openai.com`）不接受网页会话令牌，过期后需要重新导出；应用不会自动重启 Codex。
+
 ## 恢复点
 
 关键配置提交后，恢复 worker 在短暂安静期后生成一个 SQLite Backup API 副本，删除历史/用量/日志等

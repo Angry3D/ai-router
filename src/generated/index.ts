@@ -24,6 +24,7 @@ export type { BalanceTestInputDto } from "./BalanceTestInputDto";
 export type { BalanceTrigger } from "./BalanceTrigger";
 export type { BootstrapSnapshotDto } from "./BootstrapSnapshotDto";
 export type { BuildInfoDto } from "./BuildInfoDto";
+export type { CodexAuthStatusDto } from "./CodexAuthStatusDto";
 export type { CodexBaselineSummaryDto } from "./CodexBaselineSummaryDto";
 export type { CodexConfigStatus } from "./CodexConfigStatus";
 export type { CodexImagesMcpRepairPreviewDto } from "./CodexImagesMcpRepairPreviewDto";
@@ -35,6 +36,7 @@ export type { CodexRecoveryUpdatePreviewDto } from "./CodexRecoveryUpdatePreview
 export type { CodexRestartNoticeDto } from "./CodexRestartNoticeDto";
 export type { CompletionState } from "./CompletionState";
 export type { ConfigOperationResult } from "./ConfigOperationResult";
+export type { CredentialStoreModeDto } from "./CredentialStoreModeDto";
 export type { DatabaseStartupIssue } from "./DatabaseStartupIssue";
 export type { DeliveryState } from "./DeliveryState";
 export type { FallbackStateDto } from "./FallbackStateDto";

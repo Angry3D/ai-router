@@ -31,6 +31,7 @@ use router_core::{
         BalanceErrorCategory, BalanceErrorStage, BalanceQueryMode, BalanceRefreshBatchState,
         BalanceResult, BalanceTrigger,
     },
+    codex_auth::{CodexAuthStatusDto, CredentialStoreModeDto},
     codex_config::{CodexConfigStatus, ConfigOperationResult},
     domain::{
         AppearancePreference, CompletionState, DeliveryState, InferenceFailureReason,
@@ -70,6 +71,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     BalanceQueryMode::export_all_to(&output)?;
     BalanceQueryEditDto::export_all_to(&output)?;
     BalanceTestInputDto::export_all_to(&output)?;
+    CodexAuthStatusDto::export_all_to(&output)?;
+    CredentialStoreModeDto::export_all_to(&output)?;
     CodexBaselineSummaryDto::export_all_to(&output)?;
     CodexRecoveryResetPreviewDto::export_all_to(&output)?;
     CodexRecoverySummaryDto::export_all_to(&output)?;
