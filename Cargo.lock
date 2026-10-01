@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "ai-router-app"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3640,7 +3640,7 @@ dependencies = [
 
 [[package]]
 name = "router-core"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "aes",
  "arc-swap",
