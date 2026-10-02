@@ -23,7 +23,8 @@ user-configured upstream Responses APIs
 `crates/router-core/` 是领域权威：
 
 - `domain.rs` 校验 route ID、Base URL、API Key、设置值和共享枚举；
-- `storage.rs` 在专用 SQLite executor 后维护 schema、事务、密钥和查询；
+- `storage.rs` 保留专用 SQLite executor、公开记录类型和路由/配置事务；`storage/schema.rs` 负责
+  连接初始化、迁移与完整性校验，`storage/history.rs` 在同一 executor 上实现历史记录、用量查询和统计；
 - `proxy.rs` 与 `proxy/` 负责 loopback ingress、Responses 流式转发、历史和回退；
 - `codex_config.rs` 与 `codex_catalog.rs` 管理受保护的 Codex 投影和派生模型目录；
 - `pricing.rs`、`pricing_local.rs` 与 `pricing_capture.rs` 管理内嵌/本地价格目录、定价计算与
@@ -36,6 +37,9 @@ macOS API，但不应拥有 SQL 或复制核心路由规则。`application_updat
 应用边界：它拥有远端元数据校验、pending update、单操作 gate、进度、安装与 graceful restart 意图。
 `pricing_sync.rs` 拥有手动「同步官网」的隐藏 WebView 生命周期：窗口只从 Rust 创建、不加入任何
 capability、只允许官方定价页与 capture scheme 的导航，并把抓取负载交给 `router-core` 校验后才落盘。
+`runtime.rs` 保留桌面服务、路由与恢复协调；`runtime/logging.rs` 归拢日志插件、控制器和日志命令，
+`runtime/errors.rs` 集中纯错误分类与安全 IPC 映射。模块拆分不创建新数据库线程或锁，也不改变
+持久化、内存投影和事件发布的顺序。
 
 `src/` 按功能组织菜单、设置和共享展示组件。`src/api/ipc.ts` 集中命令调用，`src/api/query.ts`
 管理 React Query 快照和状态失效。`src/generated/` 来自 Rust，不能手工修改。

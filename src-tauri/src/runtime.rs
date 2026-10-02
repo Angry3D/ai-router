@@ -19,11 +19,11 @@ use router_core::{
         MenuBarSettingsDto, MenuSnapshotDto, MetadataFailureDto, PricingTableDto,
         RecoveryCandidateDto, RecoveryHealthDto, RecoverySnapshotDto,
         ReorderRoutesAndFallbackInputDto, ReplaceCodexModelsResult, RouteActivationPreviewDto,
-        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteModelsErrorCategory,
-        RouteModelsInputDto, RouteModelsResultDto, RouteSaveInputDto, RouteSaveResultDto,
-        SettingsSnapshotDto, UpdateImagesGenerationSettingsInputDto,
-        UpdateOutboundProxySettingsInputDto, UsageHistoryPageDto, UsageHistoryQueryDto,
-        UsageRequestDetailDto, UsageRouteOptionDto, UsageStatisticsDto, UsageStatisticsQueryDto,
+        RouteActivationResultDto, RouteCatalogMode, RouteEditDto, RouteModelsInputDto,
+        RouteModelsResultDto, RouteSaveInputDto, RouteSaveResultDto, SettingsSnapshotDto,
+        UpdateImagesGenerationSettingsInputDto, UpdateOutboundProxySettingsInputDto,
+        UsageHistoryPageDto, UsageHistoryQueryDto, UsageRequestDetailDto, UsageRouteOptionDto,
+        UsageStatisticsDto, UsageStatisticsQueryDto,
     },
     balance::{
         BalanceCoordinator, BalanceDisplaySnapshot, BalanceExecutor, BalanceQueryConfig,
@@ -41,10 +41,9 @@ use router_core::{
         LocalCodexFilesystem, load_or_create_gateway_token,
     },
     domain::{
-        ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, CodexModelValidationError,
-        FallbackExcludedModelValidationError, ImagesGenerationModel, ImagesGenerationTimeout,
-        McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl,
-        ReachabilityResult, RouteId, RouteProtocol, ValidationError,
+        ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationModel,
+        ImagesGenerationTimeout, McpImageCapacityWarningThreshold, OutboundProxyConfig,
+        OutboundProxyUrl, ReachabilityResult, RouteId, RouteProtocol, ValidationError,
     },
     lifecycle::{
         AppCoordinator, AppLifecycleIssue, AppLifecyclePhase, AppLifecycleServices,
@@ -60,20 +59,15 @@ use router_core::{
         McpImageAssetMaintenanceError, McpImageAssetManager, OutboundProxyTransport,
         ProxyIngressState, ProxyPortError, ProxyPortStore, ProxyServerHandle, ReachabilityProbe,
         RequestTransitionSink, ResponsesForwarder, RouteHealthRegistry, RouteSnapshot,
-        RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticEvent, RuntimeDiagnosticSink,
-        build_proxy_router, transition_proxy_port_with_listener_replaced,
+        RoutingSnapshot, RoutingSnapshotStore, RuntimeDiagnosticSink, build_proxy_router,
+        transition_proxy_port_with_listener_replaced,
     },
     qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     recovery::{
         DatabaseStartupClassification, DatabaseStartupIssue, RecoveryActivityProbe,
-        RecoveryCoordinator, RecoveryDirectoryLock, RecoveryError, RecoveryEventSink,
-        RecoveryFailureCode, RecoveryHealth, RecoveryManager, RecoveryPointId, RepairRecheck,
-        classify_recovery_startup_error, classify_storage_startup_error,
-    },
-    runtime_log::{
-        LOG_FILE_PREFIX, LOG_MAINTENANCE_INTERVAL, MAX_LOG_FILE_BYTES, MAX_LOG_FILES,
-        RuntimeLogMaintenance, format_log_timestamp, format_runtime_diagnostic,
-        truncate_log_record,
+        RecoveryCoordinator, RecoveryDirectoryLock, RecoveryEventSink, RecoveryFailureCode,
+        RecoveryHealth, RecoveryManager, RecoveryPointId, RepairRecheck,
+        classify_recovery_startup_error,
     },
     state::{
         AppRuntimeState, FallbackStateDto, IpcErrorDto, MutationResultDto, RouteSummaryDto,
@@ -85,14 +79,25 @@ use router_core::{
         normalize_codex_model_records, normalize_fallback_excluded_models,
     },
     storage::{DatabaseExecutor, SecretStore, SqliteBalanceRouteSource, SqliteSecretStore},
-    upstream_models::{UpstreamModelsClient, UpstreamModelsErrorKind},
+    upstream_models::UpstreamModelsClient,
 };
-use tauri::{AppHandle, Emitter, Manager, Runtime, State, plugin::TauriPlugin};
-use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use crate::application_update::ApplicationUpdateCoordinator;
 use crate::codex_auth_session::{CodexAuthSessionFetcher, read_safe_storage_key};
 use crate::pricing_sync::PricingSyncCoordinator;
+
+mod errors;
+pub(crate) mod logging;
+
+use self::errors::{
+    RecoveryOperation, ipc_error, ipc_field_error, map_balance_error, map_codex_auth_error,
+    map_codex_catalog_error, map_codex_error, map_codex_model_validation_error,
+    map_database_startup_failure, map_fallback_excluded_model_validation_error,
+    map_mcp_image_asset_error, map_proxy_port_error, map_recovery_error,
+    map_recovery_lifecycle_failure, map_recovery_lifecycle_result, map_storage_error,
+    map_validation_error, route_models_error_category,
+};
 
 #[cfg(test)]
 struct ReplaceCodexModelsInput {
@@ -143,96 +148,6 @@ impl DesktopRuntimeProfile {
             Self::Production => configured_port,
             Self::Isolated => 0,
         }
-    }
-}
-
-#[derive(Clone)]
-pub struct RuntimeLogController {
-    maintenance: RuntimeLogMaintenance,
-    write_gate: Arc<Mutex<()>>,
-}
-
-impl RuntimeLogController {
-    fn new(directory: PathBuf) -> Self {
-        Self {
-            maintenance: RuntimeLogMaintenance::new(directory),
-            write_gate: Arc::new(Mutex::new(())),
-        }
-    }
-
-    pub fn start_periodic_maintenance(&self) {
-        let controller = self.clone();
-        tauri::async_runtime::spawn(async move {
-            loop {
-                tokio::time::sleep(LOG_MAINTENANCE_INTERVAL).await;
-                let result = {
-                    let _gate = controller
-                        .write_gate
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    log::logger().flush();
-                    controller.maintenance.maintain(
-                        SystemTime::now(),
-                        Some(&controller.maintenance.active_log_path()),
-                    )
-                };
-                if result.is_err() {
-                    controller.log_fixed(log::Level::Error, "code=runtime_log_maintenance_failed");
-                }
-            }
-        });
-    }
-
-    fn clear(&self) -> Result<(), IpcErrorDto> {
-        let active = self.maintenance.active_log_path();
-        {
-            let _gate = self
-                .write_gate
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            log::logger().flush();
-            self.maintenance
-                .clear(&active)
-                .map_err(|_| ipc_error("runtime_log_clear_failed", "运行日志清除失败。", true))?;
-        }
-        self.log_fixed(log::Level::Info, "code=runtime_logs_cleared");
-        Ok(())
-    }
-
-    pub(crate) fn directory(&self) -> &std::path::Path {
-        self.maintenance.directory()
-    }
-
-    pub fn log_fixed(&self, level: log::Level, message: &str) {
-        let message = truncate_log_record(message);
-        let _gate = self
-            .write_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        log::log!(target: "ai_router::runtime", level, "{message}");
-    }
-}
-
-pub struct SafeRuntimeDiagnosticSink {
-    write_gate: Arc<Mutex<()>>,
-}
-
-impl SafeRuntimeDiagnosticSink {
-    pub fn new(logs: &RuntimeLogController) -> Self {
-        Self {
-            write_gate: Arc::clone(&logs.write_gate),
-        }
-    }
-}
-
-impl RuntimeDiagnosticSink for SafeRuntimeDiagnosticSink {
-    fn emit(&self, event: RuntimeDiagnosticEvent) {
-        let line = format_runtime_diagnostic(&event);
-        let _gate = self
-            .write_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        log::info!(target: "ai_router::diagnostic", "{line}");
     }
 }
 
@@ -3709,104 +3624,6 @@ pub fn activate_existing_instance<R: Runtime>(app: &AppHandle<R>) {
     crate::popover::request_menu_show(app);
 }
 
-pub fn runtime_log_bootstrap_plugin<R: Runtime>(directory: Option<PathBuf>) -> TauriPlugin<R> {
-    tauri::plugin::Builder::new("runtime-log-bootstrap")
-        .setup(move |app, _api| {
-            let directory = directory
-                .clone()
-                .map_or_else(|| app.path().app_log_dir(), Result::<_, tauri::Error>::Ok)?;
-            let controller = RuntimeLogController::new(directory);
-            controller
-                .maintenance
-                .maintain(SystemTime::now(), None)
-                .map_err(|error| tauri::Error::Io(std::io::Error::other(error.to_string())))?;
-            app.manage(controller);
-            Ok(())
-        })
-        .build()
-}
-
-pub fn runtime_log_plugin<R: Runtime>(directory: Option<PathBuf>) -> TauriPlugin<R> {
-    let target = directory.map_or_else(
-        || {
-            Target::new(TargetKind::LogDir {
-                file_name: Some(LOG_FILE_PREFIX.to_owned()),
-            })
-        },
-        |path| {
-            Target::new(TargetKind::Folder {
-                path,
-                file_name: Some(LOG_FILE_PREFIX.to_owned()),
-            })
-        },
-    );
-    tauri_plugin_log::Builder::new()
-        .targets([target])
-        .level(log::LevelFilter::Info)
-        .max_file_size(u128::from(MAX_LOG_FILE_BYTES))
-        .rotation_strategy(RotationStrategy::KeepSome(MAX_LOG_FILES - 1))
-        .format(|out, message, record| {
-            let message = truncate_log_record(&message.to_string());
-            out.finish(format_args!(
-                "[{}][{}][{}] {}",
-                format_log_timestamp(SystemTime::now()),
-                record.level(),
-                record.target(),
-                message
-            ));
-        })
-        .build()
-}
-
-pub fn finish_runtime_log_setup<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(logs) = app.try_state::<RuntimeLogController>() {
-        if logs.maintenance.secure_active_file().is_err() {
-            logs.log_fixed(log::Level::Error, "code=runtime_log_permissions_failed");
-        }
-        logs.start_periodic_maintenance();
-    }
-}
-
-#[tauri::command]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Tauri command state injection requires State<T> by value"
-)]
-pub fn open_runtime_log_directory(
-    logs: State<'_, RuntimeLogController>,
-) -> Result<(), IpcErrorDto> {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(logs.directory())
-            .spawn()
-            .map_err(|_| ipc_error("runtime_log_open_failed", "日志目录打开失败。", true))?;
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = logs;
-        Err(ipc_error(
-            "runtime_log_open_unsupported",
-            "当前平台不支持打开日志目录。",
-            false,
-        ))
-    }
-}
-
-#[tauri::command]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Tauri command state injection requires State<T> by value"
-)]
-pub fn clear_runtime_logs(
-    logs: State<'_, RuntimeLogController>,
-    runtime: State<'_, Arc<AppRuntimeState>>,
-) -> Result<MutationResultDto, IpcErrorDto> {
-    logs.clear()?;
-    Ok(runtime.publish_background_change(vec![StateArea::RuntimeLogs]))
-}
-
 #[tauri::command]
 pub async fn get_menu_snapshot(
     services: State<'_, Arc<DesktopLifecycleServices>>,
@@ -4407,137 +4224,6 @@ fn menu_bar_settings_dto(settings: &AppSettingsRecord) -> MenuBarSettingsDto {
     }
 }
 
-fn map_validation_error(error: &ValidationError) -> IpcErrorDto {
-    IpcErrorDto {
-        code: error.code.to_owned(),
-        message: match error.code {
-            "base_url_invalid" => "请输入有效的 HTTP(S) 地址。",
-            "base_url_too_long" => "地址过长。",
-            "base_url_unsupported_endpoint" => "地址必须匹配所选的上游协议。",
-            "base_url_duplicate_responses" => "Responses 地址不能重复包含 /responses。",
-            "base_url_duplicate_chat_completions" => {
-                "Chat Completions 地址不能重复包含 /chat/completions。"
-            }
-            "chat_bridge_unsupported_request" => {
-                "该请求包含 Chat Completions 上游无法表达的内容，请改用 Responses 上游。"
-            }
-            "images_generation_timeout_out_of_range" => "生成等待上限需为 600 至 3600 秒。",
-            "images_generation_model_required" => "请输入生图模型。",
-            "images_generation_model_control_character" => "生图模型不能包含控制字符。",
-            "images_generation_model_too_long" => "生图模型过长。",
-            _ => "输入内容无效。",
-        }
-        .to_owned(),
-        retryable: false,
-        field: Some(error.field.to_owned()),
-    }
-}
-
-fn map_mcp_image_asset_error(error: McpImageAssetMaintenanceError) -> IpcErrorDto {
-    match error {
-        McpImageAssetMaintenanceError::Unavailable => ipc_error(
-            "mcp_image_assets_unavailable",
-            "图片目录暂时无法读取。",
-            true,
-        ),
-        McpImageAssetMaintenanceError::Busy => {
-            ipc_error("mcp_image_assets_busy", "图片正在生成，请稍后重试。", true)
-        }
-        McpImageAssetMaintenanceError::PartialFailure => ipc_error(
-            "mcp_image_assets_clear_failed",
-            "部分图片无法清除，请刷新后重试。",
-            true,
-        ),
-    }
-}
-
-fn map_storage_error(error: StorageError) -> IpcErrorDto {
-    match error {
-        StorageError::Validation(error) => map_validation_error(&error),
-        StorageError::CodexModelValidation(error) => map_codex_model_validation_error(&error),
-        StorageError::FallbackExcludedModelValidation(error) => {
-            map_fallback_excluded_model_validation_error(&error)
-        }
-        StorageError::InvalidUsageQuery => {
-            ipc_error("usage_query_invalid", "用量筛选条件无效。", false)
-        }
-        StorageError::InvalidFallbackParticipantCount => ipc_field_error(
-            "fallback_participant_count_invalid",
-            "Fallback 参与数量无效。",
-            "participantCount",
-        ),
-        StorageError::StaleRoutingConfiguration => ipc_error(
-            "routing_configuration_stale",
-            "路由配置已更新，请重试。",
-            true,
-        ),
-        StorageError::InvalidRoutePermutation => {
-            ipc_error("route_order_invalid", "路由顺序无效。", false)
-        }
-        StorageError::InvalidImagesGenerationRoute => ipc_field_error(
-            "images_generation_route_invalid",
-            "请选择已存在的图片路由。",
-            "routeId",
-        ),
-        StorageError::NotFound => ipc_error("route_not_found", "路由不存在。", false),
-        StorageError::BalanceScriptRiskConfirmationRequired => ipc_error(
-            "balance_script_risk_confirmation_required",
-            "启用余额脚本前需要确认风险。",
-            false,
-        ),
-        StorageError::ExecutorClosed
-        | StorageError::Initialization
-        | StorageError::FutureSchema => ipc_error("database_unavailable", "数据库尚未就绪。", true),
-        StorageError::UsageStatisticsOverflow
-        | StorageError::Database(_)
-        | StorageError::Filesystem(_) => {
-            ipc_error("database_operation_failed", "数据库操作失败。", true)
-        }
-    }
-}
-
-fn map_codex_model_validation_error(error: &CodexModelValidationError) -> IpcErrorDto {
-    let message = match error.code {
-        "codex_model_id_required" => "请输入模型 ID。",
-        "codex_model_id_control_character" => "模型 ID 不能包含控制字符。",
-        "codex_model_id_duplicate" => "模型 ID 不能重复。",
-        "codex_model_display_name_control_character" => "显示名称不能包含控制字符。",
-        "codex_model_context_window_invalid" => "上下文窗口必须是正整数。",
-        _ => "模型配置无效。",
-    };
-    IpcErrorDto {
-        code: error.code.to_owned(),
-        message: message.to_owned(),
-        retryable: false,
-        field: Some(error.field.clone()),
-    }
-}
-
-fn map_fallback_excluded_model_validation_error(
-    error: &FallbackExcludedModelValidationError,
-) -> IpcErrorDto {
-    let message = match error.code {
-        "fallback_excluded_model_required" => "请输入模型 ID。",
-        "fallback_excluded_model_control_character" => "模型 ID 不能包含控制字符。",
-        "fallback_excluded_model_duplicate" => "模型 ID 不能重复。",
-        _ => "Fallback 模型配置无效。",
-    };
-    IpcErrorDto {
-        code: error.code.to_owned(),
-        message: message.to_owned(),
-        retryable: false,
-        field: Some(error.field.clone()),
-    }
-}
-
-fn map_codex_catalog_error(_error: CodexCatalogError) -> IpcErrorDto {
-    ipc_error(
-        "codex_catalog_publication_failed",
-        "自定义模型目录写入失败。",
-        true,
-    )
-}
-
 fn partial_codex_models_result(
     models: Vec<CodexModelDto>,
     changed: bool,
@@ -4605,110 +4291,6 @@ fn activation_for_codex_error(error: &CodexConfigError) -> CodexModelsActivation
     }
 }
 
-fn map_database_startup_failure(error: &StorageError) -> LifecycleFailure {
-    LifecycleFailure::DatabaseIssue(classify_storage_startup_error(error))
-}
-
-fn map_recovery_lifecycle_failure(error: &RecoveryError) -> LifecycleFailure {
-    classify_recovery_startup_error(error).map_or(LifecycleFailure::RecoveryRequired, |issue| {
-        LifecycleFailure::DatabaseIssue(issue)
-    })
-}
-
-#[derive(Clone, Copy)]
-enum RecoveryOperation {
-    Inventory,
-    Publish,
-    Restore,
-    StartOver,
-    Retry,
-}
-
-impl RecoveryOperation {
-    const fn failure(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Inventory => ("recovery_inventory_unavailable", "无法读取恢复点。"),
-            Self::Publish => ("recovery_publish_failed", "无法创建恢复点。"),
-            Self::Restore => ("recovery_restore_failed", "数据库恢复失败。"),
-            Self::StartOver => ("database_start_over_failed", "无法创建空数据库。"),
-            Self::Retry => ("database_retry_failed", "数据库启动重试失败。"),
-        }
-    }
-}
-
-fn map_recovery_error(error: &RecoveryError, operation: RecoveryOperation) -> IpcErrorDto {
-    if let Some(issue) = classify_recovery_startup_error(error) {
-        return map_database_startup_issue(issue);
-    }
-    match error {
-        RecoveryError::InvalidPointId => ipc_error(
-            "recovery_point_stale",
-            "所选恢复点已失效，请刷新后重试。",
-            false,
-        ),
-        RecoveryError::InvalidPoint => match operation {
-            RecoveryOperation::StartOver => ipc_error(
-                "database_start_over_not_allowed",
-                "仍有可用恢复点，不能创建空数据库。",
-                false,
-            ),
-            _ => ipc_error(
-                "recovery_point_stale",
-                "所选恢复点已失效，请刷新后重试。",
-                false,
-            ),
-        },
-        RecoveryError::UnsafeFilesystemObject
-        | RecoveryError::FutureSchema
-        | RecoveryError::DirectoryInUse => {
-            unreachable!("classified recovery startup error")
-        }
-        RecoveryError::UnknownTable | RecoveryError::DomainValidation => {
-            ipc_error("recovery_point_invalid", "恢复点未通过安全校验。", false)
-        }
-        RecoveryError::Filesystem(_) | RecoveryError::Database(_) => {
-            let (code, message) = operation.failure();
-            ipc_error(code, message, true)
-        }
-        RecoveryError::Storage(_) => {
-            unreachable!("classified recovery storage error")
-        }
-    }
-}
-
-fn map_database_startup_issue(issue: DatabaseStartupIssue) -> IpcErrorDto {
-    match issue {
-        DatabaseStartupIssue::Permission => ipc_error(
-            "database_permission_denied",
-            "数据库或恢复目录无法访问。",
-            true,
-        ),
-        DatabaseStartupIssue::DiskFull => ipc_error(
-            "database_space_unavailable",
-            "磁盘空间不足，无法完成数据库操作。",
-            true,
-        ),
-        DatabaseStartupIssue::FutureSchema => ipc_error(
-            "database_version_too_new",
-            "数据库由更高版本的 AI Router 创建。",
-            false,
-        ),
-        DatabaseStartupIssue::UnsafePath => ipc_error(
-            "database_path_unsafe",
-            "数据库或恢复目录不是安全的常规路径。",
-            false,
-        ),
-        DatabaseStartupIssue::Unavailable => {
-            ipc_error("database_unavailable", "数据库暂时不可用。", true)
-        }
-        DatabaseStartupIssue::DirectoryInUse => ipc_error(
-            "database_directory_in_use",
-            "另一个 AI Router 进程正在使用该数据目录。",
-            true,
-        ),
-    }
-}
-
 fn require_lifecycle_phase(
     snapshot: &AppLifecycleSnapshot,
     expected: AppLifecyclePhase,
@@ -4736,138 +4318,6 @@ fn resume_automatic_update_checks(
     }
 }
 
-fn map_recovery_lifecycle_result(
-    snapshot: AppLifecycleSnapshot,
-    operation: RecoveryOperation,
-) -> Result<AppLifecycleSnapshot, IpcErrorDto> {
-    match snapshot.phase {
-        AppLifecyclePhase::Running => Ok(snapshot),
-        AppLifecyclePhase::DatabaseError => {
-            if let Some(AppLifecycleIssue::Database(issue)) = snapshot.issue {
-                Err(map_database_startup_issue(issue))
-            } else {
-                let (code, message) = operation.failure();
-                Err(ipc_error(code, message, true))
-            }
-        }
-        AppLifecyclePhase::RecoveryRequired => {
-            let (code, message) = operation.failure();
-            Err(ipc_error(code, message, true))
-        }
-        _ => Err(ipc_error(
-            "database_recovery_unavailable",
-            "当前数据库状态不支持此操作。",
-            false,
-        )),
-    }
-}
-
-fn map_balance_error(_error: router_core::balance::BalanceError) -> IpcErrorDto {
-    ipc_error("balance_query_failed", "余额查询失败。", true)
-}
-
-const fn route_models_error_category(kind: UpstreamModelsErrorKind) -> RouteModelsErrorCategory {
-    match kind {
-        UpstreamModelsErrorKind::Unauthorized => RouteModelsErrorCategory::Unauthorized,
-        UpstreamModelsErrorKind::NotFound => RouteModelsErrorCategory::NotFound,
-        UpstreamModelsErrorKind::Network => RouteModelsErrorCategory::Network,
-        UpstreamModelsErrorKind::Timeout => RouteModelsErrorCategory::Timeout,
-        UpstreamModelsErrorKind::HttpStatus => RouteModelsErrorCategory::HttpStatus,
-        UpstreamModelsErrorKind::TooLarge => RouteModelsErrorCategory::TooLarge,
-        UpstreamModelsErrorKind::InvalidResponse => RouteModelsErrorCategory::InvalidResponse,
-    }
-}
-
-fn map_proxy_port_error(error: &ProxyPortError) -> IpcErrorDto {
-    match error {
-        ProxyPortError::InvalidPort => {
-            ipc_field_error("proxy_port_invalid", "端口必须在 1 到 65535 之间。", "port")
-        }
-        ProxyPortError::PortUnavailable => {
-            ipc_error("proxy_port_unavailable", "该端口已被占用。", true)
-        }
-        ProxyPortError::PersistenceFailed => {
-            ipc_error("proxy_port_save_failed", "端口保存失败。", true)
-        }
-    }
-}
-
-fn map_codex_error(error: &CodexConfigError) -> IpcErrorDto {
-    match error {
-        CodexConfigError::Invalid => ipc_error("codex_config_invalid", "Codex 配置无效。", false),
-        CodexConfigError::Unreadable => {
-            ipc_error("codex_config_unreadable", "Codex 配置无法读取。", true)
-        }
-        CodexConfigError::SymlinkUnsupported => ipc_error(
-            "codex_config_symlink_unsupported",
-            "不支持符号链接形式的 Codex 配置。",
-            false,
-        ),
-        CodexConfigError::ChangedDuringOperation => ipc_error(
-            "codex_config_changed",
-            "Codex 配置在操作期间发生变化，请重试。",
-            true,
-        ),
-        CodexConfigError::BaselineMissing => {
-            ipc_error("codex_baseline_missing", "尚未创建初始配置。", false)
-        }
-        CodexConfigError::RecoveryUnavailable => {
-            ipc_error("codex_recovery_unavailable", "断开恢复配置暂不可用。", true)
-        }
-        CodexConfigError::RecoveryNotDisconnected => ipc_error(
-            "codex_recovery_not_disconnected",
-            "请先断开 Codex 后再执行此操作。",
-            false,
-        ),
-        CodexConfigError::RecoveryPreviewStale => ipc_error(
-            "codex_recovery_preview_stale",
-            "恢复配置预览已失效，请重新确认。",
-            true,
-        ),
-        CodexConfigError::RecoveryResetPartial => ipc_error(
-            "codex_recovery_reset_partial",
-            "首次连接前状态仅部分恢复，请刷新后重试。",
-            true,
-        ),
-        CodexConfigError::ImagesMcpNameConflict => ipc_error(
-            "codex_images_mcp_name_conflict",
-            "Codex 配置中的 ai_router_images 名称已被占用。",
-            false,
-        ),
-        CodexConfigError::ImagesMcpRepairNotAllowed => ipc_error(
-            "codex_images_mcp_repair_not_available",
-            "当前图片工具配置不支持修复。",
-            false,
-        ),
-        CodexConfigError::GatewayTokenInvalid => {
-            ipc_error("gateway_token_unavailable", "本地网关令牌不可用。", false)
-        }
-        CodexConfigError::Filesystem(_) | CodexConfigError::Storage(_) => ipc_error(
-            "codex_config_operation_failed",
-            "Codex 配置操作失败。",
-            true,
-        ),
-    }
-}
-
-fn ipc_field_error(code: &str, message: &str, field: &str) -> IpcErrorDto {
-    IpcErrorDto {
-        code: code.to_owned(),
-        message: message.to_owned(),
-        retryable: false,
-        field: Some(field.to_owned()),
-    }
-}
-
-fn ipc_error(code: &str, message: &str, retryable: bool) -> IpcErrorDto {
-    IpcErrorDto {
-        code: code.to_owned(),
-        message: message.to_owned(),
-        retryable,
-        field: None,
-    }
-}
-
 pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4875,41 +4325,6 @@ pub(crate) fn now_millis() -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
-}
-
-/// Maps one codex-auth domain error to its stable IPC code and Chinese copy.
-fn map_codex_auth_error(error: &CodexAuthError) -> IpcErrorDto {
-    let message = match error {
-        CodexAuthError::BrowserMissing => {
-            "未检测到 Chrome 系浏览器。请安装或打开 Google Chrome 后重试。"
-        }
-        CodexAuthError::BrowserUnsupported => {
-            "检测到浏览器，但当前版本仅支持已验证的 Google Chrome。未做任何修改。"
-        }
-        CodexAuthError::UnsupportedEncryption => {
-            "浏览器 Cookie 加密格式暂不支持（可能是浏览器新版本变更）。未做任何修改。"
-        }
-        CodexAuthError::KeychainDenied => {
-            "钥匙串授权被拒绝。请重试并在系统弹窗中选择「始终允许」。"
-        }
-        CodexAuthError::CookieStoreUnreadable => "无法读取浏览器 Cookie 数据库（权限不足）。",
-        CodexAuthError::ProfileNotLoggedIn => {
-            "未检测到已登录的 Chrome 会话。请先在 Chrome 中登录 chatgpt.com，然后重试。"
-        }
-        CodexAuthError::SessionFetchFailed => {
-            "获取 ChatGPT 会话失败（网络异常或被拦截）。未做任何修改。"
-        }
-        CodexAuthError::SessionInvalid => "会话响应缺少必需字段，无法生成凭证。",
-        CodexAuthError::StoreModeUnsupported => {
-            "当前 Codex 未使用 file 模式存储凭证，无法通过 auth.json 替换。请改为 file 后重试。"
-        }
-        CodexAuthError::TargetConflict => {
-            "目标文件状态异常（符号链接或在写入前被修改），已停止且未覆盖。"
-        }
-        CodexAuthError::WriteFailed => "写入失败，原文件保持不变。",
-        CodexAuthError::RestoreFailed => "还原失败，原文件保持不变。",
-    };
-    ipc_error(error.code(), message, error.retryable())
 }
 
 #[cfg(test)]
@@ -4922,9 +4337,13 @@ mod tests {
         time::Duration,
     };
 
+    use super::errors::map_database_startup_issue;
     use router_core::app_api::{
         PricingBandDto, PricingLocalStateDto, PricingRowSourceDto, PricingTableStatusDto,
+        RouteModelsErrorCategory,
     };
+    use router_core::proxy::RuntimeDiagnosticEvent;
+    use router_core::recovery::RecoveryError;
     use router_core::state::{StateChangedEventDto, StateEventError, StateEventSink};
     use tempfile::TempDir;
 
