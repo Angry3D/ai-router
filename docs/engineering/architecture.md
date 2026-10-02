@@ -40,6 +40,12 @@ capability、只允许官方定价页与 capture scheme 的导航，并把抓取
 `src/` 按功能组织菜单、设置和共享展示组件。`src/api/ipc.ts` 集中命令调用，`src/api/query.ts`
 管理 React Query 快照和状态失效。`src/generated/` 来自 Rust，不能手工修改。
 
+Codex 设置按操作所有权拆分：`CodexSettings.tsx` 组合页面并保留端口、连接、配置修复与恢复操作的
+共享互斥；`CodexAuthSettingsSection.tsx` 独立管理凭证导出/还原及失败重试；
+`ImageGenerationSettingsSection.tsx` 管理图片生成草稿和独立的容量管理操作。
+图片组件的重建 key 仍由父组件根据生成配置和路由列表生成，容量使用刷新不得重建组件或清空草稿。
+`codexSettingsFormatting.ts` 只共享该页面的日期显示，不承载业务规则。
+
 ## 状态流
 
 写操作先通过 Rust 校验并在需要时原子持久化，再更新内存路由快照，最后发布带 revision 的状态区域
