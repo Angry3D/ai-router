@@ -1226,7 +1226,7 @@ impl RecoveryManager {
             return Err(RecoveryError::DomainValidation);
         }
         if version == SCHEMA_VERSION {
-            crate::storage::verify_connection(&connection)?;
+            crate::storage::schema::verify_connection(&connection)?;
             ensure_table_inventory(&connection)?;
             verify_domain(&connection)?;
         }
