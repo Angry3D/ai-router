@@ -254,6 +254,7 @@ export function useRouterStateSync(view: "menu" | "settings") {
               queryKeys.settings,
               queryKeys.recovery,
               queryKeys.applicationUpdate,
+              queryKeys.pricingTable,
               queryKeys.usageHistory,
               queryKeys.usageStatistics,
               queryKeys.usageRouteOptions,

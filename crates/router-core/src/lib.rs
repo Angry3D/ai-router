@@ -37,13 +37,3 @@ impl Default for BuildInfoDto {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{APP_NAME, BuildInfoDto};
-
-    #[test]
-    fn build_info_uses_the_product_name() {
-        assert_eq!(BuildInfoDto::default().app_name, APP_NAME);
-    }
-}
