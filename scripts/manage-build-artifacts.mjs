@@ -3,6 +3,10 @@ import { rm } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { qaBuildPaths, withQaBuildReceipt } from "./qa-build-provenance.mjs";
+import { runCommand } from "./v0-2a-qa-common.mjs";
+import { inspectQaBundle } from "./v0-2a-qa-identity.mjs";
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export class BuildArtifactError extends Error {}
@@ -83,6 +87,7 @@ export function runBuild(
     spawnImpl = spawn,
     releaseConfigPath,
     baseEnvironment = process.env,
+    commandRunner = runCommand,
   } = {},
 ) {
   const invocation = buildInvocation(
@@ -92,25 +97,34 @@ export function runBuild(
     process.platform,
     releaseConfigPath,
   );
-  return new Promise((resolvePromise, reject) => {
-    const child = spawnImpl(invocation.command, invocation.args, {
-      cwd: invocation.cwd,
-      env: invocation.env,
-      stdio: "inherit",
+  const build = () =>
+    new Promise((resolvePromise, reject) => {
+      const child = spawnImpl(invocation.command, invocation.args, {
+        cwd: invocation.cwd,
+        env: invocation.env,
+        stdio: "inherit",
+      });
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (code === 0) {
+          resolvePromise();
+          return;
+        }
+        reject(
+          new BuildArtifactError(
+            `${mode} app build failed with exit code ${code}.`,
+          ),
+        );
+      });
     });
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code === 0) {
-        resolvePromise();
-        return;
-      }
-      reject(
-        new BuildArtifactError(
-          `${mode} app build failed with exit code ${code}.`,
-        ),
-      );
-    });
-  });
+  if (mode !== "qa") return build();
+  const { bundlePath } = qaBuildPaths(root);
+  return withQaBuildReceipt(root, build, () =>
+    inspectQaBundle(bundlePath, {
+      commandRunner,
+      expectedBundlePath: bundlePath,
+    }),
+  );
 }
 
 export async function cleanLegacyArtifacts(root = projectRoot, rmImpl = rm) {

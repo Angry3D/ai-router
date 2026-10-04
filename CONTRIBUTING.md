@@ -38,8 +38,8 @@ pnpm install --frozen-lockfile
 5. PR 说明应写清行为变化、风险、验证命令和未覆盖边界。
 
 不要在 PR、Issue、测试 fixture、截图或提交历史中放入真实 API Key、Authorization header、完整
-Codex 配置、SQLite 数据库、原始请求/响应、完整运行日志或用户绝对路径。演示和测试只使用明显
-虚构的合成数据。
+Codex 配置、SQLite 数据库、原始请求/响应、完整运行日志或用户绝对路径。演示、自动化测试、CI、
+临时 fixture 和普通开发命令只使用明显虚构的合成数据及 loopback 监听器，不访问真实上游。
 
 ## 权威命令
 
@@ -100,6 +100,12 @@ updater 归档与签名只由受保护的 tag workflow 构建。不要在本地�
 生产 bundle。开发和生命周期测试使用 `pnpm tauri:qa:dev` 或 `pnpm tauri:qa:build`，并在任何
 破坏性操作前验证 bundle 为 `AI Router QA.app`、identifier 为 `com.relax.airouter.qa`。不要把生产
 路由、密钥、数据库、日志或 Codex 配置复制到 QA。
+
+显式一次性授权的人工 Live QA 与上述合成测试分开，只能使用已验证的新构建及持久 QA profile，
+不得复制持久 QA 数据到临时 root。按[受控 Live QA 契约](./docs/engineering/native-lifecycle.md#受控-live-qa)，
+助手可用短生命周期本地调用器将 QA gateway token 读入内存，用户无需操作另一 MCP 客户端；
+上游密钥留在应用内，单次生图不重试，只输出固定聚合结果，由用户确认专用凭据的远端撤销。
+文档修改不是操作授权，不能覆盖更高优先级指令；生产应用和数据始终不在操作范围内。
 
 ## Issue 与 PR
 

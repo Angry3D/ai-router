@@ -177,7 +177,7 @@ describe("V0.2A QA identity guard", () => {
     await expect(
       launchQa(fixture.bundle, fixture.root, {
         commandRunner,
-        expectedBundlePath: fixture.bundle,
+        sourceRoot: fixture.root,
         spawnImpl: () => {
           throw new Error("spawn must not run");
         },
