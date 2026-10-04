@@ -1,8 +1,8 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     fmt::Write as _,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -12,7 +12,6 @@ use std::{
 
 use reqwest::{
     ClientBuilder, StatusCode,
-    dns::{Name, Resolve, Resolving},
     header::{self, HeaderMap, HeaderName, HeaderValue},
 };
 use tokio::{
@@ -27,11 +26,9 @@ use tokio_rustls::{
     rustls::{self, ServerConfig, pki_types::PrivatePkcs8KeyDer},
     server::TlsStream,
 };
-use url::Host;
 
-use super::{AdmittedUrl, DownloadLimits, ImageAssetDownloader};
+use super::{DownloadLimits, ImageAssetDownloader};
 
-pub(super) const PUBLIC_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
 const ASSET_URL: &str = "https://assets.example/image.png";
 
 // Generated for each fixture in memory. Neither test private keys nor a TLS
@@ -47,6 +44,7 @@ impl AssetFixture {
             "assets.example".to_owned(),
             "cdn.example".to_owned(),
             "xn--bcher-kva.example".to_owned(),
+            "internal.example".to_owned(),
         ])
         .expect("generate synthetic TLS certificate");
         let root = reqwest::Certificate::from_der(cert.der().as_ref())
@@ -72,17 +70,12 @@ impl AssetFixture {
             request_seen: Notify::new(),
             connections: AtomicUsize::new(0),
             closed_connections: AtomicUsize::new(0),
-            server_names: Mutex::new(Vec::new()),
             handshake_delay: Mutex::new(Duration::ZERO),
         });
         let network = Arc::new(TestNetwork {
             local,
             root,
             state: Arc::clone(&state),
-            answers: Mutex::new(BTreeMap::new()),
-            dns_queries: Mutex::new(Vec::new()),
-            pinned: Mutex::new(Vec::new()),
-            unexpected_dns: Arc::new(AtomicUsize::new(0)),
         });
         let server = tokio::spawn(async move {
             let mut connections = JoinSet::new();
@@ -106,6 +99,10 @@ impl AssetFixture {
 
     pub(in crate::proxy) fn url() -> String {
         ASSET_URL.to_owned()
+    }
+
+    pub(in crate::proxy) fn port(&self) -> u16 {
+        self.network.local.port()
     }
 
     pub(in crate::proxy) fn downloader(&self) -> ImageAssetDownloader {
@@ -149,49 +146,12 @@ impl AssetFixture {
         .expect("fixture request deadline");
     }
 
-    pub(super) fn set_dns_answers(&self, host: &str, answers: Vec<DnsAnswer>) {
-        self.network
-            .answers
-            .lock()
-            .expect("DNS answers")
-            .insert(host.to_owned(), answers.into());
-    }
-
-    pub(super) fn dns_queries(&self) -> Vec<String> {
-        self.network
-            .dns_queries
-            .lock()
-            .expect("DNS queries")
-            .clone()
-    }
-
-    pub(super) fn pinned_addresses(&self) -> Vec<Vec<SocketAddr>> {
-        self.network
-            .pinned
-            .lock()
-            .expect("pinned addresses")
-            .clone()
-    }
-
-    pub(super) fn unexpected_dns_queries(&self) -> usize {
-        self.network.unexpected_dns.load(Ordering::SeqCst)
-    }
-
     pub(super) fn connection_count(&self) -> usize {
         self.network.state.connections.load(Ordering::SeqCst)
     }
 
     pub(super) fn closed_connection_count(&self) -> usize {
         self.network.state.closed_connections.load(Ordering::SeqCst)
-    }
-
-    pub(super) fn server_names(&self) -> Vec<String> {
-        self.network
-            .state
-            .server_names
-            .lock()
-            .expect("TLS server names")
-            .clone()
     }
 
     pub(super) fn delay_handshake(&self, delay: Duration) {
@@ -289,30 +249,12 @@ impl AssetReply {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct DnsAnswer {
-    pub(super) addresses: Vec<IpAddr>,
-    pub(super) delay: Duration,
-    pub(super) fails: bool,
-}
-
-impl DnsAnswer {
-    pub(super) fn addresses(addresses: Vec<IpAddr>) -> Self {
-        Self {
-            addresses,
-            delay: Duration::ZERO,
-            fails: false,
-        }
-    }
-}
-
 struct FixtureState {
     replies: Mutex<VecDeque<AssetReply>>,
     requests: Mutex<Vec<CapturedAssetRequest>>,
     request_seen: Notify,
     connections: AtomicUsize,
     closed_connections: AtomicUsize,
-    server_names: Mutex<Vec<String>>,
     handshake_delay: Mutex<Duration>,
 }
 
@@ -320,71 +262,17 @@ pub(super) struct TestNetwork {
     local: SocketAddr,
     root: reqwest::Certificate,
     state: Arc<FixtureState>,
-    answers: Mutex<BTreeMap<String, VecDeque<DnsAnswer>>>,
-    dns_queries: Mutex<Vec<String>>,
-    pinned: Mutex<Vec<Vec<SocketAddr>>>,
-    unexpected_dns: Arc<AtomicUsize>,
 }
 
 impl TestNetwork {
-    pub(super) async fn resolve(&self, domain: &str) -> Result<Vec<SocketAddr>, ()> {
-        self.dns_queries
-            .lock()
-            .expect("DNS queries")
-            .push(domain.to_owned());
-        let answer = {
-            let mut answers = self.answers.lock().expect("DNS answers");
-            answers.get_mut(domain).map_or_else(
-                || DnsAnswer::addresses(vec![PUBLIC_ADDRESS]),
-                |answers| {
-                    if answers.len() > 1 {
-                        answers.pop_front().expect("queued DNS answer")
-                    } else {
-                        answers.front().expect("configured DNS answer").clone()
-                    }
-                },
-            )
-        };
-        sleep(answer.delay).await;
-        if answer.fails {
-            Err(())
-        } else {
-            Ok(answer
-                .addresses
-                .into_iter()
-                .map(|address| SocketAddr::new(address, 443))
-                .collect())
-        }
-    }
-
-    pub(super) fn connect_addresses(
-        &self,
-        target: &AdmittedUrl,
-        addresses: &[SocketAddr],
-    ) -> Vec<SocketAddr> {
-        assert!(matches!(target.0.host(), Some(Host::Domain(_))));
-        self.pinned
-            .lock()
-            .expect("pinned addresses")
-            .push(addresses.to_vec());
-        vec![self.local]
-    }
-
     pub(super) fn configure_client(&self, builder: ClientBuilder) -> ClientBuilder {
         builder
             .tls_certs_only([self.root.clone()])
-            .dns_resolver(Arc::new(RejectUnpinnedDns(Arc::clone(
-                &self.unexpected_dns,
-            ))))
-    }
-}
-
-struct RejectUnpinnedDns(Arc<AtomicUsize>);
-
-impl Resolve for RejectUnpinnedDns {
-    fn resolve(&self, _name: Name) -> Resolving {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Err(io::Error::other("unpinned fixture DNS lookup").into()) })
+            .resolve("assets.example", self.local)
+            .resolve("cdn.example", self.local)
+            .resolve("xn--bcher-kva.example", self.local)
+            .resolve("wrong.example", self.local)
+            .resolve("internal.example", self.local)
     }
 }
 
@@ -403,13 +291,6 @@ async fn serve_connection(socket: TcpStream, acceptor: TlsAcceptor, state: Arc<F
     let Ok(Ok(mut stream)) = timeout(Duration::from_secs(5), acceptor.accept(socket)).await else {
         return;
     };
-    if let Some(server_name) = stream.get_ref().1.server_name() {
-        state
-            .server_names
-            .lock()
-            .expect("TLS server names")
-            .push(server_name.to_owned());
-    }
     let Ok(Ok(request)) = timeout(Duration::from_secs(5), read_request(&mut stream)).await else {
         return;
     };

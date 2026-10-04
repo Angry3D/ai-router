@@ -686,14 +686,14 @@ async fn images_flow_is_single_attempt_large_body_and_private_outside_critical_c
     let url_error = mcp_sse_json(url_call).await;
     assert_eq!(
         url_error["error"]["message"],
-        "The generated image URL is not allowed."
+        "The generated image could not be downloaded."
     );
     assert_eq!(
         url_error["error"]["data"]["code"],
-        "image_result_invalid_url"
+        "image_asset_download_failed"
     );
-    assert_eq!(url_error["error"]["data"]["stage"], "result_validation");
-    assert_eq!(url_error["error"]["data"]["upstreamStatus"], 200);
+    assert_eq!(url_error["error"]["data"]["stage"], "asset_download");
+    assert!(url_error["error"]["data"]["upstreamStatus"].is_null());
     assert_eq!(url_error["error"]["data"]["retryable"], false);
     let serialized_url_error = serde_json::to_vec(&url_error).expect("URL error frame");
     for forbidden in [

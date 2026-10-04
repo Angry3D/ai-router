@@ -1264,7 +1264,6 @@ fn image_asset_error(
         ImageAssetErrorKind::InvalidResponse => ImagesFailureStage::ResponseDecode,
         ImageAssetErrorKind::MissingResult
         | ImageAssetErrorKind::InvalidBase64
-        | ImageAssetErrorKind::InvalidUrl
         | ImageAssetErrorKind::InvalidPng
         | ImageAssetErrorKind::TooLarge => ImagesFailureStage::ResultValidation,
         ImageAssetErrorKind::DownloadFailed => ImagesFailureStage::AssetDownload,
@@ -1469,12 +1468,6 @@ mod tests {
                 Some(StatusCode::OK),
             ),
             (
-                ImageAssetErrorKind::InvalidUrl,
-                "image_result_invalid_url",
-                "result_validation",
-                Some(StatusCode::FOUND),
-            ),
-            (
                 ImageAssetErrorKind::DownloadFailed,
                 "image_asset_download_failed",
                 "asset_download",
@@ -1625,7 +1618,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_rejects_the_first_invalid_url_without_trying_another_source() {
+    async fn mcp_downloads_the_first_url_without_trying_another_source() {
         for url in [
             "",
             "http://127.0.0.1/image.png",
@@ -1649,9 +1642,12 @@ mod tests {
             .generate_image(default_generate_args())
             .await
             .expect_err("invalid URL");
-            assert_eq!(asset_error_code(&error), Some("image_result_invalid_url"));
-            assert_eq!(mcp_error_field(&error, "stage"), "result_validation");
-            assert_eq!(mcp_error_field(&error, "upstreamStatus"), 200);
+            assert_eq!(
+                asset_error_code(&error),
+                Some("image_asset_download_failed")
+            );
+            assert_eq!(mcp_error_field(&error, "stage"), "asset_download");
+            assert!(mcp_error_field(&error, "upstreamStatus").is_null());
             assert_eq!(mcp_error_field(&error, "retryable"), false);
             assert_eq!(mock.calls.load(Ordering::Acquire), 1);
             assert_eq!(fixture.request_count(), 0);
@@ -1762,19 +1758,19 @@ mod tests {
                 AssetReply::status(StatusCode::NOT_FOUND, b"ASSET_BODY_SENTINEL".to_vec()),
                 "image_asset_download_failed",
                 "asset_download",
-                404,
+                json!(404),
             ),
             (
                 AssetReply::redirect("http://127.0.0.1/private?secret=REDIRECT_SENTINEL"),
-                "image_result_invalid_url",
-                "result_validation",
-                302,
+                "image_asset_download_failed",
+                "asset_download",
+                serde_json::Value::Null,
             ),
             (
                 AssetReply::status(StatusCode::CREATED, b"not PNG".to_vec()),
                 "image_result_invalid_png",
                 "result_validation",
-                201,
+                json!(201),
             ),
         ] {
             let fixture = AssetFixture::new(vec![reply]).await;
@@ -1802,7 +1798,7 @@ mod tests {
                 .expect_err("asset failure");
             assert_eq!(asset_error_code(&error), Some(code));
             assert_eq!(mcp_error_field(&error, "stage"), stage);
-            assert_eq!(mcp_error_field(&error, "upstreamStatus"), status);
+            assert_eq!(mcp_error_field(&error, "upstreamStatus"), &status);
             assert_eq!(mcp_error_field(&error, "category"), "unknown_upstream");
             assert_eq!(mcp_error_field(&error, "retryable"), false);
             assert_eq!(changes.0.load(Ordering::Acquire), 0);

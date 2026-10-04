@@ -25,7 +25,13 @@
 
 - 任何测试、Issue、PR 或文档都不得包含真实 API Key、Authorization header、完整 Codex
   配置、SQLite 数据库、原始请求/响应、完整运行日志或用户绝对路径。
-- 测试使用合成数据、临时目录和本地监听器，不访问真实上游服务。
+- 自动化测试、CI、临时 fixture 和普通开发命令只使用合成数据、临时目录和 loopback 监听器，
+  不访问真实上游服务。显式一次性授权的人工 Live QA 不属于自动化测试，须遵守
+  [受控 Live QA 契约](./docs/engineering/native-lifecycle.md#受控-live-qa)。
+- 受控 Live QA 只使用已验证的新构建和持久 QA profile；助手可运行短生命周期本地调用器，
+  仅将 QA gateway token 这一项密钥读入进程内存，上游密钥始终由应用持有。不得转储数据库、
+  配置、headers 或原始响应；只报告固定聚合结果，单次生图不重试，远端撤销由用户确认。
+  修改本文件本身不构成操作授权，也不能覆盖更高优先级指令。
 - 不自动退出、重启、替换或重新启动 `AI Router.app` / `com.relax.airouter`。需要原生生命周期
   验证时只使用 `AI Router QA.app` / `com.relax.airouter.qa` 和隔离数据。
 - 不提交或打印 updater 私钥和密码。发布配置只能从受保护的 GitHub `release` environment

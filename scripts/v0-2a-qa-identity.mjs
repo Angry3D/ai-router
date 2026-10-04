@@ -3,6 +3,8 @@ import { lstat, realpath, rm } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { qaBuildPaths, verifyQaBuildReceipt } from "./qa-build-provenance.mjs";
+
 import {
   PRODUCTION_IDENTIFIER,
   QA_ACCEPTANCE_ROOT_ENV,
@@ -120,6 +122,27 @@ export async function inspectQaBundle(
   return projection;
 }
 
+// Identity inspection remains available for safely stopping old QA. Acceptance
+// and launch instead require evidence issued by a successful canonical build.
+export async function verifyQaBuild(
+  bundlePath = canonicalQaBundle,
+  { sourceRoot = projectRoot, commandRunner = runCommand } = {},
+) {
+  try {
+    const bundle = await inspectQaBundle(bundlePath, {
+      commandRunner,
+      expectedBundlePath: qaBuildPaths(sourceRoot).bundlePath,
+    });
+    const receipt = await verifyQaBuildReceipt(sourceRoot, bundle);
+    return { bundle, receipt };
+  } catch (error) {
+    if (error instanceof QaAcceptanceError) throw error;
+    throw new QaAcceptanceError(
+      "Unable to verify the canonical QA build; rebuild required.",
+    );
+  }
+}
+
 function executableFromLsof(output) {
   const candidates = output
     .split("\n")
@@ -134,19 +157,10 @@ function executableFromLsof(output) {
   return candidates[0];
 }
 
-export async function inspectQaProcess(
-  pid,
-  root,
-  bundlePath = canonicalQaBundle,
-  { commandRunner = runCommand, expectedBundlePath = canonicalQaBundle } = {},
-) {
+async function assertProcessExecutable(pid, bundle, commandRunner) {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
     throw new QaAcceptanceError("QA PID must be a positive integer.");
   }
-  const [bundle, runRoot] = await Promise.all([
-    inspectQaBundle(bundlePath, { commandRunner, expectedBundlePath }),
-    resolveRunRoot(root),
-  ]);
   const lsof = await commandRunner("/usr/sbin/lsof", [
     "-a",
     "-p",
@@ -166,6 +180,63 @@ export async function inspectQaProcess(
       "QA PID does not execute the inspected QA bundle.",
     );
   }
+}
+
+export async function verifyQaProcess(
+  pid,
+  root,
+  bundlePath = canonicalQaBundle,
+  { sourceRoot = projectRoot, commandRunner = runCommand } = {},
+) {
+  const { bundle, receipt } = await verifyQaBuild(bundlePath, {
+    sourceRoot,
+    commandRunner,
+  });
+  if (root === undefined) {
+    await assertProcessExecutable(pid, bundle, commandRunner);
+  } else {
+    await inspectQaProcess(pid, root, bundlePath, {
+      commandRunner,
+      expectedBundlePath: qaBuildPaths(sourceRoot).bundlePath,
+    });
+  }
+  const result = await commandRunner(
+    "/bin/ps",
+    ["-p", String(pid), "-o", "lstart="],
+    {
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+    },
+  );
+  const startedAtMs = Date.parse(`${result.stdout.trim()} UTC`);
+  // lstart has second precision. Reject the ambiguous completion second, too:
+  // an old process can retain old mapped bytes at a newly replaced pathname.
+  if (
+    result.code !== 0 ||
+    !Number.isFinite(startedAtMs) ||
+    startedAtMs <= receipt.completedAtMs ||
+    startedAtMs > Date.now()
+  ) {
+    throw new QaAcceptanceError(
+      "QA process is not proven newer than its build; relaunch required.",
+    );
+  }
+  return { bundle, receipt, pid, startedAtMs };
+}
+
+export async function inspectQaProcess(
+  pid,
+  root,
+  bundlePath = canonicalQaBundle,
+  { commandRunner = runCommand, expectedBundlePath = canonicalQaBundle } = {},
+) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new QaAcceptanceError("QA PID must be a positive integer.");
+  }
+  const [bundle, runRoot] = await Promise.all([
+    inspectQaBundle(bundlePath, { commandRunner, expectedBundlePath }),
+    resolveRunRoot(root),
+  ]);
+  await assertProcessExecutable(pid, bundle, commandRunner);
   const marker = await readJson(join(runRoot.root, QA_RUNTIME_MARKER_FILE));
   assertExactKeys(marker, RUNTIME_MARKER_KEYS, "QA runtime marker");
   const [markerExecutable, markerAppData, markerCodexHome, markerLog] =
@@ -242,18 +313,28 @@ export async function launchQa(
   root,
   {
     commandRunner = runCommand,
-    expectedBundlePath = canonicalQaBundle,
     spawnImpl = spawn,
+    sourceRoot = projectRoot,
   } = {},
 ) {
-  const [bundle, runRoot, runningPids] = await Promise.all([
-    inspectQaBundle(bundlePath, { commandRunner, expectedBundlePath }),
+  const [runRoot, runningPids] = await Promise.all([
     resolveRunRoot(root),
     findRunningQaPids(commandRunner),
   ]);
   if (runningPids.length > 0) {
     throw new QaAcceptanceError(
       `Refusing to launch while QA candidate PID(s) are running: ${runningPids.join(", ")}.`,
+    );
+  }
+  const { bundle, receipt } = await verifyQaBuild(bundlePath, {
+    sourceRoot,
+    commandRunner,
+  });
+  // Allow OS process metadata to distinguish this launch from pre-build PIDs.
+  const nextSecond = Math.floor(receipt.completedAtMs / 1000) * 1000 + 1000;
+  if (Date.now() < nextSecond) {
+    await new Promise((resolvePromise) =>
+      setTimeout(resolvePromise, nextSecond - Date.now()),
     );
   }
   const child = spawnImpl(bundle.executablePath, [], {
@@ -359,11 +440,13 @@ export async function quitQa(
 async function run() {
   const [command, ...arguments_] = process.argv.slice(2);
   const usage =
-    "Usage: identity <inspect-bundle|inspect-process|launch|quit|restart|cleanup> [options]";
+    "Usage: identity <inspect-bundle|inspect-process|verify-build|verify-process|launch|quit|restart|cleanup> [options]";
   if (
     ![
       "inspect-bundle",
       "inspect-process",
+      "verify-build",
+      "verify-process",
       "launch",
       "quit",
       "restart",
@@ -377,6 +460,35 @@ async function run() {
     : canonicalQaBundle;
   if (command === "inspect-bundle") {
     console.log(JSON.stringify(await inspectQaBundle(bundle), null, 2));
+    return;
+  }
+  if (command === "verify-build" || command === "verify-process") {
+    const proof =
+      command === "verify-build"
+        ? await verifyQaBuild(bundle)
+        : await verifyQaProcess(
+            Number(optionValue(arguments_, "--pid")),
+            arguments_.includes("--root")
+              ? optionValue(arguments_, "--root")
+              : undefined,
+            bundle,
+          );
+    console.log(
+      JSON.stringify(
+        {
+          verified: true,
+          buildId: proof.receipt.buildId,
+          revision: proof.receipt.revision,
+          sourceFingerprint: proof.receipt.sourceFingerprint,
+          executableSha256: proof.receipt.executableSha256,
+          ...(command === "verify-process"
+            ? { pid: proof.pid, startedAtMs: proof.startedAtMs }
+            : {}),
+        },
+        null,
+        2,
+      ),
+    );
     return;
   }
   const root = optionValue(arguments_, "--root");
@@ -412,7 +524,14 @@ if (
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   run().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    const strict = ["verify-build", "verify-process"].includes(process.argv[2]);
+    console.error(
+      strict && !(error instanceof QaAcceptanceError)
+        ? "Unable to verify the current QA build or process."
+        : error instanceof Error
+          ? error.message
+          : String(error),
+    );
     process.exitCode = 1;
   });
 }

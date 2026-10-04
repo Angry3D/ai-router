@@ -60,13 +60,10 @@ Responses 事件，回退、历史、用量和诊断继续沿用既有语义。�
 私有文件发布，成功仍只返回包含 `status / path / mimeType / width / height / bytes / sha256 / assetId`
 的单个文本 JSON 块。HTTP 图片入口保持成功响应字节不变，不解析其中的 URL 或下载资产。
 
-资产下载只接受公共 HTTPS 的 443 端口。每次连接都检查全部 DNS 结果，固定获准地址并保留原域名的
-TLS 验证；本机、私网、链路本地和保守规则排除的特殊用途地址均拒绝。下载使用独立客户端，不继承
-生成接口密钥、gateway token、Cookie、Referer 或环境代理。签名查询参数只用于当前下载。
+资产下载使用独立客户端，保持 `no_proxy()`，不继承生成接口密钥、gateway token、Cookie、Referer 或环境代理。URL 只需通过客户端的解析和请求构造；不再执行 URL 长度、scheme、端口、userinfo、fragment、主机类别、DNS 结果、公网地址或远端 peer 准入。资源上限、截止时间、PNG 完整性和私有发布仍然生效。
 
-最多跟随三次经过同样检查的重定向，即最多四次资产 GET；整个下载阶段共用 600 秒截止时间，单跳 DNS
-最多 10 秒、连接最多 30 秒。传输及内容解码后的资产各不超过 48 MiB，最终仍以 PNG 字节校验为准。
-需要额外认证的图片源、自定义端口、私网图片源和非 PNG 格式不在支持范围内。
+最多跟随三次显式处理的重定向，即最多四次资产 GET；整个下载阶段共用 600 秒截止时间。支持的 HTTP(S) 目标由 reqwest 直接请求，无法构造或发送的目标按资产下载失败处理。传输及内容解码后的资产各不超过 48 MiB，最终仍以 PNG 字节校验为准。
+额外认证的图片源不会继承生成请求凭据；图片源是否可访问由该直接 GET 的网络结果决定。
 
 ## 图片错误
 
@@ -78,13 +75,11 @@ retryable 只供调用方判断以后是否值得手动重试，不会让 Router
 生图接口的 3xx 响应按上游非成功状态处理，生成客户端显式关闭自动重定向和重试，避免 307/308
 导致第二次生成 POST。生成结果中的图片 URL 使用前述独立的受控 GET 重定向规则。
 
-没有可用图片载体返回 `image_result_missing`，不允许的 URL 或跳转目标返回 `image_result_invalid_url`，
-下载失败返回 `image_asset_download_failed`，其 stage 为 `asset_download`。这些本地错误使用固定描述，
+没有可用图片载体返回 `image_result_missing`，URL 解析、请求构造、网络、状态或响应读取失败返回
+`image_asset_download_failed`，其 stage 为 `asset_download`。这些本地错误使用固定描述，
 category 为 `unknown_upstream`，retryable 为 false；下载失败不会重新生图或切换路由。
 
-upstreamStatus 指向实际相关操作：来源校验和首次 GET 前的 URL 拒绝使用生成响应状态；下载失败使用
-资产 GET 的状态，尚无响应时为 null；跳转目标拒绝使用对应重定向状态；PNG 校验使用提供图片字节的
-响应状态。不能用生成成功的 200 代替下载失败的状态。
+upstreamStatus 指向实际相关操作：来源选择/校验失败使用生成响应状态；资产 URL 解析或请求尚未收到响应时为 null；资产 GET 或重定向处理失败使用相关资产响应状态。PNG 校验使用提供图片字节的响应状态。不能用生成成功的 200 代替下载失败的状态。
 
 上游 HTTP 错误只解析 64 KiB 内的 lowercase `error.{code,message}` 或顶层 `{code,message}`。
 category 只来自精确、区分大小写的 code 白名单；未知 code 始终是 `unknown_upstream`，不会根据自由文本或

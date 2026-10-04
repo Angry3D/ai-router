@@ -1,16 +1,12 @@
 use std::fmt;
 
+use super::asset::{ImageAssetErrorKind, MAX_BASE64_BYTES, MCP_JSON_RESPONSE_LIMIT};
 use axum::body::Bytes;
 use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
 };
 use serde_json::value::RawValue;
-
-use super::{
-    asset::{ImageAssetErrorKind, MAX_BASE64_BYTES, MCP_JSON_RESPONSE_LIMIT},
-    download::MAX_URL_BYTES,
-};
 
 // Neither carrier is safe to format: it may contain image data or a signed URL.
 pub(super) enum ImageResultSource {
@@ -43,16 +39,8 @@ fn select_image_source(body: &[u8]) -> Result<ImageResultSource, ImageAssetError
         return expand_base64_string(encoded.get()).map(ImageResultSource::Base64);
     }
     let url = selected.url.ok_or(ImageAssetErrorKind::MissingResult)?;
-    // A JSON escape uses at most six source bytes for each decoded byte.
-    // Reject huge URL tokens before the string decoder allocates its scratch.
-    if url.get().len() > MAX_URL_BYTES * 6 + 2 {
-        return Err(ImageAssetErrorKind::InvalidUrl);
-    }
     let url: String =
         serde_json::from_str(url.get()).map_err(|_| ImageAssetErrorKind::InvalidResponse)?;
-    if url.len() > MAX_URL_BYTES {
-        return Err(ImageAssetErrorKind::InvalidUrl);
-    }
     Ok(ImageResultSource::Url(url))
 }
 
@@ -315,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_unselected_values_and_oversized_escaped_urls_are_bounded() {
+    fn escaped_urls_remain_bounded_by_the_mcp_response_limit() {
         let padding = "[null,true,0,{}],".repeat(16_384);
         assert_base64(
             &format!("{{\"extra\":[{padding}null],\"data\":[{{\"b64_json\":\"AQ==\"}}]}}"),
@@ -323,11 +311,11 @@ mod tests {
         );
         let response = format!(
             "{{\"data\":[{{\"url\":\"{}\"}}]}}",
-            "\\u0041".repeat(MAX_URL_BYTES + 1)
+            "\\u0041".repeat(8 * 1024 + 1)
         );
-        assert_eq!(
-            take_image_source(Bytes::from(response)).err(),
-            Some(ImageAssetErrorKind::InvalidUrl)
-        );
+        let Ok(ImageResultSource::Url(url)) = take_image_source(Bytes::from(response)) else {
+            panic!("expected a URL carrier");
+        };
+        assert_eq!(url.len(), 8 * 1024 + 1);
     }
 }
