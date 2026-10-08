@@ -87,7 +87,7 @@ use crate::application_update::ApplicationUpdateCoordinator;
 use crate::codex_auth_session::{CodexAuthSessionFetcher, read_safe_storage_key};
 use crate::pricing_sync::PricingSyncCoordinator;
 
-mod errors;
+pub(crate) mod errors;
 pub(crate) mod logging;
 
 use self::errors::{
@@ -298,6 +298,8 @@ pub struct DesktopLifecycleServices {
     routing: RoutingSnapshotStore,
     route_health: Arc<RouteHealthRegistry>,
     outbound_proxy: OutboundProxyTransport,
+    #[cfg(target_os = "macos")]
+    system_proxy_monitor: Mutex<Option<crate::system_proxy::SystemProxyMonitor>>,
     pricing: CatalogProvider,
     pricing_sync: PricingSyncCoordinator,
     routing_write_gate: Arc<tokio::sync::Mutex<()>>,
@@ -437,6 +439,8 @@ impl DesktopLifecycleServices {
             routing: RoutingSnapshotStore::default(),
             route_health,
             outbound_proxy: OutboundProxyTransport::default(),
+            #[cfg(target_os = "macos")]
+            system_proxy_monitor: Mutex::new(None),
             pricing,
             pricing_sync,
             routing_write_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -495,12 +499,34 @@ impl DesktopLifecycleServices {
         self.database.lock().await.clone()
     }
 
-    /// Returns the shared outbound proxy snapshot handle. Every consumer reads
-    /// the current endpoint while it builds a request client, so a settings
-    /// change reaches the next operation without a notification path.
+    /// Returns the shared System/Custom policy authority. Native notifications
+    /// replace its snapshot; every new operation captures the current revision.
     #[must_use]
     pub fn outbound_proxy(&self) -> OutboundProxyTransport {
         self.outbound_proxy.clone()
+    }
+
+    /// Started only by real desktop composition, never by unit-test constructors.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn start_system_proxy_monitor(&self) {
+        let Ok(mut monitor) = self.system_proxy_monitor.lock() else {
+            self.outbound_proxy
+                .set_system_settings(Err(router_core::proxy::SystemProxyError::ReadFailed));
+            return;
+        };
+        if monitor.is_none() {
+            *monitor = crate::system_proxy::SystemProxyMonitor::start(self.outbound_proxy.clone());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn stop_system_proxy_monitor(&self) {
+        let monitor = self
+            .system_proxy_monitor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(monitor);
     }
 
     /// Installs the outcome of loading the local pricing table.
@@ -973,7 +999,7 @@ impl DesktopLifecycleServices {
         let balance_enabled_route_ids = SqliteBalanceRouteSource::new(database.clone())
             .eligible_route_ids()
             .await
-            .map_err(map_balance_error)?;
+            .map_err(|error| map_balance_error(&error))?;
         let balance = self.balance.lock().await.clone();
         let balances = balance.as_ref().map_or_else(Vec::new, |balance| {
             bootstrap
@@ -2085,7 +2111,10 @@ impl DesktopLifecycleServices {
             .await
             .clone()
             .ok_or_else(|| ipc_error("balance_unavailable", "余额服务尚未就绪。", true))?;
-        balance.refresh_all().await.map_err(map_balance_error)
+        balance
+            .refresh_all()
+            .await
+            .map_err(|error| map_balance_error(&error))
     }
 
     pub async fn test_balance(
@@ -2107,7 +2136,7 @@ impl DesktopLifecycleServices {
                 &base_url,
             )
             .await
-            .map_err(map_balance_error)
+            .map_err(|error| map_balance_error(&error))
     }
 
     pub async fn fetch_route_models(

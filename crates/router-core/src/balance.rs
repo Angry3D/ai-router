@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 use crate::{
     domain::{ApiKey, BaseUrl, MAX_BALANCE_SCRIPT_BYTES},
     proxy::{
-        OutboundHttpClient, OutboundProxyTransport,
+        OutboundClientError, OutboundHttpClient, OutboundProxyTransport, SystemProxyError,
         upstream::{DecodeError, decode_supported, response_encodings},
     },
 };
@@ -202,6 +202,7 @@ pub enum BalanceErrorCategory {
     InvalidRequest,
     RequestTooLarge,
     Network,
+    SystemProxy,
     HttpStatus,
     ResponseTooLarge,
     InvalidResponse,
@@ -320,18 +321,22 @@ impl BalanceExecutor {
         retry_delay: Duration,
         outbound_proxy: &OutboundProxyTransport,
     ) -> Result<Self, reqwest::Error> {
-        let client = OutboundHttpClient::new(outbound_proxy.clone(), || {
-            reqwest::Client::builder().redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if !matches!(attempt.url().scheme(), "http" | "https") {
-                    return attempt.stop();
-                }
-                if attempt.previous().len() >= 10 {
-                    attempt.stop()
-                } else {
-                    attempt.follow()
-                }
-            }))
-        })?;
+        let client = OutboundHttpClient::new_with_redirect_policy(
+            outbound_proxy.clone(),
+            reqwest::Client::builder,
+            || {
+                reqwest::redirect::Policy::custom(|attempt| {
+                    if !matches!(attempt.url().scheme(), "http" | "https") {
+                        return attempt.stop();
+                    }
+                    if attempt.previous().len() >= 10 {
+                        attempt.stop()
+                    } else {
+                        attempt.follow()
+                    }
+                })
+            },
+        )?;
         Ok(Self {
             client,
             attempt_timeout,
@@ -368,9 +373,18 @@ impl BalanceExecutor {
         let request = prepared
             .build_request(remaining(self.attempt_timeout, started)?)
             .await?;
-        let client = self.client.client().map_err(|_| {
-            BalanceError::retryable(BalanceErrorStage::Http, BalanceErrorCategory::Network)
-        })?;
+        let client = self
+            .client
+            .client_for(&request.url)
+            .map_err(|error| match error {
+                OutboundClientError::SystemProxy(_) => BalanceError::deterministic(
+                    BalanceErrorStage::Http,
+                    BalanceErrorCategory::SystemProxy,
+                ),
+                _ => {
+                    BalanceError::retryable(BalanceErrorStage::Http, BalanceErrorCategory::Network)
+                }
+            })?;
         let mut builder = client
             .request(request.method, request.url)
             .headers(request.headers)
@@ -382,8 +396,18 @@ impl BalanceExecutor {
             tokio::time::timeout(remaining(self.attempt_timeout, started)?, builder.send())
                 .await
                 .map_err(|_| timeout_error())?
-                .map_err(|_| {
-                    BalanceError::retryable(BalanceErrorStage::Http, BalanceErrorCategory::Network)
+                .map_err(|error| {
+                    if SystemProxyError::from_reqwest(&error).is_some() {
+                        BalanceError::deterministic(
+                            BalanceErrorStage::Http,
+                            BalanceErrorCategory::SystemProxy,
+                        )
+                    } else {
+                        BalanceError::retryable(
+                            BalanceErrorStage::Http,
+                            BalanceErrorCategory::Network,
+                        )
+                    }
                 })?;
         let status = response.status();
         if !status.is_success() {
@@ -2071,6 +2095,38 @@ mod tests {
 
         assert_eq!(result.remaining, Some(12.0));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        outbound_proxy.set_endpoint(None);
+        outbound_proxy.set_system_settings(Ok(crate::proxy::SystemProxySettings {
+            http: Some(
+                url::Url::parse(&format!("http://{}", server.address)).expect("system proxy URL"),
+            ),
+            automatic_enabled: true,
+            ..crate::proxy::SystemProxySettings::default()
+        }));
+        assert!(
+            executor
+                .query(
+                    &custom_query(query_source("http://balance.external.invalid/usage")),
+                    &key(),
+                    &base("https://unused.test")
+                )
+                .await
+                .is_ok()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        outbound_proxy.set_system_settings(Err(SystemProxyError::ReadFailed));
+        let error = executor
+            .query(
+                &custom_query(query_source("http://balance.external.invalid/usage")),
+                &key(),
+                &base("https://unused.test"),
+            )
+            .await
+            .err()
+            .expect("settings failure");
+        assert_eq!(error.category, BalanceErrorCategory::SystemProxy);
+        assert!(!error.transient);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         server.shutdown().await;
     }
 

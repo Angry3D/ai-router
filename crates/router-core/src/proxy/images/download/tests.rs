@@ -80,7 +80,7 @@ async fn non_https_private_literal_and_custom_port_are_direct_gets() {
             .expect("plain HTTP response");
     });
 
-    let image = ImageAssetDownloader::default()
+    let image = ImageAssetDownloader::new(crate::proxy::OutboundProxyTransport::default())
         .download(
             format!(
                 "http://127.0.0.1:{}/image.png?signature=synthetic",
@@ -125,7 +125,7 @@ async fn url_parse_or_request_construction_failures_use_download_error() {
 }
 
 #[tokio::test]
-async fn redirects_are_explicit_and_do_not_reapply_target_admission() {
+async fn redirects_are_explicit_without_added_address_admission() {
     let fixture = AssetFixture::new(vec![
         AssetReply::redirect("/next.png?signature=second")
             .header(header::SET_COOKIE, "credential=secret; Secure"),
@@ -462,6 +462,30 @@ fn asset_download_ignores_proxy_environment() {
                         .is_ok()
                 );
                 assert_eq!(fixture.request_count(), 1);
+                for custom in [false, true] {
+                    let fixture = AssetFixture::new(vec![AssetReply::ok(b"asset".to_vec())]).await;
+                    let proxy = fixture.proxy().await;
+                    let transport = crate::proxy::OutboundProxyTransport::default();
+                    let endpoint =
+                        url::Url::parse(&format!("http://{}", proxy.address)).expect("proxy URL");
+                    transport.set_system_settings(Ok(crate::proxy::SystemProxySettings {
+                        https: (!custom).then_some(endpoint.clone()),
+                        automatic_enabled: true,
+                        ..crate::proxy::SystemProxySettings::default()
+                    }));
+                    if custom {
+                        transport.set_endpoint(Some(endpoint));
+                    }
+                    assert!(
+                        fixture
+                            .downloader()
+                            .with_outbound_proxy(transport)
+                            .download(AssetFixture::url(), StatusCode::OK)
+                            .await
+                            .is_ok()
+                    );
+                    assert_eq!(proxy.requests().len(), 1);
+                }
             });
         return;
     }
@@ -473,8 +497,8 @@ fn asset_download_ignores_proxy_environment() {
             "--test-threads=1",
         ])
         .env(CHILD_MARKER, "1")
-        .env("NO_PROXY", "")
-        .env("no_proxy", "");
+        .env("NO_PROXY", "*")
+        .env("no_proxy", "*");
     for name in [
         "HTTP_PROXY",
         "http_proxy",
@@ -489,4 +513,191 @@ fn asset_download_ignores_proxy_environment() {
     assert!(output.status.success(), "proxy-environment child failed");
     let stdout = std::str::from_utf8(&output.stdout).expect("test output");
     assert!(stdout.contains("1 passed"));
+}
+
+#[tokio::test]
+async fn system_and_custom_https_proxy_downloads_keep_asset_credentials_isolated() {
+    use crate::proxy::{OutboundProxyTransport, SystemProxySettings};
+    for custom in [false, true] {
+        let fixture = AssetFixture::new(vec![AssetReply::ok(b"asset".to_vec())]).await;
+        let proxy = fixture.proxy().await;
+        let transport = OutboundProxyTransport::default();
+        let endpoint = url::Url::parse(&format!("http://{}", proxy.address)).expect("proxy URL");
+        transport.set_system_settings(Ok(SystemProxySettings {
+            https: (!custom).then_some(endpoint.clone()),
+            automatic_enabled: true,
+            ..SystemProxySettings::default()
+        }));
+        if custom {
+            transport.set_endpoint(Some(endpoint));
+        }
+        let image = fixture
+            .downloader()
+            .with_outbound_proxy(transport)
+            .download(AssetFixture::url(), StatusCode::OK)
+            .await
+            .expect("proxied asset");
+        assert_eq!(image.decode().expect("asset body"), b"asset");
+        assert_eq!(proxy.requests().len(), 1);
+        assert!(proxy.requests()[0].starts_with("CONNECT assets.example:443 HTTP/1.1"));
+        let requests = fixture.requests();
+        assert_eq!(requests.len(), 1);
+        for forbidden in [
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "referer",
+            "x-api-key",
+            "x-gateway-token",
+        ] {
+            assert!(!requests[0].headers.contains_key(forbidden));
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_redirects_reselect_manual_proxy_and_explicit_bypass() {
+    use crate::proxy::{OutboundProxyTransport, SystemProxySettings};
+    let fixture = AssetFixture::new(vec![
+        AssetReply::redirect("https://cdn.example/final.png")
+            .header(header::SET_COOKIE, "secret=value"),
+        AssetReply::ok(b"asset".to_vec()),
+    ])
+    .await;
+    let proxy = fixture.proxy().await;
+    let transport = OutboundProxyTransport::default();
+    transport.set_system_settings(Ok(SystemProxySettings {
+        https: Some(url::Url::parse(&format!("http://{}", proxy.address)).expect("proxy URL")),
+        bypass: vec!["cdn.example".to_owned()],
+        automatic_enabled: true,
+        ..SystemProxySettings::default()
+    }));
+    let image = fixture
+        .downloader()
+        .with_outbound_proxy(transport)
+        .download(AssetFixture::url(), StatusCode::OK)
+        .await
+        .expect("redirected asset");
+    assert_eq!(image.decode().expect("body"), b"asset");
+    assert_eq!(proxy.requests().len(), 1);
+    assert_eq!(fixture.request_count(), 2);
+    for request in fixture.requests() {
+        assert!(!request.headers.contains_key(header::COOKIE));
+        assert!(!request.headers.contains_key(header::REFERER));
+        assert!(!request.headers.contains_key(header::AUTHORIZATION));
+    }
+}
+
+#[tokio::test]
+async fn automatic_only_image_redirect_fails_before_the_unrouted_hop() {
+    use crate::proxy::{OutboundProxyTransport, SystemProxyError, SystemProxySettings};
+    let fixture = AssetFixture::new(vec![
+        AssetReply::redirect("https://cdn.example/final.png"),
+        AssetReply::ok(b"must-not-fetch".to_vec()),
+    ])
+    .await;
+    let transport = OutboundProxyTransport::default();
+    transport.set_system_settings(Ok(SystemProxySettings {
+        bypass: vec!["assets.example".to_owned()],
+        automatic_enabled: true,
+        ..SystemProxySettings::default()
+    }));
+    let error = fixture
+        .downloader()
+        .with_outbound_proxy(transport)
+        .download(AssetFixture::url(), StatusCode::OK)
+        .await
+        .expect_err_no_debug("unrouted redirect");
+    assert_eq!(
+        error.system_proxy,
+        Some(SystemProxyError::AutomaticProxyUnsupported)
+    );
+    assert_eq!(error.upstream_status, None);
+    assert_eq!(fixture.request_count(), 1);
+}
+
+#[tokio::test]
+async fn asset_download_keeps_in_flight_body_while_new_operations_adopt_policy() {
+    use crate::proxy::{OutboundProxyTransport, SystemProxyError, SystemProxySettings};
+    let gate = Arc::new(Notify::new());
+    let fixture = AssetFixture::new(vec![
+        AssetReply::gated(b"asset".to_vec(), gate.clone()),
+        AssetReply::ok(b"next".to_vec()),
+    ])
+    .await;
+    let proxy = fixture.proxy().await;
+    let transport = OutboundProxyTransport::default();
+    transport.set_system_settings(Ok(SystemProxySettings {
+        https: Some(url::Url::parse(&format!("http://{}", proxy.address)).expect("proxy URL")),
+        ..SystemProxySettings::default()
+    }));
+    let downloader = fixture.downloader().with_outbound_proxy(transport.clone());
+    let in_flight = downloader.clone();
+    let download = tokio::spawn(async move {
+        in_flight
+            .download(AssetFixture::url(), StatusCode::OK)
+            .await
+    });
+    fixture.wait_for_requests(1).await;
+    transport.set_system_settings(Err(SystemProxyError::ReadFailed));
+    gate.notify_one();
+    let image = download
+        .await
+        .expect("download task")
+        .expect("in-flight response");
+    assert_eq!(image.decode().expect("body"), b"asset");
+    let error = downloader
+        .download(AssetFixture::url(), StatusCode::OK)
+        .await
+        .expect_err_no_debug("new operation blocked");
+    assert_eq!(error.system_proxy, Some(SystemProxyError::ReadFailed));
+    assert_eq!(fixture.request_count(), 1);
+}
+
+#[tokio::test]
+async fn explicit_asset_redirects_keep_the_captured_proxy_revision() {
+    use crate::proxy::{OutboundProxyTransport, SystemProxyError, SystemProxySettings};
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("HTTP proxy");
+    let address = listener.local_addr().expect("proxy address");
+    let transport = OutboundProxyTransport::default();
+    transport.set_system_settings(Ok(SystemProxySettings {
+        http: Some(url::Url::parse(&format!("http://{address}")).expect("proxy URL")),
+        ..SystemProxySettings::default()
+    }));
+    let changed = transport.clone();
+    let proxy = tokio::spawn(async move {
+        for path in ["start", "final"] {
+            let (mut socket, _) = listener.accept().await.expect("proxy request");
+            let mut request = [0_u8; 4096];
+            let count = socket.read(&mut request).await.expect("request bytes");
+            assert!(
+                request[..count]
+                    .starts_with(format!("GET http://assets.invalid/{path} HTTP/1.1").as_bytes())
+            );
+            let response = if path == "start" {
+                changed.set_system_settings(Err(SystemProxyError::ReadFailed));
+                b"HTTP/1.1 302 Found\r\nLocation: http://assets.invalid/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nasset".as_slice()
+            };
+            socket.write_all(response).await.expect("proxy response");
+        }
+    });
+    let downloader = ImageAssetDownloader::new(transport);
+    let image = timeout(
+        Duration::from_secs(3),
+        downloader.download("http://assets.invalid/start".to_owned(), StatusCode::OK),
+    )
+    .await
+    .expect("download deadline")
+    .expect("pinned redirect");
+    assert_eq!(image.decode().expect("body"), b"asset");
+    proxy.await.expect("proxy task");
+    let error = downloader
+        .download("http://assets.invalid/next".to_owned(), StatusCode::OK)
+        .await
+        .expect_err_no_debug("new policy");
+    assert_eq!(error.system_proxy, Some(SystemProxyError::ReadFailed));
 }

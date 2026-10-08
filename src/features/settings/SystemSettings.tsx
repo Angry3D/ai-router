@@ -59,8 +59,7 @@ const recoveryIncidentMessages: Record<
   RecoveryIncidentAction,
   (detectedAt: string) => string
 > = {
-  repaired: (detectedAt) =>
-    `检测到数据库索引损坏，已于 ${detectedAt} 自动修复`,
+  repaired: (detectedAt) => `检测到数据库索引损坏，已于 ${detectedAt} 自动修复`,
   // `quarantined` belongs to the recovery flow that isolates the unusable
   // primary; incidents written by older versions still carry it.
   quarantined: recoveryFlowIncident,
@@ -93,7 +92,7 @@ export function SystemSettings({
   );
 }
 
-type OutboundProxyMode = "direct" | "proxy";
+type OutboundProxyMode = "system" | "proxy";
 type OutboundProxyTestState = "idle" | "pending" | "success" | "failure";
 
 const OUTBOUND_PROXY_URL_MAX_LENGTH = 2048;
@@ -135,7 +134,7 @@ function OutboundProxySettings({
   const queryClient = useQueryClient();
   const [confirmed, setConfirmed] = useState(settings);
   const [mode, setMode] = useState<OutboundProxyMode>(
-    settings.enabled ? "proxy" : "direct",
+    settings.enabled ? "proxy" : "system",
   );
   const [draftUrl, setDraftUrl] = useState(settings.url ?? "");
   const [syncedSnapshotKey, setSyncedSnapshotKey] = useState(
@@ -152,7 +151,7 @@ function OutboundProxySettings({
   if (!pending && syncedSnapshotKey !== snapshotKey) {
     setSyncedSnapshotKey(snapshotKey);
     setConfirmed(settings);
-    setMode(settings.enabled ? "proxy" : "direct");
+    setMode(settings.enabled ? "proxy" : "system");
     setDraftUrl(settings.url ?? "");
     setFieldError(null);
     setModeError(null);
@@ -181,10 +180,10 @@ function OutboundProxySettings({
     try {
       await updateOutboundProxySettings(next);
       setConfirmed(next);
-      if (nextMode === "direct") setDraftUrl(next.url ?? "");
+      if (nextMode === "system") setDraftUrl(next.url ?? "");
       await refreshSettings();
     } catch (reason) {
-      setMode(confirmed.enabled ? "proxy" : "direct");
+      setMode(confirmed.enabled ? "proxy" : "system");
       setModeError(normalizeIpcError(reason).message);
     } finally {
       setSavePending(false);
@@ -252,8 +251,8 @@ function OutboundProxySettings({
         >
           {(
             [
-              { value: "direct", label: "直连" },
-              { value: "proxy", label: "代理" },
+              { value: "system", label: "跟随系统" },
+              { value: "proxy", label: "自定义代理" },
             ] as const
           ).map((option) => (
             <label className="settings-segment-option" key={option.value}>
@@ -360,8 +359,8 @@ function OutboundProxySettings({
       ) : null}
       <p id="outbound-proxy-help" className="outbound-proxy-help">
         {mode === "proxy"
-          ? "仅本地回环地址直连，外部请求使用此代理。"
-          : "外部请求将直接连接目标服务。"}
+          ? "外部请求（含图片下载和应用更新）使用此代理，本地回环地址始终直连。价格同步和会话获取仍跟随系统。"
+          : "跟随 macOS 的 HTTP、HTTPS、SOCKS 手动代理和绕过规则，未配置代理时直连。不执行 PAC/WPAD；仅有自动代理可用时需改用自定义代理。本地回环地址始终直连。"}
       </p>
       <p
         className="outbound-proxy-mode-error"
@@ -376,7 +375,9 @@ function OutboundProxySettings({
 
 function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
   const queryClient = useQueryClient();
-  const [confirmed, setConfirmed] = useState<MenuBarSettingsDto>(snapshot.menuBar);
+  const [confirmed, setConfirmed] = useState<MenuBarSettingsDto>(
+    snapshot.menuBar,
+  );
   const [draft, setDraft] = useState<MenuBarSettingsDto>(snapshot.menuBar);
   const snapshotKey = `${snapshot.menuBar.statusTextEnabled}:${snapshot.menuBar.activityAnimationEnabled}`;
   const [syncedSnapshotKey, setSyncedSnapshotKey] = useState(snapshotKey);
@@ -413,7 +414,10 @@ function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
           checked={draft.statusTextEnabled}
           disabled={pending}
           onChange={(event) =>
-            void submit({ ...draft, statusTextEnabled: event.currentTarget.checked })
+            void submit({
+              ...draft,
+              statusTextEnabled: event.currentTarget.checked,
+            })
           }
         />
         <SettingsSwitch
@@ -421,11 +425,18 @@ function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
           checked={draft.activityAnimationEnabled}
           disabled={pending}
           onChange={(event) =>
-            void submit({ ...draft, activityAnimationEnabled: event.currentTarget.checked })
+            void submit({
+              ...draft,
+              activityAnimationEnabled: event.currentTarget.checked,
+            })
           }
         />
       </div>
-      <p className="menu-bar-settings-error" role={error ? "alert" : undefined} aria-live="polite">
+      <p
+        className="menu-bar-settings-error"
+        role={error ? "alert" : undefined}
+        aria-live="polite"
+      >
         {error ?? "\u00a0"}
       </p>
     </SettingsSection>

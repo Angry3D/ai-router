@@ -5,7 +5,7 @@ use router_core::{
     codex_config::CodexConfigError,
     domain::{CodexModelValidationError, FallbackExcludedModelValidationError, ValidationError},
     lifecycle::{AppLifecycleIssue, AppLifecyclePhase, AppLifecycleSnapshot, LifecycleFailure},
-    proxy::{McpImageAssetMaintenanceError, ProxyPortError},
+    proxy::{McpImageAssetMaintenanceError, ProxyPortError, SystemProxyError},
     recovery::{
         DatabaseStartupIssue, RecoveryError, classify_recovery_startup_error,
         classify_storage_startup_error,
@@ -38,6 +38,21 @@ pub(super) fn map_validation_error(error: &ValidationError) -> IpcErrorDto {
         retryable: false,
         field: Some(error.field.to_owned()),
     }
+}
+
+pub(crate) fn map_system_proxy_error(error: SystemProxyError) -> IpcErrorDto {
+    let message = match error {
+        SystemProxyError::ReadFailed => {
+            "无法读取 macOS 系统代理设置。请检查系统设置或切换为自定义代理。"
+        }
+        SystemProxyError::InvalidSettings => {
+            "macOS 系统代理设置无效。请检查系统设置或切换为自定义代理。"
+        }
+        SystemProxyError::AutomaticProxyUnsupported => {
+            "此目标仅有 PAC/WPAD 自动代理规则，应用不执行这些规则。请配置系统手动代理或切换为自定义代理。"
+        }
+    };
+    ipc_error(error.code(), message, true)
 }
 
 pub(super) fn map_mcp_image_asset_error(error: McpImageAssetMaintenanceError) -> IpcErrorDto {
@@ -276,7 +291,14 @@ pub(super) fn map_recovery_lifecycle_result(
     }
 }
 
-pub(super) fn map_balance_error(_error: router_core::balance::BalanceError) -> IpcErrorDto {
+pub(super) fn map_balance_error(error: &router_core::balance::BalanceError) -> IpcErrorDto {
+    if error.category == router_core::balance::BalanceErrorCategory::SystemProxy {
+        return ipc_error(
+            "system_proxy_unavailable",
+            "系统代理无法用于此目标。请检查系统手动代理设置或切换为自定义代理；应用不执行 PAC/WPAD 规则。",
+            true,
+        );
+    }
     ipc_error("balance_query_failed", "余额查询失败。", true)
 }
 
@@ -286,6 +308,7 @@ pub(super) const fn route_models_error_category(
     match kind {
         UpstreamModelsErrorKind::Unauthorized => RouteModelsErrorCategory::Unauthorized,
         UpstreamModelsErrorKind::NotFound => RouteModelsErrorCategory::NotFound,
+        UpstreamModelsErrorKind::SystemProxy(_) => RouteModelsErrorCategory::SystemProxy,
         UpstreamModelsErrorKind::Network => RouteModelsErrorCategory::Network,
         UpstreamModelsErrorKind::Timeout => RouteModelsErrorCategory::Timeout,
         UpstreamModelsErrorKind::HttpStatus => RouteModelsErrorCategory::HttpStatus,
@@ -416,4 +439,43 @@ pub(super) fn map_codex_auth_error(error: &CodexAuthError) -> IpcErrorDto {
         CodexAuthError::RestoreFailed => "还原失败，原文件保持不变。",
     };
     ipc_error(error.code(), message, error.retryable())
+}
+
+#[cfg(test)]
+mod system_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn proxy_errors_are_bounded_actionable_and_not_field_validation() {
+        for (error, code) in [
+            (SystemProxyError::ReadFailed, "system_proxy_read_failed"),
+            (SystemProxyError::InvalidSettings, "system_proxy_invalid"),
+            (
+                SystemProxyError::AutomaticProxyUnsupported,
+                "system_proxy_automatic_unsupported",
+            ),
+        ] {
+            let mapped = map_system_proxy_error(error);
+            assert_eq!(mapped.code, code);
+            assert!(mapped.retryable);
+            assert_eq!(mapped.field, None);
+            assert!(mapped.message.chars().count() < 160);
+            assert!(mapped.message.contains("自定义代理"));
+            assert!(!mapped.message.contains("://"));
+        }
+        assert_eq!(
+            route_models_error_category(UpstreamModelsErrorKind::SystemProxy(
+                SystemProxyError::ReadFailed,
+            )),
+            RouteModelsErrorCategory::SystemProxy,
+        );
+        let balance = map_balance_error(&router_core::balance::BalanceError {
+            stage: router_core::balance::BalanceErrorStage::Http,
+            category: router_core::balance::BalanceErrorCategory::SystemProxy,
+            transient: false,
+        });
+        assert_eq!(balance.code, "system_proxy_unavailable");
+        assert!(balance.message.contains("自定义代理"));
+        assert!(!balance.message.contains("://"));
+    }
 }

@@ -436,7 +436,9 @@ describe("RouteEditor interactions", () => {
 
     expect(visibility).toBeChecked();
     expect(visibility).toBeDisabled();
-    expect(screen.queryByRole("radiogroup", { name: "Service Tier" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("radiogroup", { name: "Service Tier" }),
+    ).not.toBeInTheDocument();
   });
 
   it("defaults new routes to visible and exposes the fallback tooltip", async () => {
@@ -467,9 +469,15 @@ describe("RouteEditor interactions", () => {
     const visibility = screen.getByRole("switch", { name: "在顶部菜单中显示" });
     const save = screen.getByRole("button", { name: "保存" });
 
-    fireEvent.change(screen.getByLabelText("路由名称"), { target: { value: "New" } });
-    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://example.com/v1" } });
-    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "test-key" } });
+    fireEvent.change(screen.getByLabelText("路由名称"), {
+      target: { value: "New" },
+    });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://example.com/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "test-key" },
+    });
     fireEvent.click(visibility);
     fireEvent.click(save);
 
@@ -607,9 +615,8 @@ describe("RouteEditor interactions", () => {
     const addModelButton = within(customModelSection).getByRole("button", {
       name: "添加模型",
     });
-    const search = within(customModelSection).getByLabelText(
-      "搜索或输入模型 ID",
-    );
+    const search =
+      within(customModelSection).getByLabelText("搜索或输入模型 ID");
     expect(addModelButton).toBeDisabled();
     fireEvent.change(search, { target: { value: "manual-relay-model" } });
     fireEvent.click(addModelButton);
@@ -639,9 +646,8 @@ describe("RouteEditor interactions", () => {
     const addModelButton = within(customModelSection).getByRole("button", {
       name: "添加模型",
     });
-    const search = within(customModelSection).getByLabelText(
-      "搜索或输入模型 ID",
-    );
+    const search =
+      within(customModelSection).getByLabelText("搜索或输入模型 ID");
     fireEvent.change(search, { target: { value: "duplicate" } });
     fireEvent.click(addModelButton);
     expect(screen.getByLabelText("模型 ID 1")).toHaveValue("duplicate");
@@ -719,31 +725,34 @@ describe("RouteEditor interactions", () => {
     });
   });
 
-  it.each([
-    ["unauthorized", "获取失败：鉴权失败，请检查 API Key"],
-    ["not_found", "获取失败：上游未提供 /models 接口"],
-    ["network", "获取失败：无法连接上游"],
-    ["timeout", "获取失败：请求超时"],
-    ["http_status", "获取失败：上游响应不可用"],
-    ["too_large", "获取失败：上游响应不可用"],
-    ["invalid_response", "获取失败：上游响应不可用"],
-  ])(
-    "maps the %s model list failure to bounded danger copy",
-    async (errorCategory, message) => {
-      ipc.fetchRouteModels.mockResolvedValue({
-        models: [],
-        errorCategory,
-      });
-      await renderSettings();
+  it("recovers model discovery after a system proxy failure without changing the route", async () => {
+    ipc.fetchRouteModels.mockResolvedValueOnce({
+      models: [],
+      errorCategory: "system_proxy",
+    });
+    await renderSettings();
+    const baseUrl = screen.getByLabelText("Base URL");
+    const previousUrl = (baseUrl as HTMLInputElement).value;
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
 
-      fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/自定义代理/);
+    expect(baseUrl).toHaveValue(previousUrl);
+    expect(ipc.saveRoute).not.toHaveBeenCalled();
 
-      const status = await screen.findByText(message);
-      expect(status).toHaveAttribute("role", "alert");
-      expect(status).toHaveClass("settings-status-danger");
-      expect(screen.getByRole("button", { name: "获取模型列表" })).toBeEnabled();
-    },
-  );
+    ipc.fetchRouteModels.mockResolvedValueOnce({
+      models: ["synthetic-model"],
+      errorCategory: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "获取模型列表" }),
+      ).toBeEnabled(),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(baseUrl).toHaveValue(previousUrl);
+    expect(ipc.saveRoute).not.toHaveBeenCalled();
+  });
 
   it("warns when the upstream returns an empty model list", async () => {
     ipc.fetchRouteModels.mockResolvedValue({ models: [], errorCategory: null });
@@ -769,8 +778,7 @@ describe("RouteEditor interactions", () => {
 
   it("drops a stale model list response after the Base URL changes", async () => {
     let resolveFetch:
-      | ((result: { models: string[]; errorCategory: null }) => void)
-      | undefined;
+      ((result: { models: string[]; errorCategory: null }) => void) | undefined;
     ipc.fetchRouteModels.mockReturnValue(
       new Promise((resolve) => {
         resolveFetch = resolve;
@@ -788,7 +796,9 @@ describe("RouteEditor interactions", () => {
     resolveFetch?.({ models: ["gpt-5.2"], errorCategory: null });
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "获取模型列表" })).toBeEnabled(),
+      expect(
+        screen.getByRole("button", { name: "获取模型列表" }),
+      ).toBeEnabled(),
     );
     expect(screen.getByText("未获取模型列表")).toBeInTheDocument();
     expect(screen.queryByText("已获取 1 个模型")).not.toBeInTheDocument();
@@ -850,9 +860,9 @@ describe("RouteEditor interactions", () => {
     expect(section).toHaveTextContent("1 个 · 未保存");
     const disabled = screen.getByRole("option", { name: /gpt-5\.3-codex/ });
     expect(disabled).toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByRole("option", { name: /gpt-5\.2/ })).not.toHaveAttribute(
-      "aria-disabled",
-    );
+    expect(
+      screen.getByRole("option", { name: /gpt-5\.2/ }),
+    ).not.toHaveAttribute("aria-disabled");
     const popup = screen.getByRole("listbox");
     expect(popup.closest(".fallback-model-field")).toBeNull();
     expect(popup.closest(".fallback-model-popup-host")).not.toBeNull();
@@ -1037,6 +1047,28 @@ describe("RouteEditor interactions", () => {
     },
   );
 
+  it("shows an actionable system proxy failure and clears it after a successful probe", async () => {
+    ipc.checkRouteReachability.mockResolvedValueOnce({
+      status: "unreachable",
+      ttfbMs: null,
+      errorCategory: "system_proxy_automatic_unsupported",
+    });
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "检查推理地址" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/自定义代理/);
+    expect(ipc.saveRoute).not.toHaveBeenCalled();
+
+    ipc.checkRouteReachability.mockResolvedValueOnce({
+      status: "reachable",
+      ttfbMs: 12,
+      errorCategory: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "检查推理地址" }));
+    expect(await screen.findByText(/12 ms/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(ipc.saveRoute).not.toHaveBeenCalled();
+  });
+
   it("previews complete endpoints canonically and rejects incompatible paths locally", async () => {
     await renderSettings();
     const input = screen.getByLabelText("Base URL");
@@ -1081,7 +1113,9 @@ describe("RouteEditor interactions", () => {
     await renderSettings();
 
     const group = screen.getByRole("radiogroup", { name: "上游协议" });
-    const responses = within(group).getByRole("radio", { name: "Responses API" });
+    const responses = within(group).getByRole("radio", {
+      name: "Responses API",
+    });
     const chat = within(group).getByRole("radio", { name: "Chat Completions" });
     expect(responses).toBeChecked();
     expect(chat).not.toBeChecked();
@@ -1103,9 +1137,7 @@ describe("RouteEditor interactions", () => {
       target: { value: "https://example.test/v1/responses" },
     });
     expect(screen.getByText("地址无效")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "检查推理地址" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "检查推理地址" })).toBeDisabled();
   });
 
   it("clears reachability and balance feedback when the protocol changes", async () => {

@@ -8,12 +8,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use arc_swap::ArcSwap;
 use router_core::{
     app_api::{
         ApplicationUpdateFailureDto, ApplicationUpdateNotesDto, ApplicationUpdateOperationDto,
         ApplicationUpdateProgressDto, ApplicationUpdateReleaseDto, ApplicationUpdateSnapshotDto,
     },
-    proxy::OutboundProxyTransport,
+    proxy::{OutboundProxyPolicy, OutboundProxyTransport, SystemProxyError},
     state::{AppRuntimeState, IpcErrorDto, StateArea},
 };
 use semver::Version;
@@ -21,7 +22,7 @@ use tauri::{AppHandle, ipc::Channel};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use url::Url;
 
-use crate::runtime::DesktopLifecycleServices;
+use crate::runtime::{DesktopLifecycleServices, errors::map_system_proxy_error};
 
 const AUTOMATIC_CHECK_SUCCESS_INTERVAL: Duration = Duration::from_hours(24);
 const AUTOMATIC_CHECK_FAILURE_INTERVAL: Duration = Duration::from_hours(6);
@@ -83,10 +84,11 @@ pub struct ApplicationUpdateCoordinator {
     runtime_state: Arc<AppRuntimeState>,
     allow_qa_override: bool,
     official_updates_enabled: bool,
-    /// Snapshot handle for the user-selected global outbound proxy. Every check
-    /// and download builds its own client through the updater plugin, so the
-    /// latest endpoint is read per operation and needs no hot replacement.
+    /// Native and Custom changes are adopted only at an operation boundary.
     outbound_proxy: OutboundProxyTransport,
+    /// The plugin retains this slot in cached Updates. Only the operation gate
+    /// replaces it; native notifications never change an in-flight policy.
+    operation_policy: Arc<ArcSwap<OutboundProxyPolicy>>,
     operation_gate: tokio::sync::Mutex<()>,
     generation: AtomicU64,
     scheduler_started: AtomicBool,
@@ -126,6 +128,7 @@ impl ApplicationUpdateCoordinator {
             runtime_state,
             allow_qa_override,
             official_updates_enabled,
+            operation_policy: Arc::new(ArcSwap::from_pointee(outbound_proxy.policy())),
             outbound_proxy,
             operation_gate: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
@@ -221,7 +224,10 @@ impl ApplicationUpdateCoordinator {
         self.publish_boundary();
 
         let result = match self.build_updater() {
-            Ok(updater) => updater.check().await,
+            Ok(updater) => updater
+                .check()
+                .await
+                .map_err(|error| map_check_error(&error)),
             Err(error) => Err(error),
         };
         if !self.is_current(generation) {
@@ -260,8 +266,8 @@ impl ApplicationUpdateCoordinator {
                 self.finish_current_check();
                 AutomaticCheckOutcome::Succeeded
             }
-            Err(error) => {
-                self.finish_failed_check(manual, map_check_error(&error));
+            Err(failure) => {
+                self.finish_failed_check(manual, failure);
                 AutomaticCheckOutcome::Failed
             }
         };
@@ -275,20 +281,28 @@ impl ApplicationUpdateCoordinator {
     ) -> Result<ApplicationUpdateSnapshotDto, IpcErrorDto> {
         let _operation = try_operation_gate(&self.operation_gate)?;
         let generation = self.next_generation();
-        let update = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let update = state.pending.clone().ok_or_else(|| {
-                ipc_error("update_not_available", "当前没有可下载的应用更新。", true)
-            })?;
-            state.snapshot.operation = ApplicationUpdateOperationDto::Downloading;
-            state.snapshot.downloaded_bytes = Some(0);
-            state.snapshot.total_bytes = None;
-            state.snapshot.manual_failure = None;
-            update
-        };
+        let update = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .clone()
+            .ok_or_else(|| ipc_error("update_not_available", "当前没有可下载的应用更新。", true))?;
+        if let Err(failure) = prepare_update_policy(
+            &self.outbound_proxy,
+            &self.operation_policy,
+            std::slice::from_ref(&update.download_url),
+        ) {
+            self.finish_failed_check(true, failure);
+            self.publish_boundary();
+            return Ok(self.snapshot());
+        }
+        self.update_snapshot(|snapshot| {
+            snapshot.operation = ApplicationUpdateOperationDto::Downloading;
+            snapshot.downloaded_bytes = Some(0);
+            snapshot.total_bytes = None;
+            snapshot.manual_failure = None;
+        });
         self.publish_boundary();
         let _ = progress.send(self.progress_snapshot());
 
@@ -389,43 +403,53 @@ impl ApplicationUpdateCoordinator {
         Ok(())
     }
 
-    fn build_updater(&self) -> tauri_plugin_updater::Result<tauri_plugin_updater::Updater> {
+    fn build_updater(&self) -> Result<tauri_plugin_updater::Updater, ApplicationUpdateFailureDto> {
         let mut builder = self
             .app
             .updater_builder()
             .target("darwin-aarch64")
-            // The coordinator, not the plugin's availability shortcut, must
-            // validate current, forward, and downgrade metadata uniformly.
+            // Validate current, forward, and downgrade metadata uniformly.
             .version_comparator(|_, _| true)
-            // The plugin clones this closure into the `Update` it returns, so
-            // one injection point covers the check and the download phase.
-            // Enabled proxy: non-loopback destinations (including the release
-            // CDN) go through it and an unreachable proxy fails the operation
-            // instead of falling back to a direct connection. Loopback
-            // destinations always stay direct, which keeps the QA
-            // `AI_ROUTER_QA_UPDATER_ENDPOINT` endpoint reachable. Direct mode
-            // builds no proxy at all, matching the global setting's refusal to
-            // consult macOS system/PAC or environment proxies.
+            // The plugin clones this hook into Update, retaining signature and
+            // installer ownership. The slot is refreshed before each operation.
             .configure_client({
-                let outbound_proxy = self.outbound_proxy.clone();
-                move |builder| outbound_proxy.configure_current_client(builder)
+                let policy = Arc::clone(&self.operation_policy);
+                move |builder| configure_updater_client(&policy, builder)
             });
-        if self.allow_qa_override {
-            let endpoint = env::var(QA_ENDPOINT_ENV).ok();
-            let public_key = env::var(QA_PUBLIC_KEY_ENV).ok();
-            match qa_override_configuration(endpoint.as_deref(), public_key.as_deref())? {
-                Some((endpoint, public_key)) => {
-                    builder = builder.endpoints(vec![endpoint])?.pubkey(public_key);
-                }
-                None if self.official_updates_enabled => {}
-                None => {
-                    return Err(tauri_plugin_updater::Error::ReleaseNotFound);
-                }
+        let qa_override = if self.allow_qa_override {
+            qa_override_configuration(
+                env::var(QA_ENDPOINT_ENV).ok().as_deref(),
+                env::var(QA_PUBLIC_KEY_ENV).ok().as_deref(),
+            )
+            .map_err(|error| map_check_error(&error))?
+        } else {
+            None
+        };
+        let endpoints = if let Some((endpoint, public_key)) = qa_override {
+            builder = builder.pubkey(public_key);
+            vec![endpoint]
+        } else {
+            if !self.official_updates_enabled {
+                return Err(map_check_error(
+                    &tauri_plugin_updater::Error::ReleaseNotFound,
+                ));
             }
-        } else if !self.official_updates_enabled {
-            return Err(tauri_plugin_updater::Error::ReleaseNotFound);
-        }
-        builder.build()
+            let config = self
+                .app
+                .config()
+                .plugins
+                .0
+                .get("updater")
+                .ok_or_else(metadata_failure)?;
+            serde_json::from_value::<tauri_plugin_updater::Config>(config.clone())
+                .map_err(|_| metadata_failure())?
+                .endpoints
+        };
+        prepare_update_policy(&self.outbound_proxy, &self.operation_policy, &endpoints)?;
+        builder
+            .endpoints(endpoints)
+            .and_then(tauri_plugin_updater::UpdaterBuilder::build)
+            .map_err(|error| map_check_error(&error))
     }
 
     fn finish_failed_check(&self, manual: bool, failure: ApplicationUpdateFailureDto) {
@@ -797,11 +821,56 @@ fn restart_request_is_allowed(operation: ApplicationUpdateOperationDto) -> bool 
     operation == ApplicationUpdateOperationDto::RestartReady
 }
 
+/// Called only while the updater operation gate is held. All metadata endpoints
+/// or the cached archive target are admitted against one current policy before
+/// the plugin can build any request. Failure leaves the old slot unused.
+fn prepare_update_policy(
+    transport: &OutboundProxyTransport,
+    slot: &ArcSwap<OutboundProxyPolicy>,
+    targets: &[Url],
+) -> Result<(), ApplicationUpdateFailureDto> {
+    let policy = transport.policy();
+    for target in targets {
+        policy
+            .validate_target(target)
+            .map_err(system_proxy_failure)?;
+    }
+    slot.store(Arc::new(policy));
+    Ok(())
+}
+
+fn configure_updater_client(
+    slot: &ArcSwap<OutboundProxyPolicy>,
+    builder: reqwest::ClientBuilder,
+) -> reqwest::ClientBuilder {
+    slot.load()
+        .configure_client(builder, reqwest::redirect::Policy::default())
+}
+
+fn system_proxy_failure(error: SystemProxyError) -> ApplicationUpdateFailureDto {
+    let error = map_system_proxy_error(error);
+    ApplicationUpdateFailureDto {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+    }
+}
+
+fn updater_system_proxy_error(error: &tauri_plugin_updater::Error) -> Option<SystemProxyError> {
+    match error {
+        tauri_plugin_updater::Error::Reqwest(error) => SystemProxyError::from_reqwest(error),
+        _ => None,
+    }
+}
+
 fn official_public_key_configured(value: &str) -> bool {
     !value.trim().is_empty() && value != UPDATER_PUBLIC_KEY_PLACEHOLDER
 }
 
 fn map_check_error(error: &tauri_plugin_updater::Error) -> ApplicationUpdateFailureDto {
+    if let Some(error) = updater_system_proxy_error(error) {
+        return system_proxy_failure(error);
+    }
     let code = match error {
         tauri_plugin_updater::Error::Reqwest(_)
         | tauri_plugin_updater::Error::Network(_)
@@ -820,6 +889,9 @@ fn map_check_error(error: &tauri_plugin_updater::Error) -> ApplicationUpdateFail
 }
 
 fn map_install_error(error: &tauri_plugin_updater::Error) -> ApplicationUpdateFailureDto {
+    if let Some(error) = updater_system_proxy_error(error) {
+        return system_proxy_failure(error);
+    }
     let (code, message, retryable) = match error {
         tauri_plugin_updater::Error::Minisign(_)
         | tauri_plugin_updater::Error::Base64(_)
@@ -882,8 +954,177 @@ fn now_millis() -> i64 {
 }
 
 #[cfg(test)]
+mod transport_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use router_core::proxy::SystemProxySettings;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn response_server(response: &'static str) -> (Url, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let endpoint = Url::parse(&format!(
+            "http://{}",
+            listener.local_addr().expect("address")
+        ))
+        .expect("endpoint");
+        let task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                let (mut stream, _) = listener.accept().await.expect("request");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).await.expect("read request");
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    assert!(request.len() < 8192);
+                }
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response");
+                String::from_utf8(request).expect("request text")
+            })
+            .await
+            .expect("bounded fixture")
+        });
+        (endpoint, task)
+    }
+
+    #[tokio::test]
+    async fn cached_updater_hook_adopts_next_policy_without_rebinding_inflight_client() {
+        let (first_proxy, first_request) =
+            response_server("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\none")
+                .await;
+        let (second_proxy, second_request) =
+            response_server("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\ntwo")
+                .await;
+        let target = Url::parse("http://updates.invalid/AI.Router.app.tar.gz").expect("target");
+        let transport = OutboundProxyTransport::default();
+        let slot = ArcSwap::from_pointee(transport.policy());
+        // This is the callback retained inside the plugin's cached Update context.
+        let cached_hook = |builder| configure_updater_client(&slot, builder);
+        transport.set_system_settings(Ok(SystemProxySettings {
+            http: Some(first_proxy),
+            automatic_enabled: true,
+            ..SystemProxySettings::default()
+        }));
+        prepare_update_policy(&transport, &slot, std::slice::from_ref(&target))
+            .expect("check policy");
+        let first_client = cached_hook(reqwest::Client::builder())
+            .build()
+            .expect("check client");
+        transport.set_system_settings(Ok(SystemProxySettings {
+            http: Some(second_proxy),
+            ..SystemProxySettings::default()
+        }));
+        prepare_update_policy(&transport, &slot, std::slice::from_ref(&target))
+            .expect("download policy");
+        let second_client = cached_hook(reqwest::Client::builder())
+            .build()
+            .expect("download client");
+        assert_eq!(
+            first_client
+                .get(target.clone())
+                .send()
+                .await
+                .expect("first response")
+                .text()
+                .await
+                .expect("first body"),
+            "one"
+        );
+        assert_eq!(
+            second_client
+                .get(target)
+                .send()
+                .await
+                .expect("second response")
+                .text()
+                .await
+                .expect("second body"),
+            "two"
+        );
+        for request in [
+            first_request.await.expect("first capture"),
+            second_request.await.expect("second capture"),
+        ] {
+            assert!(
+                request.starts_with("GET http://updates.invalid/AI.Router.app.tar.gz HTTP/1.1")
+            );
+        }
+    }
+
+    #[test]
+    fn cached_download_preflight_rejects_automatic_only_and_recovers_in_custom_mode() {
+        let transport = OutboundProxyTransport::default();
+        let slot = ArcSwap::from_pointee(transport.policy());
+        let target = archive_url("1.2.4");
+        prepare_update_policy(&transport, &slot, std::slice::from_ref(&target))
+            .expect("check policy");
+        transport.set_system_settings(Ok(SystemProxySettings {
+            automatic_enabled: true,
+            ..SystemProxySettings::default()
+        }));
+        let failure = prepare_update_policy(&transport, &slot, std::slice::from_ref(&target))
+            .expect_err("cached download must revalidate");
+        assert_eq!(failure.code, "system_proxy_automatic_unsupported");
+        assert!(failure.message.contains("自定义代理"));
+        transport.set_endpoint(Some(Url::parse("http://127.0.0.1:8888").expect("custom")));
+        prepare_update_policy(&transport, &slot, std::slice::from_ref(&target))
+            .expect("custom policy");
+        transport.set_system_settings(Err(SystemProxyError::ReadFailed));
+        prepare_update_policy(&transport, &slot, std::slice::from_ref(&target))
+            .expect("custom ignores native error");
+        transport.set_endpoint(None);
+        assert_eq!(
+            prepare_update_policy(&transport, &slot, &[target])
+                .expect_err("read failure")
+                .code,
+            "system_proxy_read_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn updater_loopback_redirect_cannot_escape_automatic_only_policy() {
+        let (target, request) = response_server(
+            "HTTP/1.1 302 Found\r\nLocation: http://must-not-send.invalid/archive\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ).await;
+        let transport = OutboundProxyTransport::default();
+        transport.set_system_settings(Ok(SystemProxySettings {
+            automatic_enabled: true,
+            ..SystemProxySettings::default()
+        }));
+        let slot = ArcSwap::from_pointee(transport.policy());
+        prepare_update_policy(&transport, &slot, std::slice::from_ref(&target))
+            .expect("loopback QA policy");
+        let error = configure_updater_client(&slot, reqwest::Client::builder())
+            .build()
+            .expect("client")
+            .get(target)
+            .send()
+            .await
+            .expect_err("guarded redirect");
+        assert_eq!(
+            SystemProxyError::from_reqwest(&error),
+            Some(SystemProxyError::AutomaticProxyUnsupported)
+        );
+        let error = tauri_plugin_updater::Error::Reqwest(error);
+        for failure in [map_check_error(&error), map_install_error(&error)] {
+            assert_eq!(failure.code, "system_proxy_automatic_unsupported");
+            assert!(failure.message.chars().count() < 160);
+            assert!(!failure.message.contains("must-not-send"));
+        }
+        assert!(
+            request
+                .await
+                .expect("capture")
+                .starts_with("GET / HTTP/1.1")
+        );
+    }
 
     fn snapshot() -> ApplicationUpdateSnapshotDto {
         ApplicationUpdateSnapshotDto {

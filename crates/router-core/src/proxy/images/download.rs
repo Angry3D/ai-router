@@ -6,7 +6,10 @@ use tokio::time::{Instant, timeout_at};
 use url::Url;
 
 use super::asset::{ImageAssetErrorKind, MAX_COMPRESSED_PNG_BYTES};
-use crate::proxy::upstream::{DecodeError, decode_supported_exact, response_encodings};
+use crate::proxy::{
+    OutboundProxyPolicy, OutboundProxyTransport, SystemProxyError,
+    upstream::{DecodeError, decode_supported_exact, response_encodings},
+};
 
 const MAX_REDIRECTS: usize = 3;
 
@@ -33,10 +36,11 @@ impl Default for DownloadLimits {
     }
 }
 
-// No client, route, credential, cookie store, or URL survives a download call.
-#[derive(Clone, Default)]
+// Credentials and clients never survive a download call; only policy is shared.
+#[derive(Clone)]
 pub(in crate::proxy) struct ImageAssetDownloader {
     limits: DownloadLimits,
+    outbound_proxy: OutboundProxyTransport,
     #[cfg(test)]
     network: Option<std::sync::Arc<test_support::TestNetwork>>,
 }
@@ -45,6 +49,7 @@ pub(in crate::proxy) struct ImageAssetDownloader {
 pub(super) struct ImageDownloadError {
     pub(super) kind: ImageAssetErrorKind,
     pub(super) upstream_status: Option<StatusCode>,
+    pub(super) system_proxy: Option<SystemProxyError>,
 }
 
 impl ImageDownloadError {
@@ -52,6 +57,7 @@ impl ImageDownloadError {
         Self {
             kind,
             upstream_status,
+            system_proxy: None,
         }
     }
 }
@@ -109,6 +115,24 @@ fn redirect_target(
 }
 
 impl ImageAssetDownloader {
+    pub(in crate::proxy) fn new(outbound_proxy: OutboundProxyTransport) -> Self {
+        Self {
+            limits: DownloadLimits::default(),
+            outbound_proxy,
+            #[cfg(test)]
+            network: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::proxy) fn with_outbound_proxy(
+        mut self,
+        outbound_proxy: OutboundProxyTransport,
+    ) -> Self {
+        self.outbound_proxy = outbound_proxy;
+        self
+    }
+
     pub(super) async fn download(
         &self,
         raw_url: String,
@@ -118,10 +142,18 @@ impl ImageAssetDownloader {
         let mut target = Url::parse(&raw_url)
             .map_err(|_| ImageDownloadError::new(ImageAssetErrorKind::DownloadFailed, None))?;
         drop(raw_url);
+        let policy = self.outbound_proxy.policy();
         let mut visited = vec![target.clone()];
 
         for redirects in 0..=MAX_REDIRECTS {
-            let client = self.client(deadline)?;
+            policy
+                .validate_target(&target)
+                .map_err(|error| ImageDownloadError {
+                    kind: ImageAssetErrorKind::DownloadFailed,
+                    upstream_status: None,
+                    system_proxy: Some(error),
+                })?;
+            let client = self.client(deadline, &policy)?;
             let response = timeout_at(
                 deadline,
                 client
@@ -158,11 +190,13 @@ impl ImageAssetDownloader {
         ))
     }
 
-    fn client(&self, deadline: Instant) -> Result<Client, ImageDownloadError> {
+    fn client(
+        &self,
+        deadline: Instant,
+        policy: &OutboundProxyPolicy,
+    ) -> Result<Client, ImageDownloadError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let builder = Client::builder()
-            .no_proxy()
-            .redirect(Policy::none())
             .retry(reqwest::retry::never())
             .referer(false)
             .no_gzip()
@@ -177,7 +211,10 @@ impl ImageAssetDownloader {
             Some(network) => network.configure_client(builder),
             None => builder,
         };
-        builder
+        policy
+            .configure_client(builder, Policy::none())
+            // This downloader validates and follows each hop explicitly.
+            .redirect(Policy::none())
             .build()
             .map_err(|_| ImageDownloadError::new(ImageAssetErrorKind::DownloadFailed, None))
     }
