@@ -399,20 +399,21 @@ describe("SystemSettings interactions", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("hides proxy-specific controls in direct mode and retains the saved address", async () => {
+  it("hides proxy-specific controls in system mode and retains the saved address", async () => {
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "系统" }));
 
-    expect(screen.getByRole("radio", { name: "直连" })).toBeChecked();
     expect(
-      screen.getByText("外部请求将直接连接目标服务。"),
-    ).toBeInTheDocument();
+      within(
+        screen.getByRole("radiogroup", { name: "全局出站代理模式" }),
+      ).getByRole("radio", { name: "跟随系统" }),
+    ).toBeChecked();
     expect(screen.queryByLabelText("代理地址")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "测试连接" }),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("radio", { name: "代理" }));
+    fireEvent.click(screen.getByRole("radio", { name: "自定义代理" }));
     expect(screen.getByLabelText("代理地址")).toHaveValue(
       "http://127.0.0.1:7890",
     );
@@ -422,9 +423,6 @@ describe("SystemSettings interactions", () => {
         url: "http://127.0.0.1:7890",
       }),
     );
-    expect(
-      screen.getByText("仅本地回环地址直连，外部请求使用此代理。"),
-    ).toBeInTheDocument();
   });
 
   it("opens a local proxy draft without enabling it when no address is retained", async () => {
@@ -432,7 +430,7 @@ describe("SystemSettings interactions", () => {
       settings: { outboundProxy: { enabled: false, url: null } },
     });
     fireEvent.click(screen.getByRole("button", { name: "系统" }));
-    fireEvent.click(screen.getByRole("radio", { name: "代理" }));
+    fireEvent.click(screen.getByRole("radio", { name: "自定义代理" }));
 
     expect(screen.getByLabelText("代理地址")).toHaveValue("");
     expect(screen.getByText("请输入代理地址。")).toHaveAttribute(
@@ -442,7 +440,7 @@ describe("SystemSettings interactions", () => {
     expect(ipc.updateOutboundProxySettings).not.toHaveBeenCalled();
   });
 
-  it("saves a valid proxy address on Enter and direct mode preserves it", async () => {
+  it("saves a valid proxy address on Enter and system mode preserves it", async () => {
     await renderSettings({
       settings: {
         outboundProxy: {
@@ -469,7 +467,11 @@ describe("SystemSettings interactions", () => {
       expect(ipc.updateOutboundProxySettings).toHaveBeenCalledTimes(1),
     );
 
-    fireEvent.click(screen.getByRole("radio", { name: "直连" }));
+    fireEvent.click(
+      within(
+        screen.getByRole("radiogroup", { name: "全局出站代理模式" }),
+      ).getByRole("radio", { name: "跟随系统" }),
+    );
     await waitFor(() =>
       expect(ipc.updateOutboundProxySettings).toHaveBeenLastCalledWith({
         enabled: false,
@@ -479,7 +481,7 @@ describe("SystemSettings interactions", () => {
     expect(screen.queryByLabelText("代理地址")).not.toBeInTheDocument();
   });
 
-  it("discards an unsaved draft when direct mode retains the last valid address", async () => {
+  it("discards an unsaved draft when system mode retains the last valid address", async () => {
     await renderSettings({
       settings: {
         outboundProxy: {
@@ -493,14 +495,18 @@ describe("SystemSettings interactions", () => {
       target: { value: "not-a-proxy" },
     });
 
-    fireEvent.click(screen.getByRole("radio", { name: "直连" }));
+    fireEvent.click(
+      within(
+        screen.getByRole("radiogroup", { name: "全局出站代理模式" }),
+      ).getByRole("radio", { name: "跟随系统" }),
+    );
     await waitFor(() =>
       expect(ipc.updateOutboundProxySettings).toHaveBeenCalledWith({
         enabled: false,
         url: "http://127.0.0.1:7890",
       }),
     );
-    fireEvent.click(screen.getByRole("radio", { name: "代理" }));
+    fireEvent.click(screen.getByRole("radio", { name: "自定义代理" }));
 
     expect(screen.getByLabelText("代理地址")).toHaveValue(
       "http://127.0.0.1:7890",
@@ -604,7 +610,11 @@ describe("SystemSettings interactions", () => {
     expect(screen.getByText("正在测试")).toBeInTheDocument();
     expect(address).toBeDisabled();
     expect(test).toBeDisabled();
-    expect(screen.getByRole("radio", { name: "直连" })).toBeDisabled();
+    expect(
+      within(
+        screen.getByRole("radiogroup", { name: "全局出站代理模式" }),
+      ).getByRole("radio", { name: "跟随系统" }),
+    ).toBeDisabled();
 
     rejectTest?.(new Error("unreachable"));
     expect(await screen.findByText("连接失败")).toBeInTheDocument();
@@ -617,10 +627,14 @@ describe("SystemSettings interactions", () => {
     ipc.updateOutboundProxySettings.mockRejectedValueOnce(new Error("failed"));
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "系统" }));
-    fireEvent.click(screen.getByRole("radio", { name: "代理" }));
+    fireEvent.click(screen.getByRole("radio", { name: "自定义代理" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
-    expect(screen.getByRole("radio", { name: "直连" })).toBeChecked();
+    expect(
+      within(
+        screen.getByRole("radiogroup", { name: "全局出站代理模式" }),
+      ).getByRole("radio", { name: "跟随系统" }),
+    ).toBeChecked();
     expect(screen.queryByLabelText("代理地址")).not.toBeInTheDocument();
   });
 
@@ -786,11 +800,7 @@ describe("SystemSettings interactions", () => {
 
   it.each([
     ["repaired" as const, true, /^检测到数据库索引损坏，已于 .+ 自动修复$/],
-    [
-      "quarantined" as const,
-      false,
-      /^检测到数据库损坏，已于 .+ 进入恢复流程$/,
-    ],
+    ["quarantined" as const, false, /^检测到数据库损坏，已于 .+ 进入恢复流程$/],
     [
       "recovery_required" as const,
       false,

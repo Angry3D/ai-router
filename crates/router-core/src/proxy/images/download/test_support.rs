@@ -38,6 +38,24 @@ pub(in crate::proxy) struct AssetFixture {
     server: JoinHandle<()>,
 }
 
+pub(in crate::proxy) struct AssetProxy {
+    pub(in crate::proxy) address: SocketAddr,
+    requests: Arc<Mutex<Vec<String>>>,
+    task: JoinHandle<()>,
+}
+
+impl AssetProxy {
+    pub(in crate::proxy) fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("proxy requests").clone()
+    }
+}
+
+impl Drop for AssetProxy {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl AssetFixture {
     pub(in crate::proxy) async fn new(replies: Vec<AssetReply>) -> Self {
         let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(vec![
@@ -105,9 +123,50 @@ impl AssetFixture {
         self.network.local.port()
     }
 
+    pub(in crate::proxy) async fn proxy(&self) -> AssetProxy {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("proxy listener");
+        let address = listener.local_addr().expect("proxy address");
+        let destination = self.network.local;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captures = requests.clone();
+        let task = tokio::spawn(async move {
+            let mut tunnels = JoinSet::new();
+            loop {
+                tokio::select! {
+                    connection = listener.accept() => {
+                        let Ok((mut socket, _)) = connection else { break };
+                        let captures = captures.clone();
+                        tunnels.spawn(async move {
+                            let mut request = Vec::new();
+                            while !request.ends_with(b"\r\n\r\n") {
+                                request.push(socket.read_u8().await.expect("CONNECT header"));
+                                assert!(request.len() <= 8192);
+                            }
+                            let request = String::from_utf8(request).expect("CONNECT text");
+                            assert!(request.starts_with("CONNECT "));
+                            captures.lock().expect("proxy capture").push(request);
+                            let mut upstream = TcpStream::connect(destination).await.expect("local tunnel destination");
+                            socket.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.expect("CONNECT response");
+                            let _ = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+                        });
+                    }
+                    Some(_) = tunnels.join_next(), if !tunnels.is_empty() => {}
+                }
+            }
+        });
+        AssetProxy {
+            address,
+            requests,
+            task,
+        }
+    }
+
     pub(in crate::proxy) fn downloader(&self) -> ImageAssetDownloader {
         ImageAssetDownloader {
             limits: DownloadLimits::default(),
+            outbound_proxy: crate::proxy::OutboundProxyTransport::default(),
             network: Some(Arc::clone(&self.network)),
         }
     }

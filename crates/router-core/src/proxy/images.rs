@@ -26,7 +26,7 @@ use self::download::{DownloadedImage, ImageAssetDownloader};
 use self::source::{ImageResultSource, take_image_source};
 
 use super::{
-    OutboundProxyTransport, RoutingSnapshotStore,
+    OutboundProxyTransport, RoutingSnapshotStore, SystemProxyError,
     upstream::{
         DecodeError, connection_nominated_headers, decode_supported, decode_supported_exact,
         filtered_response_headers, remove_request_header, response_encodings,
@@ -209,6 +209,7 @@ pub enum ImagesGenerationFailureKind {
     RouteUnavailable,
     InvalidRequest,
     RequestConstructionFailed,
+    SystemProxy(SystemProxyError),
     UpstreamConnectionFailed,
     UpstreamRequestFailed,
     UpstreamTimeout,
@@ -263,6 +264,7 @@ impl ImagesGenerationFailureKind {
             Self::RouteUnavailable => "images_route_unavailable",
             Self::InvalidRequest => "invalid_images_request",
             Self::RequestConstructionFailed => "images_request_construction_failed",
+            Self::SystemProxy(error) => error.code(),
             Self::UpstreamConnectionFailed => "images_upstream_connection_failed",
             Self::UpstreamRequestFailed => "images_upstream_request_failed",
             Self::UpstreamTimeout => "images_upstream_timeout",
@@ -281,7 +283,8 @@ impl ImagesGenerationFailureKind {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             Self::UpstreamTimeout => StatusCode::GATEWAY_TIMEOUT,
-            Self::RequestConstructionFailed
+            Self::SystemProxy(_)
+            | Self::RequestConstructionFailed
             | Self::UpstreamConnectionFailed
             | Self::UpstreamRequestFailed
             | Self::ResponseBodyReadFailed
@@ -299,6 +302,7 @@ impl ImagesGenerationFailureKind {
             Self::RouteUnavailable => "The image generation route is unavailable.",
             Self::InvalidRequest => "The image generation request is invalid.",
             Self::RequestConstructionFailed => "The image request could not be prepared.",
+            Self::SystemProxy(error) => error.message(),
             Self::UpstreamConnectionFailed => "The image provider could not be reached.",
             Self::UpstreamRequestFailed => "The image request could not be sent to the provider.",
             Self::UpstreamTimeout => "The image generation upstream request timed out.",
@@ -318,6 +322,7 @@ impl ImagesGenerationFailureKind {
             | Self::RouteNotSelected
             | Self::RouteUnavailable
             | Self::InvalidRequest
+            | Self::SystemProxy(_)
             | Self::RequestConstructionFailed => ImagesFailureStage::RequestConstruction,
             Self::UpstreamConnectionFailed => ImagesFailureStage::Connection,
             Self::UpstreamRequestFailed => ImagesFailureStage::RequestSend,
@@ -749,14 +754,16 @@ impl ImagesGenerationService {
                     request_id.clone(),
                 )
             })?;
-        let client = self
-            .outbound_proxy
-            .configure_current_client(
+        let policy = self.outbound_proxy.policy();
+        let client = policy
+            .configure_client(
                 reqwest::Client::builder()
                     .connect_timeout(Duration::from_secs(30))
-                    .redirect(reqwest::redirect::Policy::none())
                     .retry(reqwest::retry::never()),
+                reqwest::redirect::Policy::none(),
             )
+            // Generation 3xx responses are normalized, never followed.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| {
                 ImagesGenerationFailure::with_request_id(
@@ -775,6 +782,12 @@ impl ImagesGenerationService {
                     request_id.clone(),
                 )
             })?;
+        policy.validate_target(request.url()).map_err(|error| {
+            ImagesGenerationFailure::with_request_id(
+                ImagesGenerationFailureKind::SystemProxy(error),
+                request_id.clone(),
+            )
+        })?;
         let upstream =
             tokio::time::timeout(routing.images_generation_timeout, client.execute(request))
                 .await
@@ -959,11 +972,12 @@ impl ImageMcpServer {
         asset_manager: Option<McpImageAssetManager>,
         change_sink: Arc<dyn ImageAssetChangeSink>,
     ) -> Self {
+        let asset_downloader = ImageAssetDownloader::new(service.outbound_proxy.clone());
         Self {
             service: service
                 .with_mcp_response_limits(MCP_JSON_RESPONSE_LIMIT, MCP_JSON_RESPONSE_LIMIT),
             asset_manager,
-            asset_downloader: ImageAssetDownloader::default(),
+            asset_downloader,
             change_sink,
             publication_fault: PublicationFault::default(),
             #[cfg(test)]
@@ -979,7 +993,7 @@ impl ImageMcpServer {
 
     #[cfg(test)]
     pub(super) fn with_asset_downloader(mut self, downloader: ImageAssetDownloader) -> Self {
-        self.asset_downloader = downloader;
+        self.asset_downloader = downloader.with_outbound_proxy(self.service.outbound_proxy.clone());
         self
     }
 
@@ -1079,7 +1093,17 @@ impl ImageMcpServer {
                     .download(url, generation_status)
                     .await
                     .map_err(|error| {
-                        image_asset_error(error.kind, request_id.clone(), error.upstream_status)
+                        if let Some(proxy_error) = error.system_proxy {
+                            let mut failure = ImagesGenerationFailure::with_request_id(
+                                ImagesGenerationFailureKind::SystemProxy(proxy_error),
+                                request_id.clone(),
+                            );
+                            failure.stage = ImagesFailureStage::AssetDownload;
+                            failure.retryable = false;
+                            mcp_forwarding_error(&failure)
+                        } else {
+                            image_asset_error(error.kind, request_id.clone(), error.upstream_status)
+                        }
                     })?;
                 let status = Some(download.upstream_status);
                 (ImageAssetInput::Downloaded(download), status)
@@ -1570,6 +1594,98 @@ mod tests {
         assert_eq!(mock.calls.load(Ordering::Acquire), 1);
         assert_eq!(fixture.request_count(), 1);
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_system_and_custom_proxy_assets_publish_png_without_generation_replay() {
+        for custom in [false, true] {
+            let png = valid_png_fixture();
+            let fixture = AssetFixture::new(vec![
+                AssetReply::redirect("https://cdn.example/final.png"),
+                AssetReply::ok(png.clone()),
+            ])
+            .await;
+            let proxy = fixture.proxy().await;
+            let outbound = OutboundProxyTransport::default();
+            let endpoint =
+                url::Url::parse(&format!("http://{}", proxy.address)).expect("proxy URL");
+            outbound.set_system_settings(Ok(super::super::SystemProxySettings {
+                https: (!custom).then_some(endpoint.clone()),
+                automatic_enabled: true,
+                ..super::super::SystemProxySettings::default()
+            }));
+            if custom {
+                outbound.set_endpoint(Some(endpoint));
+            }
+            let response = Bytes::from(json!({"data": [{"url": AssetFixture::url()}]}).to_string());
+            let (server, mock) = start_mock(StatusCode::OK, response).await;
+            let selected = route(
+                &format!("http://{}/openai/v1", server.address()),
+                "generation-key-must-not-leak",
+            );
+            let temporary = TempDir::new().expect("temporary assets");
+            let adapter = ImageMcpServer::new(
+                ImagesGenerationService::new(routing(true, Some(selected)))
+                    .with_outbound_proxy(outbound),
+                Some(McpImageAssetManager::new(
+                    temporary.path().join("mcp-images"),
+                    Arc::new(Semaphore::new(1)),
+                )),
+                Arc::new(NoopImageAssetChangeSink),
+            )
+            .with_asset_downloader(fixture.downloader());
+            let result = adapter
+                .generate_image(default_generate_args())
+                .await
+                .expect("proxied PNG publication");
+            assert_eq!(
+                std::fs::read(returned_asset_path(&result)).expect("published PNG"),
+                png
+            );
+            assert_eq!(mock.calls.load(Ordering::Acquire), 1);
+            assert_eq!(fixture.request_count(), 2);
+            assert_eq!(proxy.requests().len(), 2);
+            for request in fixture.requests() {
+                for name in [
+                    "authorization",
+                    "proxy-authorization",
+                    "cookie",
+                    "referer",
+                    "x-api-key",
+                    "x-gateway-token",
+                ] {
+                    assert!(!request.headers.contains_key(name));
+                }
+            }
+            server.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_only_generation_fails_before_a_billable_attempt() {
+        let outbound = OutboundProxyTransport::default();
+        outbound.set_system_settings(Ok(super::super::SystemProxySettings {
+            automatic_enabled: true,
+            ..super::super::SystemProxySettings::default()
+        }));
+        let service = ImagesGenerationService::new(routing(
+            true,
+            Some(route("http://images.invalid/v1", "generation-key")),
+        ))
+        .with_outbound_proxy(outbound);
+        let error = service
+            .forward(
+                Bytes::from_static(br#"{"prompt":"synthetic"}"#),
+                &HeaderMap::new(),
+            )
+            .await
+            .expect_err("no manual route");
+        assert_eq!(
+            error.kind,
+            ImagesGenerationFailureKind::SystemProxy(SystemProxyError::AutomaticProxyUnsupported)
+        );
+        assert!(!error.retryable);
+        assert_eq!(error.upstream_status, None);
     }
 
     #[tokio::test]
@@ -2177,7 +2293,7 @@ mod tests {
             "selected-image-key",
         );
         let service = ImagesGenerationService::new(routing(true, Some(selected)))
-            .with_outbound_proxy(outbound_proxy);
+            .with_outbound_proxy(outbound_proxy.clone());
 
         let response = service
             .forward(
@@ -2193,6 +2309,24 @@ mod tests {
             let captures = mock.captures.lock().expect("captures");
             assert_eq!(captures[0].0, "/openai/v1/images/generations");
         }
+        outbound_proxy.set_endpoint(None);
+        outbound_proxy.set_system_settings(Ok(super::super::SystemProxySettings {
+            http: Some(
+                url::Url::parse(&format!("http://{}", server.address())).expect("system proxy URL"),
+            ),
+            automatic_enabled: true,
+            ..super::super::SystemProxySettings::default()
+        }));
+        assert!(
+            service
+                .forward(
+                    Bytes::from_static(br#"{"prompt":"synthetic"}"#),
+                    &HeaderMap::new()
+                )
+                .await
+                .is_ok()
+        );
+        assert_eq!(mock.calls.load(Ordering::Acquire), 2);
         server.shutdown().await;
     }
 

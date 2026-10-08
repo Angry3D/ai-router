@@ -21,10 +21,11 @@ use serde::Deserialize;
 
 use super::{
     FallbackActivationRequest, FallbackActivator, HistorySink, InferenceStatusService,
-    NoopFallbackActivator, NoopRequestTransitionSink, OutboundHttpClient, OutboundProxyTransport,
-    RequestActivityDisposition, RequestTransitionSink, RoutingSnapshot, RoutingSnapshotStore,
-    RuntimeDiagnosticCode, RuntimeDiagnosticComponent, RuntimeDiagnosticEvent,
-    RuntimeDiagnosticSink, UpstreamRequestHandler, ValidatedProxyRequest,
+    NoopFallbackActivator, NoopRequestTransitionSink, OutboundClientError, OutboundHttpClient,
+    OutboundProxyTransport, RequestActivityDisposition, RequestTransitionSink, RoutingSnapshot,
+    RoutingSnapshotStore, RuntimeDiagnosticCode, RuntimeDiagnosticComponent,
+    RuntimeDiagnosticEvent, RuntimeDiagnosticSink, SystemProxyError, UpstreamRequestHandler,
+    ValidatedProxyRequest,
     chat_bridge::{BridgeError, CompatibilityMarker, ToolOrigin, translate_request},
     chat_stream::{self, ChatSseDecoder, ChatStreamBridge},
     fallback::{
@@ -1284,7 +1285,28 @@ impl ResponsesForwarder {
         }
         let started = Instant::now();
         let probe_deadline = probe_evidence_timeout.map(|timeout| started + timeout);
-        let Ok(client) = self.client.client() else {
+        let prepared_client = reqwest::Url::parse(&endpoint)
+            .map_err(OutboundClientError::from)
+            .and_then(|target| {
+                self.client
+                    .client_for(&target)
+                    .map(|client| (client, target))
+            });
+        if let Err(OutboundClientError::SystemProxy(error)) = &prepared_client {
+            context.finish_local(
+                CompletionState::Failed,
+                StatusCode::BAD_GATEWAY,
+                error.code(),
+                RuntimeDiagnosticCode::UpstreamRequestFailed,
+            );
+            return AttemptResult::Committed(local_error_with_request_id(
+                StatusCode::BAD_GATEWAY,
+                error.code(),
+                error.message(),
+                request.request_id.clone(),
+            ));
+        }
+        let Ok((client, target)) = prepared_client else {
             let failure = classify_transport(TransportFailure::FastRequest);
             context.finish_failure(
                 None,
@@ -1303,7 +1325,7 @@ impl ResponsesForwarder {
                 failure,
             );
         };
-        let send = client.post(&endpoint).headers(headers).body(body).send();
+        let send = client.post(target).headers(headers).body(body).send();
         let upstream = match tokio::time::timeout(
             bounded_timeout(self.config.header_timeout, probe_deadline),
             send,
@@ -1330,6 +1352,20 @@ impl ResponsesForwarder {
                 );
             }
             Ok(Err(error)) => {
+                if let Some(error) = SystemProxyError::from_reqwest(&error) {
+                    context.finish_local(
+                        CompletionState::Failed,
+                        StatusCode::BAD_GATEWAY,
+                        error.code(),
+                        RuntimeDiagnosticCode::UpstreamRequestFailed,
+                    );
+                    return AttemptResult::Committed(local_error_with_request_id(
+                        StatusCode::BAD_GATEWAY,
+                        error.code(),
+                        error.message(),
+                        request.request_id.clone(),
+                    ));
+                }
                 let (transport, diagnostic, message) = if error.is_timeout() {
                     (
                         TransportFailure::ElapsedTimeout,
@@ -4501,6 +4537,40 @@ mod tests {
                 .as_slice(),
             ["/v1/responses"]
         );
+        drop(response);
+        outbound_proxy.set_endpoint(None);
+        outbound_proxy.set_system_settings(Ok(crate::proxy::SystemProxySettings {
+            http: Some(
+                url::Url::parse(&format!("http://{}", server.address())).expect("system proxy URL"),
+            ),
+            automatic_enabled: true,
+            ..crate::proxy::SystemProxySettings::default()
+        }));
+        let response = forwarder
+            .handle(request_for_base(
+                false,
+                "http://responses.external.invalid/v1",
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+        outbound_proxy.set_system_settings(Ok(crate::proxy::SystemProxySettings {
+            automatic_enabled: true,
+            ..crate::proxy::SystemProxySettings::default()
+        }));
+        let response = forwarder
+            .handle(request_for_base(
+                false,
+                "http://responses.external.invalid/v1",
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 8192)
+            .await
+            .expect("bounded policy error");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("policy error JSON");
+        assert_eq!(body["error"]["code"], "system_proxy_automatic_unsupported");
+        assert_eq!(captured_paths.lock().expect("request captures").len(), 2);
         server.shutdown().await;
     }
 

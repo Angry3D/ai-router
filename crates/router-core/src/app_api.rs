@@ -897,6 +897,7 @@ pub enum RouteModelsErrorCategory {
     Unauthorized,
     NotFound,
     Network,
+    SystemProxy,
     Timeout,
     HttpStatus,
     TooLarge,

@@ -3,6 +3,8 @@ mod codex_auth_session;
 mod popover;
 mod pricing_sync;
 mod runtime;
+#[cfg(target_os = "macos")]
+mod system_proxy;
 pub mod update_signature;
 
 use std::path::PathBuf;
@@ -909,6 +911,10 @@ fn run_event_loop(app: tauri::App) {
             let coordinator = app_handle.state::<Arc<AppCoordinator>>().inner().clone();
             tauri::async_runtime::spawn(async move {
                 let report = coordinator.shutdown().await;
+                #[cfg(target_os = "macos")]
+                app_handle
+                    .state::<Arc<DesktopLifecycleServices>>()
+                    .stop_system_proxy_monitor();
                 if !report.balance_graceful || !report.proxy_graceful || !report.database_graceful {
                     app_handle
                         .state::<RuntimeLogController>()
@@ -966,13 +972,11 @@ fn setup_application(
         )?;
     }
     finish_runtime_log_setup(app.handle());
-    let app_name = app.package_info().name.clone();
     let tray_assets = TrayIconAssets::decode()?;
-    let tray_icon = tray_assets.ready.clone();
     let tray_builder = tauri::tray::TrayIconBuilder::with_id("main")
-        .icon(tray_icon)
+        .icon(tray_assets.ready.clone())
         .icon_as_template(true)
-        .tooltip(format!("{app_name} 正在启动"))
+        .tooltip(format!("{} 正在启动", app.package_info().name))
         .show_menu_on_left_click(false);
     let tray_builder = if profile.is_isolated() {
         tray_builder.title(initial_tray_title(true))
@@ -1011,6 +1015,8 @@ fn setup_application(
         activity_sink,
         recovery_wiring,
     );
+    #[cfg(target_os = "macos")]
+    services.start_system_proxy_monitor();
     app.manage(services.clone());
     let update_coordinator = ApplicationUpdateCoordinator::new(
         app.handle().clone(),

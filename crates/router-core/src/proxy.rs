@@ -85,7 +85,10 @@ pub use images::{
     McpImageAssetMaintenanceError, McpImageAssetManager, McpImageAssetSummary,
     NoopImageAssetChangeSink,
 };
-pub use outbound::{OutboundHttpClient, OutboundProxyTransport};
+pub use outbound::{
+    OutboundClientError, OutboundHttpClient, OutboundProxyPolicy, OutboundProxyTransport,
+    SystemProxyError, SystemProxySettings,
+};
 pub use upstream::{ResponsesForwarder, UpstreamForwarderConfig};
 
 pub const MAX_REQUEST_WIRE_BYTES: usize = 200 * 1024 * 1024;
@@ -298,6 +301,9 @@ impl ProxyIngressState {
     pub fn new(gateway_token: &str, upstream: Arc<dyn UpstreamRequestHandler>) -> Self {
         let routing = RoutingSnapshotStore::default();
         let outbound_proxy = OutboundProxyTransport::default();
+        #[cfg(test)]
+        let image_asset_downloader =
+            images::download::ImageAssetDownloader::new(outbound_proxy.clone());
         Self {
             gateway_token_digest: Sha256::digest(gateway_token.as_bytes()).into(),
             images: ImagesGenerationService::new(routing.clone())
@@ -312,7 +318,7 @@ impl ProxyIngressState {
             decoded_limit: MAX_REQUEST_DECODED_BYTES,
             mcp_image_assets: None,
             #[cfg(test)]
-            image_asset_downloader: images::download::ImageAssetDownloader::default(),
+            image_asset_downloader,
             image_asset_change_sink: Arc::new(NoopImageAssetChangeSink),
         }
     }
@@ -1152,14 +1158,20 @@ impl ReachabilityProbe {
         protocol: RouteProtocol,
     ) -> Result<ReachabilityResult, crate::domain::ValidationError> {
         let base_url = BaseUrl::parse(base_url, protocol)?;
-        let inference_url = base_url.inference_url(protocol);
+        let Ok(target) = url::Url::parse(&base_url.inference_url(protocol)) else {
+            return Ok(unreachable_result("network"));
+        };
         for attempt in 0..2 {
             let started = Instant::now();
-            let Ok(client) = self.client.client() else {
-                return Ok(unreachable_result("network"));
+            let client = match self.client.client_for(&target) {
+                Ok(client) => client,
+                Err(OutboundClientError::SystemProxy(error)) => {
+                    return Ok(unreachable_result(error.code()));
+                }
+                Err(_) => return Ok(unreachable_result("network")),
             };
             let result = client
-                .get(&inference_url)
+                .get(target.clone())
                 .header(header::ACCEPT, "*/*")
                 .header(header::ACCEPT_ENCODING, "identity")
                 .timeout(self.attempt_timeout)
@@ -1183,6 +1195,11 @@ impl ReachabilityProbe {
                     });
                 }
                 Err(error) if error.is_timeout() && attempt == 0 => {}
+                Err(error) if SystemProxyError::from_reqwest(&error).is_some() => {
+                    let category = SystemProxyError::from_reqwest(&error)
+                        .map_or("network", SystemProxyError::code);
+                    return Ok(unreachable_result(category));
+                }
                 Err(error) => {
                     return Ok(unreachable_result(if error.is_timeout() {
                         "timeout"
@@ -3189,6 +3206,47 @@ mod tests {
             listener,
             Router::new().fallback(probe_handler).with_state(capture),
         )
+    }
+
+    #[tokio::test]
+    async fn reachability_uses_manual_system_proxy_and_reports_bounded_policy_errors() {
+        let capture = ProbeCapture {
+            calls: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            delay: Duration::ZERO,
+            status: StatusCode::OK,
+        };
+        let server = start_probe_server(capture.clone()).await;
+        let outbound = OutboundProxyTransport::default();
+        outbound.set_system_settings(Ok(SystemProxySettings {
+            http: Some(
+                url::Url::parse(&format!("http://{}", server.address())).expect("system proxy URL"),
+            ),
+            automatic_enabled: true,
+            ..SystemProxySettings::default()
+        }));
+        let probe = ReachabilityProbe::new_with_outbound_proxy(&outbound).expect("probe");
+        let result = probe
+            .check("http://probe.invalid/v1", RouteProtocol::Responses)
+            .await
+            .expect("probe result");
+        assert_eq!(result.status, ReachabilityStatus::Reachable);
+        assert_eq!(capture.calls.load(Ordering::SeqCst), 1);
+        for error in [
+            SystemProxyError::ReadFailed,
+            SystemProxyError::InvalidSettings,
+            SystemProxyError::AutomaticProxyUnsupported,
+        ] {
+            outbound.set_system_settings(Err(error));
+            let result = probe
+                .check("http://probe.invalid/v1", RouteProtocol::Responses)
+                .await
+                .expect("safe policy failure");
+            assert_eq!(result.status, ReachabilityStatus::Unreachable);
+            assert_eq!(result.error_category.as_deref(), Some(error.code()));
+            assert_eq!(capture.calls.load(Ordering::SeqCst), 1);
+        }
+        server.shutdown().await;
     }
 
     #[tokio::test]

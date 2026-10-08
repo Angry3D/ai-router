@@ -158,10 +158,14 @@ type ModelsFetchState =
   | { kind: "ready"; models: string[] }
   | { kind: "error"; message: string };
 
+const systemProxyErrorMessage =
+  "系统代理不可用，请检查 macOS 手动代理设置或在系统设置中改用自定义代理；不支持 PAC/WPAD。";
+
 const modelsErrorCopy: Record<RouteModelsErrorCategory, string> = {
   unauthorized: "获取失败：鉴权失败，请检查 API Key",
   not_found: "获取失败：上游未提供 /models 接口",
   network: "获取失败：无法连接上游",
+  system_proxy: systemProxyErrorMessage,
   timeout: "获取失败：请求超时",
   http_status: "获取失败：上游响应不可用",
   too_large: "获取失败：上游响应不可用",
@@ -314,9 +318,8 @@ function RouteForm(props: {
   const [modelsFetch, setModelsFetch] = useState<ModelsFetchState>({
     kind: "idle",
   });
-  const [fallbackPopupHost, setFallbackPopupHost] = useState<HTMLElement | null>(
-    null,
-  );
+  const [fallbackPopupHost, setFallbackPopupHost] =
+    useState<HTMLElement | null>(null);
   const [modelIdInput, setModelIdInput] = useState("");
   const [retryToken, setRetryToken] = useState<string | null>(null);
   const [modelSuccess, setModelSuccess] = useState<string | null>(null);
@@ -385,7 +388,11 @@ function RouteForm(props: {
       modelsGeneration.current += 1;
       setModelsFetch({ kind: "idle" });
     }
-    if (["baseUrl", "protocol", "apiKey", "queryMode", "customSource"].includes(key)) {
+    if (
+      ["baseUrl", "protocol", "apiKey", "queryMode", "customSource"].includes(
+        key,
+      )
+    ) {
       setBalanceFeedback(null);
     }
     setError(null);
@@ -605,7 +612,16 @@ function RouteForm(props: {
     setError(null);
     try {
       const result = await checkRouteReachability(form.baseUrl, form.protocol);
-      if (generation === probeGeneration.current) setReachability(result);
+      if (generation === probeGeneration.current) {
+        setReachability(result);
+        switch (result.errorCategory) {
+          case "system_proxy_read_failed":
+          case "system_proxy_invalid":
+          case "system_proxy_automatic_unsupported":
+            setError(systemProxyErrorMessage);
+            break;
+        }
+      }
     } catch (reason) {
       if (generation === probeGeneration.current) {
         setError(normalizeIpcError(reason).message);
@@ -808,9 +824,12 @@ function RouteForm(props: {
                 label="在顶部菜单中显示"
                 checked={form.menuVisible}
                 disabled={
-                  props.routeId !== null && props.activeRouteId === props.routeId
+                  props.routeId !== null &&
+                  props.activeRouteId === props.routeId
                 }
-                onChange={(event) => patchForm("menuVisible", event.target.checked)}
+                onChange={(event) =>
+                  patchForm("menuVisible", event.target.checked)
+                }
               />
               <SettingsHelpTooltip label="说明菜单显示与自动 Fallback 资格">
                 关闭后不会显示在顶部菜单，也不会参与自动 Fallback。
@@ -981,7 +1000,11 @@ function RouteForm(props: {
               <div className="codex-model-grid" aria-label="自定义模型列表">
                 <div className="codex-model-grid-header" aria-hidden="true">
                   <span>
-                    模型 ID <span className="settings-required-marker" aria-hidden="true" />
+                    模型 ID{" "}
+                    <span
+                      className="settings-required-marker"
+                      aria-hidden="true"
+                    />
                   </span>
                   <span>显示名称</span>
                   <span>上下文窗口（Token）</span>
