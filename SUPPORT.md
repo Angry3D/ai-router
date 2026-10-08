@@ -8,7 +8,7 @@ AI Router 是早期个人维护项目，提供简体中文官方 DMG 与源码�
 - macOS 13 或更高版本、Apple Silicon；
 - 按 [README](./README.md) 使用 Node `22.22.3`、pnpm `10.33.2`、Rust `1.97.1` 和锁文件构建；
 - Codex CLI/App 与 OpenAI Responses API 兼容上游；自动兼容性证据固定为
-  `codex-cli 0.157.1`；
+  `codex-cli 0.160.0`；
 - 路由可选择 Responses 或 Chat Completions 上游协议。Chat Completions 路由仍向 Codex 提供
   Responses 契约，但只覆盖已记录的兼容行为；不透明 reasoning、更丰富的 `web_search` 声明、
   远程压缩和非流式客户端请求会失败关闭，详见
