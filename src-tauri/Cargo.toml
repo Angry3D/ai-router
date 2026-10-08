@@ -27,12 +27,12 @@ router-core = { path = "../crates/router-core" }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "=2.11.6", features = ["macos-private-api", "image-png", "tray-icon"] }
-tauri-plugin-log = "=2.9.2"
-tauri-plugin-opener = "=2.5.5"
-tauri-plugin-positioner = { version = "=2.3.4", features = ["tray-icon"] }
-tauri-plugin-single-instance = "=2.4.5"
-tauri-plugin-updater = { version = "=2.12.0", default-features = false, features = ["rustls-tls", "zip"] }
+tauri = { version = "=2.12.1", features = ["macos-private-api", "image-png", "tray-icon"] }
+tauri-plugin-log = "=2.10.0"
+tauri-plugin-opener = "=2.7.0"
+tauri-plugin-positioner = { version = "=2.4.0", features = ["tray-icon"] }
+tauri-plugin-single-instance = "=2.5.2"
+tauri-plugin-updater = { version = "=2.13.1", default-features = false, features = ["rustls-tls", "zip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 unicode-segmentation = "1.13"
 url = "2"
@@ -50,5 +50,5 @@ workspace = true
 
 [dev-dependencies]
 minisign = "0.10"
-tauri = { version = "=2.11.6", features = ["test"] }
+tauri = { version = "=2.12.1", features = ["test"] }
 tempfile = "3"
