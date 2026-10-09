@@ -1,5 +1,10 @@
 # AI Router
 
+[![CI](https://github.com/Angry3D/ai-router/actions/workflows/ci.yml/badge.svg)](https://github.com/Angry3D/ai-router/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Angry3D/ai-router)](https://github.com/Angry3D/ai-router/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20Apple%20Silicon-lightgrey)](./SUPPORT.md)
+
 AI Router 是一款面向中文 macOS 个人开发者的本地菜单栏应用，用于在 Codex CLI 或
 Codex App 与多个兼容 OpenAI Responses API 的上游之间切换路由。它可以查询余额、自动
 回退路由、管理自定义 Codex 模型目录和图片生成 MCP，并在本地汇总请求用量。
@@ -7,20 +12,7 @@ Codex App 与多个兼容 OpenAI Responses API 的上游之间切换路由。它
 项目仍处于早期开发阶段，提供简体中文界面、官方 Apple Silicon DMG 和源码。它不是稳定的
 通用网络代理或企业级网关。
 
-[前往 GitHub Releases 下载官方 DMG](https://github.com/Angry3D/ai-router/releases)
-
-## 主要功能
-
-- 在菜单栏查看代理、Codex 和 Fallback 状态，一键切换当前路由。
-- 为多个 Responses API 上游保存路由信息、查询余额，并在故障时按顺序回退。
-- 每条路由可选择上游协议：Responses 原样转发，或把 Responses 请求桥接到只提供
-  Chat Completions 的上游，同时继续向 Codex 提供 Responses 契约。
-- 通过受保护的配置投影连接 Codex；断开时恢复之前保存的配置目标。
-- 管理自定义模型目录和图片生成 MCP，无需手工维护对应的 Codex 配置片段。
-- 按路由、模型、状态和时间查看 token、费用估算与延迟等本地请求元数据。
-- 在设置中查看模型价格表，并可手动「同步官网」从 OpenAI 官方定价页更新 GPT 模型价格（结果只写入
-  本地价格表）。
-- 备份和恢复本地设置，并保留有界诊断信息。
+**[前往 GitHub Releases 下载官方 DMG](https://github.com/Angry3D/ai-router/releases)**
 
 ## 软件截图
 
@@ -33,11 +25,41 @@ Codex App 与多个兼容 OpenAI Responses API 的上游之间切换路由。它
 | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | <img src="./docs/images/readme/menu-overview-light.png" alt="AI Router 浅色主题菜单，显示四条合成路由、当前路由和 Fallback 状态" width="384"> | <img src="./docs/images/readme/menu-overview-dark.png" alt="AI Router 深色主题菜单，显示四条合成路由、当前路由和 Fallback 状态" width="384"> |
 
+从菜单栏一键切换当前路由，并实时查看 Codex 连接状态与 Fallback 状态。
+
 ### 路由配置
 
 | 浅色主题                                                                                                                                           | 深色主题                                                                                                                                          |
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | <img src="./docs/images/readme/route-overview-light.png" alt="AI Router 浅色主题路由页面，显示四条合成路由、Fallback 顺序和路由编辑器" width="460"> | <img src="./docs/images/readme/route-overview-dark.png" alt="AI Router 深色主题路由页面，显示四条合成路由、Fallback 顺序和路由编辑器" width="460"> |
+
+路由页集中管理上游地址、余额与回退顺序，每条路由可独立选择上游协议。
+
+## 目录
+
+- [主要功能](#主要功能)
+- [支持范围](#支持范围)
+- [安装和首次使用](#安装和首次使用)
+- [应用内更新](#应用内更新)
+- [网络出站](#网络出站)
+- [数据与隐私](#数据与隐私)
+- [故障排查](#故障排查)
+- [从源码开发](#从源码开发)
+- [工程与社区](#工程与社区)
+- [许可证](#许可证)
+
+## 主要功能
+
+- 在菜单栏查看代理、Codex 和 Fallback 状态，一键切换当前路由。
+- 为多个 Responses API 上游保存路由信息、查询余额，并在故障时按顺序回退。
+- 每条路由可选择上游协议：Responses 原样转发，或桥接只提供 Chat Completions 的上游，
+  同时向 Codex 保持一致的 Responses 契约。
+- 通过受保护的配置投影连接 Codex；断开时恢复之前保存的配置目标。
+- 管理自定义模型目录和图片生成 MCP，无需手工维护对应的 Codex 配置片段。
+- 按路由、模型、状态和时间查看 token、费用估算与延迟等本地请求元数据。
+- 查看模型价格表，手动「同步官网」即可从 OpenAI 官方定价页更新 GPT 模型价格，结果只写入
+  本地价格表。
+- 备份和恢复本地设置，并保留有界诊断信息。
 
 ## 支持范围
 
@@ -56,17 +78,17 @@ Codex App 与多个兼容 OpenAI Responses API 的上游之间切换路由。它
 ## 安装和首次使用
 
 只从 [GitHub Releases](https://github.com/Angry3D/ai-router/releases) 下载文件名为
-`AI.Router_<version>_aarch64.dmg` 的资产。打开 DMG，将 `AI Router.app` 拖入“应用程序”，
+`AI.Router_<version>_aarch64.dmg` 的资产。打开 DMG，将 `AI Router.app` 拖入「应用程序」，
 再从 Finder 启动。
 
 官方 DMG 使用 macOS ad-hoc 签名以保持 bundle 内代码一致，但不包含 Apple Developer ID 身份，
-也没有经过 Apple 公证或 Apple 验证。首次打开如果被 macOS 阻止，请打开“系统设置 -> 隐私与
-安全性”，在“安全性”区域确认被阻止的是 `AI Router.app`，选择“仍要打开”，再在系统确认框中
+也没有经过 Apple 公证或 Apple 验证。首次打开如果被 macOS 阻止，请打开「系统设置 → 隐私与
+安全性」，在「安全性」区域确认被阻止的是 `AI Router.app`，选择「仍要打开」，再在系统确认框中
 允许。项目不建议使用终端命令关闭或绕过 Gatekeeper。
 
 首次启动后：
 
-1. 打开菜单栏中的 AI Router，在“设置 -> 路由”新增一条路由，填写兼容 Responses API 的
+1. 打开菜单栏中的 AI Router，在「设置 → 路由」新增一条路由，填写兼容 Responses API 的
    地址和密钥。
 2. 保存并测试路由；确认状态正常后，将它设为当前路由。
 3. 在菜单中明确执行 Codex 连接。连接会受保护地更新 Codex 当前 provider 的传输字段；断开
@@ -81,28 +103,26 @@ Release 同时提供 updater 归档、`.sig`、`latest.json`、`SHA256SUMS` 和 
 
 ## 应用内更新
 
-官方安装可在“设置 -> 系统 -> 应用更新”中手动检查。应用进入正常运行状态后会立即静默检查一次，
-之后在后台持续检查：成功后每 24 小时一次，暂时失败后 6 小时重试。后台检查不会自动下载、安装、
-通知或打断代理请求。
+官方安装可在「设置 → 系统 → 应用更新」中手动检查。应用进入正常运行状态后会立即静默检查
+一次，之后在后台按固定节奏持续检查；后台检查不会自动下载、安装、通知或打断代理请求。
 
 发现新稳定版本后，设置页会先显示经发布负责人审核的重点更新。下载和安装需要一次明确确认，
 安装完成后的重启需要再次确认；更新包必须先通过项目 updater 签名校验。
 
-第一个包含 updater 的版本需要手动桥接：已有源码构建或更旧版本不能自动升级到它，需先安装
-该版本的 DMG。此后的官方版本才能使用应用内更新。
+更旧版本请先按 [支持说明](./SUPPORT.md#安装与更新支持) 手动安装当前 DMG。调度节奏、失败
+重试与签名校验规则见 [发布与应用更新](./docs/engineering/application-updates.md)。
 
 ## 网络出站
 
-「系统 → 全局出站代理」默认选择「跟随系统」：推理、余额、模型发现、图片生成与图片下载、应用更新
-使用 macOS 的手动 HTTP/HTTPS/SOCKS 代理和绕过规则；没有适用代理且未启用自动代理时直连。
-已有的「直连」配置现在也表示跟随系统，无需迁移数据库；已保存的自定义代理地址仍会保留。
+「系统 → 全局出站代理」默认选择「跟随系统」：推理、余额、模型发现、图片生成与图片下载、
+应用更新使用 macOS 的手动 HTTP/HTTPS/SOCKS 代理和绕过规则；没有适用代理时直连，也可以
+改用「自定义代理」。本地回环地址始终直连；代理失败不会回退直连。价格同步和 Codex 会话
+获取仍跟随系统网络栈。
 
-不执行 PAC/WPAD。手动代理与自动配置并存时使用适用的手动代理或绕过规则；仅有自动配置可用时，
-请求会失败并提示改用「自定义代理」。自定义代理优先于系统配置，本地回环地址始终直连；代理失败
-不会偷偷改为直连。系统配置变化用于后续操作，不中断进行中的请求。价格同步和会话获取仍由 WebView
-跟随系统网络配置，不受自定义代理控制。
+不执行 PAC/WPAD。完整的代理决策、失败关闭与绕过规则见
+[路由与韧性](./docs/engineering/routing-resilience.md)。
 
-## 数据、隐私和支持
+## 数据与隐私
 
 - 路由、API Key、设置、请求元数据和恢复状态保存在应用数据目录的 `router.sqlite3`。
 - API Key 不写入普通运行日志，但会以原始字节保存在受私有权限保护的 SQLite 数据库中；当前
@@ -111,22 +131,21 @@ Release 同时提供 updater 归档、`.sig`、`latest.json`、`SHA256SUMS` 和 
 - 运行日志使用固定错误码和有界计数，不应包含 API Key、Authorization header、请求正文、
   完整配置、上游 URL 或 provider 原始消息。
 - 恢复点保存关键配置，包括路由密钥和 Codex 配置恢复信息；不包含请求历史、用量行或日志。
-- AI Router 不提供云同步。所有外发流量来自用户配置的上游请求、Codex 自身行为，或用户在设置中
-  手动触发的「同步官网」——它只在隐藏的只读窗口中访问 OpenAI 官方定价页，把 GPT 模型的价格行写入
-  本地价格表；不上传任何本地数据，也不携带 API Key。同步的网络出口跟随 macOS 系统代理/PAC，
-  不受设置中的「全局出站代理」影响。
+- AI Router 不提供云同步。所有外发流量来自用户配置的上游请求、Codex 自身行为，或用户在
+  设置中手动触发的「同步官网」——它只在隐藏的只读窗口中访问 OpenAI 官方定价页，把 GPT
+  模型的价格行写入本地价格表；不上传任何本地数据，也不携带 API Key。
 
 具体路径、备份范围和恢复限制见
 [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)。安全问题不要提交到公开 Issue，
 请按 [安全政策](./SECURITY.md) 使用私下报告入口。
 
-常见问题：
+## 故障排查
 
-- 官方 DMG 首次启动被阻止：使用“系统设置 -> 隐私与安全性 -> 仍要打开”。不要运行
+- 官方 DMG 首次启动被阻止：使用「系统设置 → 隐私与安全性 → 仍要打开」。不要运行
   Gatekeeper 绕过命令；确认下载来自 GitHub Releases，并核对 `SHA256SUMS` 和 provenance。
 - 应用内更新失败：保留当前安装，从更新区域重试，或打开 GitHub Releases 手动安装 DMG。
   签名或元数据校验失败时不要替换现有应用。
-- Codex 状态为“已更改”或“冲突”：不要直接覆盖 `config.toml`。先断开 Codex，检查当前
+- Codex 状态为「已更改」或「冲突」：不要直接覆盖 `config.toml`。先断开 Codex，检查当前
   provider 与保留字段，再使用界面提供的预览或修复操作。
 - 数据库启动失败：保留应用数据目录，不要手工编辑或删除 SQLite、WAL 或恢复点。先在启动
   恢复界面选择已验证恢复点，没有可用恢复点时再决定重新开始。
@@ -136,6 +155,8 @@ Release 同时提供 updater 归档、`.sig`、`latest.json`、`SHA256SUMS` 和 
 更多说明见 [支持说明](./SUPPORT.md)。
 
 ## 从源码开发
+
+### 构建前提
 
 准备一台受支持的 Mac，并安装：
 
@@ -156,6 +177,8 @@ corepack prepare pnpm@10.33.2 --activate
 pnpm install --frozen-lockfile
 ```
 
+### 检查命令
+
 先运行项目检查：
 
 ```sh
@@ -169,7 +192,7 @@ cargo test --workspace
 pnpm build
 ```
 
-构建 macOS 应用：
+### 构建 macOS 应用
 
 ```sh
 pnpm tauri:prod:build
@@ -178,6 +201,8 @@ pnpm tauri:prod:build
 产物位于 `target/release/bundle/macos/AI Router.app`。自行构建的 `.app` 没有 Developer ID
 签名、Apple 公证或官方 updater 公钥，macOS 可能显示警告或阻止启动。项目不提供绕过
 Gatekeeper 的步骤，也不暗示源码产物经过 Apple 验证。
+
+### 开发运行
 
 普通界面开发使用隔离的 QA 标识和数据目录：
 
