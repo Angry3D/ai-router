@@ -16,18 +16,18 @@ import {
 
 describe("Usage metric formatting", () => {
   it("preserves exact values and distinguishes unknown from zero", () => {
-    expect(exactToken(null)).toBe("-");
-    expect(exactToken(0)).toBe("0");
-    expect(exactToken(12_345)).toBe("12,345");
+    expect(exactToken(null, "zh-CN")).toBe("-");
+    expect(exactToken(0, "zh-CN")).toBe("0");
+    expect(exactToken(12_345, "zh-CN")).toBe("12,345");
   });
 
   it("compacts only the visible cached-input value", () => {
-    expect(compactToken(null)).toBe("-");
-    expect(compactToken(0)).toBe("0");
-    expect(compactToken(999)).toBe("999");
-    expect(compactToken(1_000)).toBe("1K");
-    expect(compactToken(12_340)).toBe("12.3K");
-    expect(compactToken(1_250_000)).toBe("1.3M");
+    expect(compactToken(null, "zh-CN")).toBe("-");
+    expect(compactToken(0, "zh-CN")).toBe("0");
+    expect(compactToken(999, "zh-CN")).toBe("999");
+    expect(compactToken(1_000, "zh-CN")).toBe("1K");
+    expect(compactToken(12_340, "zh-CN")).toBe("12.3K");
+    expect(compactToken(1_250_000, "zh-CN")).toBe("1.3M");
   });
 
   it("formats latency around the ten-second visual boundary", () => {
@@ -55,22 +55,23 @@ describe("Usage metric formatting", () => {
   });
 
   it("never rounds a tiny non-zero pico-USD amount to zero", () => {
-    expect(formatUsd("50000")).toBe("$0.00000005");
-    expect(formatUsd("1")).toBe("$0.000000000001");
+    expect(formatUsd("50000", "n/a")).toBe("$0.00000005");
+    expect(formatUsd("1", "n/a")).toBe("$0.000000000001");
+    expect(formatUsd(null, "n/a")).toBe("n/a");
   });
 
   it("compacts list costs without losing tiny non-zero amounts", () => {
-    expect(formatCompactUsd(null)).toBe("不可用");
-    expect(formatCompactUsd("0")).toBe("$0");
-    expect(formatCompactUsd("20840000000")).toBe("$0.02084");
-    expect(formatCompactUsd("3756375000")).toBe("$0.003756");
-    expect(formatCompactUsd("275123")).toBe("$0.0000002751");
-    expect(formatCompactUsd("1")).toBe("$0.000000000001");
+    expect(formatCompactUsd(null, "n/a")).toBe("n/a");
+    expect(formatCompactUsd("0", "n/a")).toBe("$0");
+    expect(formatCompactUsd("20840000000", "n/a")).toBe("$0.02084");
+    expect(formatCompactUsd("3756375000", "n/a")).toBe("$0.003756");
+    expect(formatCompactUsd("275123", "n/a")).toBe("$0.0000002751");
+    expect(formatCompactUsd("1", "n/a")).toBe("$0.000000000001");
   });
 
   it("rounds exact costs but truncates partial lower bounds", () => {
-    expect(formatCompactUsd("2737900000")).toBe("$0.002738");
-    expect(formatCompactUsd("2737900000", "down")).toBe("$0.002737");
+    expect(formatCompactUsd("2737900000", "n/a")).toBe("$0.002738");
+    expect(formatCompactUsd("2737900000", "n/a", "down")).toBe("$0.002737");
   });
 
   it("formats statistics Tokens with only M and B units", () => {

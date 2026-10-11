@@ -259,7 +259,7 @@ describe("ApplicationUpdateSettings", () => {
       },
     });
 
-    expect(screen.getByRole("alert")).toHaveTextContent("暂时无法连接更新服务");
+    expect(screen.getByRole("alert")).toHaveTextContent("更新包下载中断");
     expect(screen.getByText("0.2.0")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试下载" })).toBeEnabled();
     fireEvent.click(

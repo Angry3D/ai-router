@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { usageMessages } from "../language/catalog/usage";
 import { formatModelWithActual, isRedirectedModel } from "./modelDisplay";
+
+const modelPair = usageMessages["zh-CN"].modelPair;
 
 describe("isRedirectedModel", () => {
   it("treats an identical reported model as matched", () => {
@@ -34,33 +37,45 @@ describe("isRedirectedModel", () => {
 });
 
 describe("formatModelWithActual", () => {
-  it("renders a redirected pair as requested（actual）", () => {
-    expect(formatModelWithActual("gpt-5.6-sol", "gpt-5.6-luna")).toBe(
-      "gpt-5.6-sol（gpt-5.6-luna）",
-    );
-    expect(formatModelWithActual("gpt-5.6-sol", "gpt-5.6-sol-2026-07-30")).toBe(
-      "gpt-5.6-sol（gpt-5.6-sol-2026-07-30）",
-    );
+  it("renders a redirected pair through the localized pair formatter", () => {
+    expect(
+      formatModelWithActual("gpt-5.6-sol", "gpt-5.6-luna", modelPair),
+    ).toBe("gpt-5.6-sol（gpt-5.6-luna）");
+    expect(
+      formatModelWithActual(
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-2026-07-30",
+        modelPair,
+      ),
+    ).toBe("gpt-5.6-sol（gpt-5.6-sol-2026-07-30）");
   });
 
   it("renders a matched pair as the requested model alone", () => {
-    expect(formatModelWithActual("gpt-5.6-sol", "gpt-5.6-sol")).toBe(
+    expect(formatModelWithActual("gpt-5.6-sol", "gpt-5.6-sol", modelPair)).toBe(
       "gpt-5.6-sol",
     );
-    expect(formatModelWithActual("  gpt-5.6-SOL  ", "gpt-5.6-sol")).toBe(
-      "gpt-5.6-SOL",
-    );
+    expect(
+      formatModelWithActual("  gpt-5.6-SOL  ", "gpt-5.6-sol", modelPair),
+    ).toBe("gpt-5.6-SOL");
   });
 
   it("never adds a suffix when the upstream reported no model", () => {
-    expect(formatModelWithActual("gpt-5.6-sol", null)).toBe("gpt-5.6-sol");
-    expect(formatModelWithActual("gpt-5.6-sol", "   ")).toBe("gpt-5.6-sol");
+    expect(formatModelWithActual("gpt-5.6-sol", null, modelPair)).toBe(
+      "gpt-5.6-sol",
+    );
+    expect(formatModelWithActual("gpt-5.6-sol", "   ", modelPair)).toBe(
+      "gpt-5.6-sol",
+    );
   });
 
   it("falls back to the reported model without a requested name, then to a dash", () => {
-    expect(formatModelWithActual(null, "gpt-5.6-luna")).toBe("gpt-5.6-luna");
-    expect(formatModelWithActual("   ", "gpt-5.6-luna")).toBe("gpt-5.6-luna");
-    expect(formatModelWithActual(null, null)).toBe("-");
-    expect(formatModelWithActual(null, "   ")).toBe("-");
+    expect(formatModelWithActual(null, "gpt-5.6-luna", modelPair)).toBe(
+      "gpt-5.6-luna",
+    );
+    expect(formatModelWithActual("   ", "gpt-5.6-luna", modelPair)).toBe(
+      "gpt-5.6-luna",
+    );
+    expect(formatModelWithActual(null, null, modelPair)).toBe("-");
+    expect(formatModelWithActual(null, "   ", modelPair)).toBe("-");
   });
 });

@@ -626,7 +626,9 @@ describe("CodexSettings interactions", () => {
       within(dialog).getByRole("button", { name: "恢复原始备份" }),
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(
       screen.getByRole("button", { name: "恢复首次连接前状态" }),
     ).toBeEnabled();
@@ -690,7 +692,9 @@ describe("CodexSettings interactions", () => {
       within(dialog).getByRole("button", { name: "更新恢复配置" }),
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(screen.getByRole("button", { name: "更新恢复配置" })).toBeEnabled();
     expect(screen.getByText("可用")).toBeInTheDocument();
   });
@@ -845,7 +849,9 @@ describe("CodexSettings interactions", () => {
       within(dialog).getByRole("button", { name: "替换并重新连接" }),
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(screen.getByText("图片 MCP 配置已修改")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "修复图片配置" })).toBeEnabled();
   });
@@ -1286,7 +1292,9 @@ describe("CodexSettings interactions", () => {
     fireEvent.change(timeout, { target: { value: "1200" } });
     fireEvent.click(screen.getByRole("button", { name: "应用" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(toggle).toBeChecked();
     expect(selector).toHaveValue(routeId);
     expect(modelSelect).toHaveValue("gpt-image-2.5-flare");

@@ -1,23 +1,34 @@
 import { describe, expect, it } from "vitest";
 
+import { routesMessages } from "../language/catalog/routes";
 import { routeHealthPresentation } from "./routeHealthPresentation";
+
+const healthMessages = routesMessages["zh-CN"].health;
 
 describe("routeHealthPresentation", () => {
   it("maps the complete route health state family without displaying zero seconds", () => {
     expect(
-      routeHealthPresentation({ kind: "striking", failureCount: 3 }, true),
+      routeHealthPresentation(
+        { kind: "striking", failureCount: 3 },
+        true,
+        healthMessages,
+      ),
     ).toEqual({
       marker: "当前 · 3/5",
       detail: "已累计失败 3/5 · 仍使用当前路由，不切换",
       tone: "warning",
     });
-    expect(routeHealthPresentation({ kind: "switching" }, true).marker).toBe(
-      "当前 · 切换中",
+    const switching = routeHealthPresentation(
+      { kind: "switching" },
+      true,
+      healthMessages,
     );
+    expect(switching.marker).toBe("当前 · 切换中");
     expect(
       routeHealthPresentation(
         { kind: "switch_pending", retryAfterSeconds: 20 },
         true,
+        healthMessages,
         20,
       ).detail,
     ).toBe("已达到 5/5 · 等待可用的后续路由");
@@ -30,6 +41,7 @@ describe("routeHealthPresentation", () => {
           retryAfterSeconds: 60,
         },
         false,
+        healthMessages,
         60,
       ),
     ).toMatchObject({
@@ -45,10 +57,15 @@ describe("routeHealthPresentation", () => {
           retryAfterSeconds: 120,
         },
         false,
+        healthMessages,
       ).marker,
     ).toBe("恢复 1/2");
     expect(
-      routeHealthPresentation({ kind: "probing", recoverySuccesses: 1 }, false),
+      routeHealthPresentation(
+        { kind: "probing", recoverySuccesses: 1 },
+        false,
+        healthMessages,
+      ),
     ).toEqual({
       marker: "验证中",
       detail: "正在进行第 2/2 次恢复验证",

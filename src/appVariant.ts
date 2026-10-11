@@ -20,8 +20,4 @@ export function appVariantForMode(mode: string): AppVariant {
   return mode === "qa" ? QA_VARIANT : PRODUCTION_VARIANT;
 }
 
-export function appVersionLabel(version: string | null, variant: AppVariant) {
-  return `版本 ${version ?? "—"}${variant.badge ? ` · ${variant.badge}` : ""}`;
-}
-
 export const appVariant = appVariantForMode(import.meta.env.MODE);

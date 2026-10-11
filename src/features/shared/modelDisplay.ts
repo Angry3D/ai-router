@@ -27,16 +27,18 @@ export function isRedirectedModel(
 
 /**
  * Requested-model-first label for the request-detail fact grid, which renders
- * the pair on one line as `requested（actual）` instead of the table's separate
- * redirect line. Rendered only when the pair is redirected, so a matched,
- * unreported, or blank reported model never gains a parenthesized suffix and an
- * unreported upstream never masquerades as the requested model. A row without a
- * client-requested model carries no pair to compare and falls back to the
- * reported model, then to `-`.
+ * the pair on one line instead of the table's separate redirect line. The
+ * caller supplies the localized pair formatter (`requested（actual）` in
+ * zh-CN); this helper stays locale-free. Rendered only when the pair is
+ * redirected, so a matched, unreported, or blank reported model never gains a
+ * parenthesized suffix and an unreported upstream never masquerades as the
+ * requested model. A row without a client-requested model carries no pair to
+ * compare and falls back to the reported model, then to `-`.
  */
 export function formatModelWithActual(
   requested: string | null,
   actual: string | null,
+  formatPair: (requested: string, actual: string) => string,
 ): string {
   const requestedModel = (requested ?? "").trim();
   const actualModel = (actual ?? "").trim();
@@ -44,6 +46,6 @@ export function formatModelWithActual(
     return actualModel === "" ? "-" : actualModel;
   }
   return isRedirectedModel(requested, actual)
-    ? `${requestedModel}（${actualModel}）`
+    ? formatPair(requestedModel, actualModel)
     : requestedModel;
 }

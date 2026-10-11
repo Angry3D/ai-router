@@ -10,9 +10,13 @@ import {
   startOverDatabase,
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
+import type { SystemRecoveryMessages } from "../language/catalog/systemRecovery";
 import type {
   AppLifecycleIssue,
+  AppLocale,
   DatabaseStartupIssue,
+  IpcErrorDto,
   RecoverySnapshotDto,
 } from "../../generated";
 import {
@@ -24,41 +28,47 @@ import {
   SettingsStatus,
 } from "./SettingsPrimitives";
 
-const databaseIssuePresentation: Record<
-  DatabaseStartupIssue,
-  { title: string; body: string; retryable: boolean }
-> = {
-  permission: {
-    title: "数据库无法访问",
-    body: "AI Router 无法访问数据库或恢复目录。请检查文件权限后重试。",
-    retryable: true,
-  },
-  disk_full: {
-    title: "磁盘空间不足",
-    body: "释放磁盘空间后再重试。AI Router 不会在空间不足时替换数据库。",
-    retryable: true,
-  },
-  future_schema: {
-    title: "数据库版本过新",
-    body: "此数据库由更高版本的 AI Router 创建，当前版本不会修改它。",
-    retryable: false,
-  },
-  unsafe_path: {
-    title: "数据库路径不安全",
-    body: "数据库或恢复目录不是受支持的常规文件路径，AI Router 已停止启动。",
-    retryable: false,
-  },
-  unavailable: {
-    title: "数据库暂时不可用",
-    body: "AI Router 无法安全打开数据库。代理仍保持停止状态。",
-    retryable: true,
-  },
-  directory_in_use: {
-    title: "数据目录正在被占用",
-    body: "另一个 AI Router 进程正在使用该数据目录。请退出那个进程后重试。",
-    retryable: true,
-  },
+const retryableDatabaseIssues: Record<DatabaseStartupIssue, boolean> = {
+  permission: true,
+  disk_full: true,
+  future_schema: false,
+  unsafe_path: false,
+  unavailable: true,
+  directory_in_use: true,
 };
+
+function databaseIssuePresentation(
+  issue: DatabaseStartupIssue,
+  messages: SystemRecoveryMessages,
+): { title: string; body: string; retryable: boolean } {
+  const texts: Record<DatabaseStartupIssue, { title: string; body: string }> = {
+    permission: {
+      title: messages.databaseIssuePermissionTitle,
+      body: messages.databaseIssuePermissionBody,
+    },
+    disk_full: {
+      title: messages.databaseIssueDiskFullTitle,
+      body: messages.databaseIssueDiskFullBody,
+    },
+    future_schema: {
+      title: messages.databaseIssueFutureSchemaTitle,
+      body: messages.databaseIssueFutureSchemaBody,
+    },
+    unsafe_path: {
+      title: messages.databaseIssueUnsafePathTitle,
+      body: messages.databaseIssueUnsafePathBody,
+    },
+    unavailable: {
+      title: messages.databaseIssueUnavailableTitle,
+      body: messages.databaseIssueUnavailableBody,
+    },
+    directory_in_use: {
+      title: messages.databaseIssueDirectoryInUseTitle,
+      body: messages.databaseIssueDirectoryInUseBody,
+    },
+  };
+  return { ...texts[issue], retryable: retryableDatabaseIssues[issue] };
+}
 
 function lifecycleDatabaseIssue(
   issue: AppLifecycleIssue | null,
@@ -75,6 +85,8 @@ export function RecoveryRequiredPage({
   snapshot: RecoverySnapshotDto;
   onRetry: () => Promise<unknown>;
 }) {
+  const { messages, effectiveLocale } = useLanguage();
+  const systemMessages = messages.systemRecovery;
   const queryClient = useQueryClient();
   const [selectedPointId, setSelectedPointId] = useState<string | null>(
     snapshot.candidates[0]?.pointId ?? null,
@@ -85,7 +97,7 @@ export function RecoveryRequiredPage({
   const [pending, setPending] = useState<
     "restore" | "start-over" | "scan" | null
   >(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
 
   const effectiveSelectedPointId = snapshot.candidates.some(
     (candidate) => candidate.pointId === selectedPointId,
@@ -115,7 +127,7 @@ export function RecoveryRequiredPage({
       }
       await refreshState();
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setPending(null);
     }
@@ -128,7 +140,7 @@ export function RecoveryRequiredPage({
     try {
       await onRetry();
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setPending(null);
     }
@@ -136,26 +148,30 @@ export function RecoveryRequiredPage({
 
   return (
     <SettingsPage
-      title="恢复数据库"
+      title={systemMessages.recoveryPageTitle}
       titleId="recovery-title"
       className="recovery-page"
     >
       <SettingsSection
-        title="需要恢复"
-        status={<SettingsStatus tone="danger">代理已停止</SettingsStatus>}
+        title={systemMessages.recoveryRequiredSectionTitle}
+        status={
+          <SettingsStatus tone="danger">
+            {systemMessages.proxyStoppedStatus}
+          </SettingsStatus>
+        }
       >
-        <p className="muted-text">
-          主数据库无法使用。请选择一个本地恢复点，恢复完成并验证通过后代理才会重新启动。
-        </p>
+        <p className="muted-text">{systemMessages.recoveryRequiredBody}</p>
       </SettingsSection>
 
       {snapshot.candidates.length > 0 ? (
-        <SettingsSection title="可用恢复点">
+        <SettingsSection title={systemMessages.availableRecoveryPointsTitle}>
           <fieldset
             className="recovery-candidate-list"
             disabled={pending !== null}
           >
-            <legend className="sr-only">选择恢复点</legend>
+            <legend className="sr-only">
+              {systemMessages.selectRecoveryPointLegend}
+            </legend>
             {snapshot.candidates.map((candidate) => (
               <label className="recovery-candidate" key={candidate.pointId}>
                 <input
@@ -166,7 +182,9 @@ export function RecoveryRequiredPage({
                   onChange={() => setSelectedPointId(candidate.pointId)}
                 />
                 <span>
-                  <strong>{formatDateTime(candidate.createdAtMs)}</strong>
+                  <strong>
+                    {formatDateTime(candidate.createdAtMs, effectiveLocale)}
+                  </strong>
                   <code>{candidate.pointId}</code>
                 </span>
               </label>
@@ -180,14 +198,16 @@ export function RecoveryRequiredPage({
               onClick={() => setConfirmation("restore")}
             >
               <DatabaseBackup aria-hidden="true" size={16} />
-              {pending === "restore" ? "正在恢复" : "恢复所选数据库"}
+              {pending === "restore"
+                ? systemMessages.restoringButton
+                : systemMessages.restoreSelectedButton}
             </SettingsButton>
           </SettingsActionGroup>
         </SettingsSection>
       ) : (
-        <SettingsSection title="没有可用恢复点">
+        <SettingsSection title={systemMessages.noAvailableRecoveryPointsTitle}>
           <p className="muted-text">
-            未找到通过校验的恢复点。创建空数据库会丢失现有路由、Key 和设置。
+            {systemMessages.noAvailableRecoveryPointsBody}
           </p>
           {snapshot.canStartOver ? (
             <SettingsButton
@@ -196,7 +216,9 @@ export function RecoveryRequiredPage({
               disabled={pending !== null}
               onClick={() => setConfirmation("start-over")}
             >
-              {pending === "start-over" ? "正在创建" : "创建空数据库"}
+              {pending === "start-over"
+                ? systemMessages.creatingStatus
+                : systemMessages.createEmptyDatabaseButton}
             </SettingsButton>
           ) : null}
         </SettingsSection>
@@ -213,7 +235,7 @@ export function RecoveryRequiredPage({
             size={16}
             className={pending === "scan" ? "spin" : ""}
           />
-          重新扫描恢复点
+          {systemMessages.rescanButton}
         </SettingsButton>
         <SettingsButton
           type="button"
@@ -221,22 +243,29 @@ export function RecoveryRequiredPage({
           onClick={() => void quitApplication()}
         >
           <Power aria-hidden="true" size={16} />
-          退出 AI Router
+          {systemMessages.quitButton}
         </SettingsButton>
       </SettingsActionGroup>
 
       {error ? (
         <p className="settings-error" role="alert">
-          {error}
+          {ipcErrorMessage(error, messages)}
         </p>
       ) : null}
 
       {confirmation === "restore" && effectiveSelectedPointId ? (
         <SettingsConfirmDialog
           confirmation={{
-            title: "恢复所选数据库？",
-            body: `将使用 ${formatDateTime(snapshot.candidates.find((candidate) => candidate.pointId === effectiveSelectedPointId)?.createdAtMs ?? null)} 的恢复点替换当前不可用数据库。`,
-            confirmLabel: "恢复数据库",
+            title: systemMessages.restoreConfirmTitle,
+            body: systemMessages.restoreConfirmBody(
+              formatDateTime(
+                snapshot.candidates.find(
+                  (candidate) => candidate.pointId === effectiveSelectedPointId,
+                )?.createdAtMs ?? null,
+                effectiveLocale,
+              ),
+            ),
+            confirmLabel: systemMessages.restoreConfirmLabel,
             onConfirm: () => {
               setConfirmation(null);
               void runRecovery("restore");
@@ -249,9 +278,9 @@ export function RecoveryRequiredPage({
       {confirmation === "start-over" ? (
         <SettingsConfirmDialog
           confirmation={{
-            title: "创建空数据库？",
-            body: "现有数据库将被隔离保存，但应用会从空路由和新设置开始。此操作不能从界面撤销。",
-            confirmLabel: "确认创建空数据库",
+            title: systemMessages.startOverConfirmTitle,
+            body: systemMessages.startOverConfirmBody,
+            confirmLabel: systemMessages.startOverConfirmLabel,
             destructive: true,
             onConfirm: () => {
               setConfirmation(null);
@@ -270,16 +299,23 @@ export function RecoveryLoadErrorPage({
 }: {
   onRetry: () => Promise<unknown>;
 }) {
+  const { messages } = useLanguage();
+  const systemMessages = messages.systemRecovery;
   const [pending, setPending] = useState(false);
   return (
-    <SettingsPage title="恢复数据库" titleId="recovery-load-error-title">
+    <SettingsPage
+      title={systemMessages.recoveryPageTitle}
+      titleId="recovery-load-error-title"
+    >
       <SettingsSection
-        title="恢复点读取失败"
-        status={<SettingsStatus tone="danger">代理已停止</SettingsStatus>}
+        title={systemMessages.recoveryLoadFailedTitle}
+        status={
+          <SettingsStatus tone="danger">
+            {systemMessages.proxyStoppedStatus}
+          </SettingsStatus>
+        }
       >
-        <p className="muted-text">
-          无法读取安全的恢复点列表。可以重试或退出应用。
-        </p>
+        <p className="muted-text">{systemMessages.recoveryLoadFailedBody}</p>
         <SettingsActionGroup>
           <SettingsButton
             type="button"
@@ -294,7 +330,7 @@ export function RecoveryLoadErrorPage({
               size={16}
               className={pending ? "spin" : ""}
             />
-            重试
+            {systemMessages.retryButton}
           </SettingsButton>
           <SettingsButton
             type="button"
@@ -302,7 +338,7 @@ export function RecoveryLoadErrorPage({
             onClick={() => void quitApplication()}
           >
             <Power aria-hidden="true" size={16} />
-            退出 AI Router
+            {systemMessages.quitButton}
           </SettingsButton>
         </SettingsActionGroup>
       </SettingsSection>
@@ -317,11 +353,15 @@ export function DatabaseStartupErrorPage({
   issue: DatabaseStartupIssue | null;
   lifecycleIssue: AppLifecycleIssue | null;
 }) {
-  const presentation =
-    databaseIssuePresentation[issue ?? lifecycleDatabaseIssue(lifecycleIssue)];
+  const { messages } = useLanguage();
+  const systemMessages = messages.systemRecovery;
+  const presentation = databaseIssuePresentation(
+    issue ?? lifecycleDatabaseIssue(lifecycleIssue),
+    systemMessages,
+  );
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
   const retry = async () => {
     if (pending) return;
     setPending(true);
@@ -334,7 +374,7 @@ export function DatabaseStartupErrorPage({
         queryClient.invalidateQueries({ queryKey: queryKeys.settings }),
       ]);
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setPending(false);
     }
@@ -342,8 +382,12 @@ export function DatabaseStartupErrorPage({
   return (
     <SettingsPage title={presentation.title} titleId="database-error-title">
       <SettingsSection
-        title="数据库启动失败"
-        status={<SettingsStatus tone="danger">代理已停止</SettingsStatus>}
+        title={systemMessages.databaseStartupFailedTitle}
+        status={
+          <SettingsStatus tone="danger">
+            {systemMessages.proxyStoppedStatus}
+          </SettingsStatus>
+        }
       >
         <p className="muted-text">{presentation.body}</p>
         <SettingsActionGroup>
@@ -358,7 +402,9 @@ export function DatabaseStartupErrorPage({
                 size={16}
                 className={pending ? "spin" : ""}
               />
-              {pending ? "正在重试" : "重试数据库启动"}
+              {pending
+                ? systemMessages.retryingDatabaseStartup
+                : systemMessages.retryDatabaseStartupButton}
             </SettingsButton>
           ) : null}
           <SettingsButton
@@ -367,23 +413,23 @@ export function DatabaseStartupErrorPage({
             onClick={() => void quitApplication()}
           >
             <Power aria-hidden="true" size={16} />
-            退出 AI Router
+            {systemMessages.quitButton}
           </SettingsButton>
         </SettingsActionGroup>
       </SettingsSection>
       {error ? (
         <p className="settings-error" role="alert">
-          {error}
+          {ipcErrorMessage(error, messages)}
         </p>
       ) : null}
     </SettingsPage>
   );
 }
 
-function formatDateTime(value: number | null) {
+function formatDateTime(value: number | null, locale: AppLocale) {
   return value === null
     ? "-"
-    : new Intl.DateTimeFormat("zh-CN", {
+    : new Intl.DateTimeFormat(locale, {
         dateStyle: "medium",
         timeStyle: "short",
       }).format(value);

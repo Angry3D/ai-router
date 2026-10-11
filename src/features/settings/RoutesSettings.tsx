@@ -35,7 +35,12 @@ import {
   setFallbackEnabled,
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
-import type { RouteId, SettingsSnapshotDto } from "../../generated";
+import type {
+  IpcErrorDto,
+  RouteId,
+  SettingsSnapshotDto,
+} from "../../generated";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
 import { AppScrollArea } from "../shared/AppScrollArea";
 import { FallbackBoundary, FallbackBoundaryVisual } from "./FallbackBoundary";
 import { RouteEditor } from "./RouteEditor";
@@ -97,9 +102,13 @@ export function RoutesSettings({
   onDirtyChange,
 }: RoutesSettingsProps) {
   const queryClient = useQueryClient();
+  const { messages } = useLanguage();
+  const listMessages = messages.routes.list;
   const [routeToolsBusy, setRouteToolsBusy] = useState(false);
   const [routeOrderPending, setRouteOrderPending] = useState(false);
-  const [routeToolsError, setRouteToolsError] = useState<string | null>(null);
+  const [routeToolsError, setRouteToolsError] = useState<IpcErrorDto | null>(
+    null,
+  );
   const [activeItemId, setActiveItemId] = useState<RouteOrderItemId | null>(
     null,
   );
@@ -169,11 +178,12 @@ export function RoutesSettings({
           routeHealthPresentation(
             route.health,
             route.routeId === snapshot.activeRouteId,
+            messages.routes.health,
             elapsedHealthSeconds,
           ),
         ]),
       ),
-    [elapsedHealthSeconds, routes, snapshot.activeRouteId],
+    [elapsedHealthSeconds, messages, routes, snapshot.activeRouteId],
   );
   const selectedRouteIndex = routes.findIndex(
     (route) => route.routeId === selectedRouteId,
@@ -366,7 +376,7 @@ export function RoutesSettings({
         setPreview(null);
       } catch (reason) {
         setPreview(null);
-        setRouteToolsError(normalizeIpcError(reason).message);
+        setRouteToolsError(normalizeIpcError(reason));
         try {
           await refreshRouteState();
         } catch {
@@ -408,7 +418,7 @@ export function RoutesSettings({
       await setFallbackEnabled(enabled);
       await refreshRouteState();
     } catch (reason) {
-      setRouteToolsError(normalizeIpcError(reason).message);
+      setRouteToolsError(normalizeIpcError(reason));
     } finally {
       setRouteToolsBusy(false);
     }
@@ -492,26 +502,35 @@ export function RoutesSettings({
     (itemId: RouteOrderItemId, sequence: readonly RouteOrderItemId[]) => {
       const projection = projectRouteOrderSequence(sequence);
       if (itemId === FALLBACK_BOUNDARY_ID) {
-        return `Fallback 分界，${projection.participantCount} 条路由参与 Fallback`;
+        return listMessages.fallbackBoundaryItem(projection.participantCount);
       }
       const routeId = fromRouteOrderItemId(itemId);
-      if (!routeId) return "路由";
+      if (!routeId) return listMessages.itemFallback;
       const route = routeById.get(routeId);
       const position = getRouteSequencePosition(sequence, routeId);
-      if (!position) return route?.name ?? "路由";
+      if (!position) return route?.name ?? listMessages.itemFallback;
       const fallbackDescription =
         position.participantPosition === null
-          ? "不参与 Fallback"
-          : `参与 Fallback，序号 ${position.participantPosition}`;
-      return `${route?.name ?? "路由"}，路由第 ${position.routePosition} 位，${fallbackDescription}`;
+          ? listMessages.notParticipating
+          : listMessages.participating(position.participantPosition);
+      return listMessages.itemPosition(
+        route?.name ?? listMessages.itemFallback,
+        position.routePosition,
+        fallbackDescription,
+      );
     },
-    [routeById],
+    [listMessages, routeById],
   );
 
   const announcements = useMemo<Announcements>(
     () => ({
       onDragStart: ({ active }) =>
-        `已提起${describeItem(asRouteOrderItemId(active.id), dragStartSequenceRef.current)}。使用上下方向键移动，空格或回车放置，Escape 取消。`,
+        listMessages.announcementStart(
+          describeItem(
+            asRouteOrderItemId(active.id),
+            dragStartSequenceRef.current,
+          ),
+        ),
       onDragOver: ({ active }) =>
         describeItem(
           asRouteOrderItemId(active.id),
@@ -523,20 +542,27 @@ export function RoutesSettings({
           previewSequenceRef.current ?? dragStartSequenceRef.current,
         ),
       onDragEnd: ({ active }) =>
-        `已放置${describeItem(
-          asRouteOrderItemId(active.id),
-          previewSequenceRef.current ?? dragStartSequenceRef.current,
-        )}。`,
+        listMessages.announcementEnd(
+          describeItem(
+            asRouteOrderItemId(active.id),
+            previewSequenceRef.current ?? dragStartSequenceRef.current,
+          ),
+        ),
       onDragCancel: ({ active }) =>
-        `已取消移动${describeItem(
-          asRouteOrderItemId(active.id),
-          dragStartSequenceRef.current,
-        )}。`,
+        listMessages.announcementCancel(
+          describeItem(
+            asRouteOrderItemId(active.id),
+            dragStartSequenceRef.current,
+          ),
+        ),
     }),
-    [describeItem],
+    [describeItem, listMessages],
   );
 
   const routeToolsLocked = routeToolsBusy || activeItemId !== null;
+  const routeToolsErrorText = routeToolsError
+    ? ipcErrorMessage(routeToolsError, messages)
+    : null;
   const activeRouteId = activeItemId
     ? fromRouteOrderItemId(activeItemId)
     : null;
@@ -558,8 +584,7 @@ export function RoutesSettings({
         accessibility={{
           announcements,
           screenReaderInstructions: {
-            draggable:
-              "按空格提起，使用上下方向键移动，按空格或回车放置，按 Escape 取消。",
+            draggable: listMessages.keyboardInstructions,
           },
         }}
         onDragStart={handleDragStart}
@@ -570,7 +595,7 @@ export function RoutesSettings({
       >
         <section
           className="route-list-pane"
-          aria-label="路由列表"
+          aria-label={listMessages.ariaLabel}
           onKeyDownCapture={handleRouteListKeyDown}
         >
           <span
@@ -587,10 +612,10 @@ export function RoutesSettings({
               data-tauri-drag-region
               aria-hidden="true"
             />
-            <SettingsPageTitle title="路由" />
+            <SettingsPageTitle title={listMessages.title} />
             <SettingsIconButton
               type="button"
-              label="新建路由"
+              label={listMessages.newRoute}
               disabled={routeToolsLocked}
               onClick={onBeginNewRoute}
             >
@@ -605,13 +630,13 @@ export function RoutesSettings({
             {routes.length === 0 ? (
               <div className="route-list-empty">
                 <Route aria-hidden="true" size={22} />
-                <strong>还没有路由</strong>
+                <strong>{listMessages.emptyTitle}</strong>
                 <SettingsButton
                   type="button"
                   disabled={routeToolsLocked}
                   onClick={onBeginNewRoute}
                 >
-                  添加路由
+                  {listMessages.addRoute}
                 </SettingsButton>
               </div>
             ) : null}
@@ -651,6 +676,7 @@ export function RoutesSettings({
                       routeHealthPresentation(
                         null,
                         routeId === snapshot.activeRouteId,
+                        messages.routes.health,
                       )
                     }
                     selected={selectedRouteId === routeId && !newRoute}
@@ -661,11 +687,11 @@ export function RoutesSettings({
               })}
             </SortableContext>
           </AppScrollArea>
-          <div className="route-tools" aria-label="路由排序与自动 Fallback">
+          <div className="route-tools" aria-label={listMessages.toolsAriaLabel}>
             <div className="route-order-tools">
               <SettingsIconButton
                 type="button"
-                label="上移所选路由"
+                label={listMessages.moveUp}
                 disabled={routeToolsLocked || selectedRouteIndex <= 0}
                 onClick={() => void moveSelectedRoute("up")}
               >
@@ -673,7 +699,7 @@ export function RoutesSettings({
               </SettingsIconButton>
               <SettingsIconButton
                 type="button"
-                label="下移所选路由"
+                label={listMessages.moveDown}
                 disabled={
                   routeToolsLocked ||
                   selectedRouteIndex < 0 ||
@@ -686,28 +712,28 @@ export function RoutesSettings({
             </div>
             <span className="route-fallback-switch-help">
               <SettingsSwitch
-                label="自动 Fallback"
+                label={listMessages.fallbackSwitch}
                 checked={snapshot.fallback.enabled}
                 disabled={routeToolsLocked || confirmedFallbackCount < 2}
                 onChange={(event) =>
                   void changeFallback(event.currentTarget.checked)
                 }
               />
-              <SettingsHelpTooltip label="说明自动 Fallback 切换规则">
+              <SettingsHelpTooltip label={listMessages.fallbackHelpLabel}>
                 <ul>
-                  <li>5 次可归因失败后，按顺序切换后续路由。</li>
-                  <li>兼容请求验证成功 2 次后，恢复更前路由。</li>
-                  <li>手动切换后，重新计数。</li>
+                  <li>{listMessages.fallbackHelpRule1}</li>
+                  <li>{listMessages.fallbackHelpRule2}</li>
+                  <li>{listMessages.fallbackHelpRule3}</li>
                 </ul>
               </SettingsHelpTooltip>
             </span>
             <span className="route-tools-error-slot">
-              {routeToolsError ? (
+              {routeToolsErrorText ? (
                 <span
                   className="route-tools-error"
                   role="alert"
-                  aria-label={`路由设置失败：${routeToolsError}`}
-                  title={routeToolsError}
+                  aria-label={listMessages.toolsErrorLabel(routeToolsErrorText)}
+                  title={routeToolsErrorText}
                 >
                   <CircleAlert aria-hidden="true" size={13} />
                 </span>
@@ -737,6 +763,7 @@ export function RoutesSettings({
                 routeHealthPresentation(
                   null,
                   overlayRoute.routeId === snapshot.activeRouteId,
+                  messages.routes.health,
                 )
               }
               selected={overlayRoute.routeId === selectedRouteId && !newRoute}

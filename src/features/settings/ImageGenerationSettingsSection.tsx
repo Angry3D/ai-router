@@ -10,7 +10,8 @@ import {
   updateMcpImageCapacityThreshold,
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
-import type { SettingsSnapshotDto } from "../../generated";
+import type { IpcErrorDto, SettingsSnapshotDto } from "../../generated";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
 import {
   IMAGE_MODEL_PRESETS,
   imageModelTooltipLines,
@@ -57,6 +58,8 @@ export function ImageGenerationSettingsSection({
   onFocusConsumed,
 }: ImageGenerationSettingsSectionProps) {
   const queryClient = useQueryClient();
+  const { messages } = useLanguage();
+  const imageMessages = messages.imagesPricing.imageGeneration;
   const titleRef = useRef<HTMLHeadingElement>(null);
   const [enabled, setEnabled] = useState(snapshot.imagesGeneration.enabled);
   const [routeId, setRouteId] = useState(snapshot.imagesGeneration.routeId);
@@ -70,7 +73,7 @@ export function ImageGenerationSettingsSection({
   const customModelFocusPending = useRef(false);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
   const [capacityDraft, setCapacityDraft] = useState(
     String(snapshot.mcpImageCapacity.thresholdMib),
   );
@@ -78,12 +81,12 @@ export function ImageGenerationSettingsSection({
     "saving" | "opening" | "clearing" | null
   >(null);
   const [capacitySaved, setCapacitySaved] = useState(false);
-  const [capacityError, setCapacityError] = useState<string | null>(null);
+  const [capacityError, setCapacityError] = useState<IpcErrorDto | null>(null);
   const [clearConfirmation, setClearConfirmation] =
     useState<SettingsConfirmation | null>(null);
   const capacityThreshold = parseImageCapacityThreshold(capacityDraft);
   const capacityThresholdError =
-    capacityThreshold === null ? "请输入 128 至 102400 的整数。" : null;
+    capacityThreshold === null ? imageMessages.capacityError : null;
   const capacityUnchanged =
     capacityThreshold === snapshot.mcpImageCapacity.thresholdMib;
   const capacityBusy = capacityOperation !== null;
@@ -104,8 +107,8 @@ export function ImageGenerationSettingsSection({
   }, [focusRequested, onFocusConsumed]);
   const modelChoice = modelDraft.choice;
   useEffect(() => {
-    // The custom input mounts only after `自定义` is chosen, so focus it once
-    // the reveal has committed instead of on every later draft edit.
+    // The custom input mounts only after the custom model option is chosen, so
+    // focus it once the reveal has committed instead of on every draft edit.
     if (modelChoice !== "custom" || !customModelFocusPending.current) return;
     customModelFocusPending.current = false;
     customModelInputRef.current?.focus();
@@ -115,15 +118,17 @@ export function ImageGenerationSettingsSection({
     snapshot.routes.some((route) => route.routeId === routeId);
   const timeoutSecs = parseImagesGenerationTimeout(timeoutDraft);
   const timeoutError =
-    enabled && timeoutSecs === null ? "请输入 600 至 3600 的整数。" : null;
+    enabled && timeoutSecs === null ? imageMessages.timeoutError : null;
   const effectiveModel =
     modelDraft.choice === "preset" ? modelDraft.preset : modelDraft.text.trim();
   const modelError =
     enabled && modelDraft.choice === "custom" && effectiveModel === ""
-      ? "请输入模型 ID。"
+      ? imageMessages.modelRequiredError
       : null;
-  const [modelTooltipLine, ...profileTooltipLines] =
-    imageModelTooltipLines(effectiveModel);
+  const [modelTooltipLine, ...profileTooltipLines] = imageModelTooltipLines(
+    effectiveModel,
+    imageMessages.modelProfile,
+  );
   const unchanged =
     enabled === snapshot.imagesGeneration.enabled &&
     routeId === snapshot.imagesGeneration.routeId &&
@@ -135,10 +140,10 @@ export function ImageGenerationSettingsSection({
       (route) => route.routeId === snapshot.imagesGeneration.routeId,
     );
   const status = !snapshot.imagesGeneration.enabled
-    ? { label: "未启用", tone: "neutral" as const }
+    ? { label: imageMessages.statusDisabled, tone: "neutral" as const }
     : persistedRouteExists
-      ? { label: "已启用", tone: "success" as const }
-      : { label: "需要选择路由", tone: "warning" as const };
+      ? { label: imageMessages.statusEnabled, tone: "success" as const }
+      : { label: imageMessages.statusRouteRequired, tone: "warning" as const };
 
   const updateDraft = (next: {
     enabled?: boolean;
@@ -200,7 +205,7 @@ export function ImageGenerationSettingsSection({
       setSaved(true);
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setBusy(false);
     }
@@ -224,7 +229,7 @@ export function ImageGenerationSettingsSection({
       setCapacitySaved(true);
       await refreshCapacity();
     } catch (reason) {
-      setCapacityError(normalizeIpcError(reason).message);
+      setCapacityError(normalizeIpcError(reason));
     } finally {
       setCapacityOperation(null);
     }
@@ -238,7 +243,7 @@ export function ImageGenerationSettingsSection({
     try {
       await openMcpImageDirectory();
     } catch (reason) {
-      setCapacityError(normalizeIpcError(reason).message);
+      setCapacityError(normalizeIpcError(reason));
     } finally {
       setCapacityOperation(null);
     }
@@ -254,7 +259,7 @@ export function ImageGenerationSettingsSection({
       await clearMcpImages();
       await refreshCapacity();
     } catch (reason) {
-      setCapacityError(normalizeIpcError(reason).message);
+      setCapacityError(normalizeIpcError(reason));
       await refreshCapacity();
     } finally {
       setCapacityOperation(null);
@@ -263,12 +268,12 @@ export function ImageGenerationSettingsSection({
 
   return (
     <SettingsSection
-      title="图片生成"
+      title={imageMessages.sectionTitle}
       titleId="codex-image-generation-title"
       titleRef={titleRef}
       titleTabIndex={focusRequested ? -1 : undefined}
       titleAccessory={
-        <SettingsHelpTooltip label="图片生成说明">
+        <SettingsHelpTooltip label={imageMessages.tooltipLabel}>
           <strong>{modelTooltipLine}</strong>
           {profileTooltipLines.map((line) => (
             <span key={line}>{line}</span>
@@ -279,9 +284,9 @@ export function ImageGenerationSettingsSection({
         <SettingsStatus tone={status.tone}>{status.label}</SettingsStatus>
       }
     >
-      <SettingsFieldRow label="Codex 图片工具">
+      <SettingsFieldRow label={imageMessages.codexToolsLabel}>
         <SettingsSwitch
-          label="启用"
+          label={imageMessages.enableLabel}
           checked={enabled}
           disabled={busy}
           onChange={(event) =>
@@ -289,18 +294,21 @@ export function ImageGenerationSettingsSection({
           }
         />
       </SettingsFieldRow>
-      <SettingsFieldRow label="图片路由" htmlFor="images-generation-route">
+      <SettingsFieldRow
+        label={imageMessages.routeLabel}
+        htmlFor="images-generation-route"
+      >
         <SettingsSelect
           id="images-generation-route"
           className="images-generation-route-select"
-          aria-label="图片路由"
+          aria-label={imageMessages.routeLabel}
           value={selectedRouteExists ? routeId : ""}
           disabled={busy || !enabled}
           onChange={(event) =>
             updateDraft({ routeId: event.currentTarget.value || null })
           }
         >
-          <option value="">选择路由</option>
+          <option value="">{imageMessages.routePlaceholder}</option>
           {snapshot.routes.map((route) => (
             <option key={route.routeId} value={route.routeId}>
               {route.name}
@@ -308,7 +316,10 @@ export function ImageGenerationSettingsSection({
           ))}
         </SettingsSelect>
       </SettingsFieldRow>
-      <SettingsFieldRow label="生图模型" htmlFor="images-generation-model">
+      <SettingsFieldRow
+        label={imageMessages.modelLabel}
+        htmlFor="images-generation-model"
+      >
         <div
           className="images-generation-model-control"
           data-custom={modelDraft.choice === "custom" ? "true" : "false"}
@@ -316,7 +327,7 @@ export function ImageGenerationSettingsSection({
           <SettingsSelect
             id="images-generation-model"
             className="images-generation-model-select"
-            aria-label="生图模型"
+            aria-label={imageMessages.modelLabel}
             value={
               modelDraft.choice === "custom"
                 ? CUSTOM_IMAGE_MODEL_OPTION
@@ -330,15 +341,17 @@ export function ImageGenerationSettingsSection({
                 {preset}
               </option>
             ))}
-            <option value={CUSTOM_IMAGE_MODEL_OPTION}>自定义</option>
+            <option value={CUSTOM_IMAGE_MODEL_OPTION}>
+              {imageMessages.modelCustomOption}
+            </option>
           </SettingsSelect>
           {modelDraft.choice === "custom" ? (
             <SettingsTextInput
               ref={customModelInputRef}
               id="images-generation-model-custom"
               type="text"
-              aria-label="自定义生图模型"
-              placeholder="输入模型 ID"
+              aria-label={imageMessages.customModelLabel}
+              placeholder={imageMessages.customModelPlaceholder}
               autoComplete="off"
               spellCheck={false}
               value={modelDraft.text}
@@ -353,7 +366,7 @@ export function ImageGenerationSettingsSection({
         </div>
       </SettingsFieldRow>
       <SettingsFieldRow
-        label="生成等待上限"
+        label={imageMessages.timeoutLabel}
         htmlFor="images-generation-timeout"
       >
         <div className="parameter-field">
@@ -377,7 +390,7 @@ export function ImageGenerationSettingsSection({
                 setError(null);
               }}
             />
-            <span>秒</span>
+            <span>{imageMessages.timeoutUnit}</span>
           </div>
           {timeoutError ? (
             <p
@@ -406,7 +419,7 @@ export function ImageGenerationSettingsSection({
           {busy ? (
             <LoaderCircle aria-hidden="true" className="spin" size={15} />
           ) : null}
-          应用
+          {imageMessages.applyButton}
         </SettingsButton>
         {modelError ? (
           <span
@@ -417,22 +430,29 @@ export function ImageGenerationSettingsSection({
             {modelError}
           </span>
         ) : null}
-        {saved ? <SettingsStatus tone="success">已保存</SettingsStatus> : null}
+        {saved ? (
+          <SettingsStatus tone="success">
+            {imageMessages.savedStatus}
+          </SettingsStatus>
+        ) : null}
         {error ? (
           <span className="settings-error" role="alert">
-            {error}
+            {ipcErrorMessage(error, messages)}
           </span>
         ) : null}
       </SettingsActionGroup>
       <SettingsDivider />
       <div className="mcp-image-storage-settings">
-        <SettingsReadonlyRow label="本地图片">
+        <SettingsReadonlyRow label={imageMessages.localImagesLabel}>
           {snapshot.mcpImageCapacity.available
-            ? formatLocalImageSummary(snapshot.mcpImageCapacity)
+            ? imageMessages.localImageSummary(
+                snapshot.mcpImageCapacity.imageCount,
+                formatImageBytes(snapshot.mcpImageCapacity.bytes),
+              )
             : "—"}
         </SettingsReadonlyRow>
         <SettingsFieldRow
-          label="容量提醒"
+          label={imageMessages.capacityLabel}
           htmlFor="mcp-image-capacity-threshold"
           className="mcp-image-capacity-row"
         >
@@ -458,7 +478,9 @@ export function ImageGenerationSettingsSection({
                 setCapacityError(null);
               }}
             />
-            <span className="mcp-image-capacity-unit">MB</span>
+            <span className="mcp-image-capacity-unit">
+              {imageMessages.capacityUnit}
+            </span>
             <SettingsButton
               type="button"
               disabled={
@@ -471,10 +493,12 @@ export function ImageGenerationSettingsSection({
               {capacityOperation === "saving" ? (
                 <LoaderCircle aria-hidden="true" className="spin" size={15} />
               ) : null}
-              保存
+              {messages.shell.save}
             </SettingsButton>
             {capacitySaved ? (
-              <SettingsStatus tone="success">已保存</SettingsStatus>
+              <SettingsStatus tone="success">
+                {imageMessages.savedStatus}
+              </SettingsStatus>
             ) : null}
           </div>
           {capacityThresholdError ? (
@@ -489,17 +513,17 @@ export function ImageGenerationSettingsSection({
         </SettingsFieldRow>
         {snapshot.mcpImageCapacity.overThreshold ? (
           <p className="mcp-image-capacity-warning" role="status">
-            已达到容量提醒阈值，生成图片仍可继续使用。
+            {imageMessages.capacityWarning}
           </p>
         ) : null}
         {!snapshot.mcpImageCapacity.available ? (
           <p className="settings-error mcp-image-capacity-message" role="alert">
-            图片目录暂时无法读取。
+            {imageMessages.directoryUnavailable}
           </p>
         ) : null}
         {capacityError ? (
           <p className="settings-error mcp-image-capacity-message" role="alert">
-            {capacityError}
+            {ipcErrorMessage(capacityError, messages)}
           </p>
         ) : null}
         <SettingsActionGroup className="mcp-image-storage-actions">
@@ -513,7 +537,7 @@ export function ImageGenerationSettingsSection({
             ) : (
               <FolderOpen aria-hidden="true" size={16} />
             )}
-            打开图片目录
+            {imageMessages.openDirectoryButton}
           </SettingsButton>
           <SettingsButton
             type="button"
@@ -525,10 +549,13 @@ export function ImageGenerationSettingsSection({
             }
             onClick={() =>
               setClearConfirmation({
-                title: "清除生成图片？",
-                body: "这些图片会被永久删除。历史任务中仅保存在此目录的图片可能无法再预览、处理或复用。",
-                details: `将清除 ${snapshot.mcpImageCapacity.imageCount} 张图片，占用 ${formatImageBytes(snapshot.mcpImageCapacity.bytes, true)}。`,
-                confirmLabel: "清除图片",
+                title: imageMessages.clearConfirmTitle,
+                body: imageMessages.clearConfirmBody,
+                details: imageMessages.clearConfirmDetails(
+                  snapshot.mcpImageCapacity.imageCount,
+                  formatImageBytes(snapshot.mcpImageCapacity.bytes, true),
+                ),
+                confirmLabel: imageMessages.clearConfirmLabel,
                 destructive: true,
                 onConfirm: () => void clearImages(),
               })
@@ -539,7 +566,7 @@ export function ImageGenerationSettingsSection({
             ) : (
               <Trash2 aria-hidden="true" size={16} />
             )}
-            清除生成图片
+            {imageMessages.clearImagesButton}
           </SettingsButton>
         </SettingsActionGroup>
       </div>
@@ -559,12 +586,6 @@ function parseImageCapacityThreshold(value: string): number | null {
   return Number.isSafeInteger(parsed) && parsed >= 128 && parsed <= 102400
     ? parsed
     : null;
-}
-
-function formatLocalImageSummary(
-  capacity: SettingsSnapshotDto["mcpImageCapacity"],
-) {
-  return `${capacity.imageCount}张（${formatImageBytes(capacity.bytes)}）`;
 }
 
 function formatImageBytes(bytes: number, spaced = false): string {

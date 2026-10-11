@@ -355,9 +355,9 @@ beforeEach(() => {
 
 describe("UsageSettings interactions", () => {
   it("preserves pico-USD precision for small positive costs", () => {
-    expect(formatUsd("50000")).toBe("$0.00000005");
-    expect(formatUsd("0")).toBe("$0");
-    expect(formatUsd(null)).toBe("不可用");
+    expect(formatUsd("50000", "n/a")).toBe("$0.00000005");
+    expect(formatUsd("0", "n/a")).toBe("$0");
+    expect(formatUsd(null, "n/a")).toBe("n/a");
   });
 
   it("renders bounded usage filters, partial cost, and on-demand detail", async () => {
@@ -1360,6 +1360,11 @@ describe("UsageSettings interactions", () => {
         name: "历史路由",
         retained: true,
       },
+      {
+        routeId: "unnamed-retained-route" as RouteId,
+        name: null,
+        retained: true,
+      },
     ]);
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "用量" }));
@@ -1369,6 +1374,11 @@ describe("UsageSettings interactions", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("option", { name: "历史路由（已删除）" }),
+    ).toBeInTheDocument();
+    // A retained route whose historical name is gone falls back to the
+    // localized deleted-route label instead of repeating the suffix.
+    expect(
+      screen.getByRole("option", { name: "已删除路由" }),
     ).toBeInTheDocument();
   });
 

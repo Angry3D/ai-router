@@ -9,7 +9,17 @@ import {
   openCodexConfig,
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
-import type { CodexAuthStatusDto, SettingsSnapshotDto } from "../../generated";
+import type {
+  AppLocale,
+  CodexAuthStatusDto,
+  IpcErrorDto,
+  SettingsSnapshotDto,
+} from "../../generated";
+import type {
+  CodexAuthErrorCopy,
+  CodexMessages,
+} from "../language/catalog/codex";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
 import { formatDateTime } from "./codexSettingsFormatting";
 import {
   SettingsActionGroup,
@@ -27,146 +37,69 @@ interface CodexAuthSettingsSectionProps {
   snapshot: SettingsSnapshotDto;
 }
 
-type CodexAuthFailure = { code: string; message: string };
-
 type CodexAuthRequest = "export" | "restore";
 
-type CodexAuthErrorCopy = {
-  tone: SettingsTone;
-  label: string;
-  message: string;
-  retryKind: "primary" | "secondary" | "none";
-};
-
-const codexAuthErrorCopy: Record<string, CodexAuthErrorCopy> = {
-  codex_auth_browser_missing: {
-    tone: "danger",
-    label: "未检测到浏览器",
-    message: "未检测到 Chrome 系浏览器。请安装或打开 Google Chrome 后重试。",
-    retryKind: "secondary",
-  },
-  codex_auth_browser_unsupported: {
-    tone: "warning",
-    label: "浏览器不支持",
-    message:
-      "检测到未验证的浏览器，当前版本仅支持已验证的 Google Chrome。未做任何修改。",
-    retryKind: "none",
-  },
-  codex_auth_unsupported_encryption: {
-    tone: "warning",
-    label: "加密格式不支持",
-    message:
-      "浏览器 Cookie 加密格式暂不支持（可能是浏览器新版本变更）。未做任何修改。",
-    retryKind: "none",
-  },
-  codex_auth_keychain_denied: {
-    tone: "warning",
-    label: "等待钥匙串授权",
-    message:
-      "钥匙串授权被拒绝。请重试并在系统弹窗中选择「始终允许」。",
-    retryKind: "primary",
-  },
-  codex_auth_cookie_store_unreadable: {
-    tone: "danger",
-    label: "无法读取 Cookie",
-    message: "无法读取浏览器 Cookie 数据库（权限不足）。",
-    retryKind: "secondary",
-  },
-  codex_auth_profile_not_logged_in: {
-    tone: "danger",
-    label: "未登录",
-    message:
-      "未检测到已登录的 Chrome 会话。请先在 Chrome 中登录 chatgpt.com，然后重试。",
-    retryKind: "secondary",
-  },
-  codex_auth_session_fetch_failed: {
-    tone: "danger",
-    label: "会话获取失败",
-    message: "获取 ChatGPT 会话失败（网络异常或被拦截）。未做任何修改。",
-    retryKind: "secondary",
-  },
-  codex_auth_session_invalid: {
-    tone: "danger",
-    label: "会话无效",
-    message: "会话响应缺少必需字段，无法生成凭证。",
-    retryKind: "secondary",
-  },
-  codex_auth_store_mode_unsupported: {
-    tone: "warning",
-    label: "存储模式不支持",
-    message:
-      'Codex 当前未使用 file 存储凭证；请把 cli_auth_credentials_store 改为 "file"，保存后重试。',
-    retryKind: "none",
-  },
-  codex_auth_target_conflict: {
-    tone: "warning",
-    label: "目标已占用",
-    message: "目标文件状态异常（符号链接或在写入前被修改），已停止且未覆盖。",
-    retryKind: "secondary",
-  },
-  codex_auth_write_failed: {
-    tone: "danger",
-    label: "写入失败",
-    message: "写入失败，原文件保持不变。",
-    retryKind: "secondary",
-  },
-  codex_auth_restore_failed: {
-    tone: "danger",
-    label: "还原失败",
-    message: "还原失败，原文件保持不变。",
-    retryKind: "secondary",
-  },
-};
-
-function codexAuthStoreModeLabel(mode: CodexAuthStatusDto["storeMode"]) {
+function codexAuthStoreModeLabel(
+  mode: CodexAuthStatusDto["storeMode"],
+  codex: CodexMessages,
+) {
   switch (mode) {
     case "keyring":
-      return "keyring（系统钥匙串）";
+      return codex.storeModeKeyring;
     case "auto":
-      return "auto（自动选择，可能不使用 auth.json）";
+      return codex.storeModeAuto;
     case "ephemeral":
-      return "ephemeral（临时，退出即失效）";
+      return codex.storeModeEphemeral;
     default:
       return mode;
   }
 }
 
-function codexAuthStoreMessage(status: CodexAuthStatusDto) {
-  const mode = codexAuthStoreModeLabel(status.storeMode);
+function codexAuthStoreMessage(
+  status: CodexAuthStatusDto,
+  codex: CodexMessages,
+) {
+  const mode = codexAuthStoreModeLabel(status.storeMode, codex);
   if (status.managedLocked) {
-    return `无法导出：凭证存储方式由企业配置锁定，本机不能改为文件存储（当前：${mode}）。如需在 Codex 中登录，请使用官方登录方式，或联系管理员。`;
+    return codex.authStoreModeMessageManaged(mode);
   }
-  return `无法导出：Codex 当前的凭证存储方式是 ${mode}，不会读取 auth.json。请点下方「打开 Codex 配置」，把 cli_auth_credentials_store 改为 "file"（或删除这一行，默认即 file），保存后回到本窗口即可重新导出。`;
+  return codex.authStoreModeMessageDefault(mode);
 }
 
 function CodexAuthRows({
   status,
   expired,
   showPlan,
+  codex,
+  locale,
 }: {
   status: CodexAuthStatusDto;
   expired: boolean;
   showPlan: boolean;
+  codex: CodexMessages;
+  locale: AppLocale;
 }) {
   return (
     <>
-      <SettingsReadonlyRow label="账号">
+      <SettingsReadonlyRow label={codex.authAccountLabel}>
         {status.accountEmail ?? "—"}
       </SettingsReadonlyRow>
       {showPlan ? (
-        <SettingsReadonlyRow label="套餐">
+        <SettingsReadonlyRow label={codex.authPlanLabel}>
           {status.planType ?? "—"}
         </SettingsReadonlyRow>
       ) : null}
-      <SettingsReadonlyRow label="凭证有效期">
+      <SettingsReadonlyRow label={codex.authExpiryLabel}>
         {status.expiresAtMs === null
           ? "—"
           : expired
-            ? `已过期（${formatDateTime(status.expiresAtMs)}）`
-            : formatDateTime(status.expiresAtMs)}
+            ? codex.authExpiredValue(
+                formatDateTime(status.expiresAtMs, locale),
+              )
+            : formatDateTime(status.expiresAtMs, locale)}
       </SettingsReadonlyRow>
-      <SettingsReadonlyRow label="上次导出">
-        {formatDateTime(status.exportedAtMs)}
+      <SettingsReadonlyRow label={codex.authExportedAtLabel}>
+        {formatDateTime(status.exportedAtMs, locale)}
       </SettingsReadonlyRow>
     </>
   );
@@ -175,10 +108,12 @@ function CodexAuthRows({
 export function CodexAuthSettingsSection({
   snapshot,
 }: CodexAuthSettingsSectionProps) {
+  const { messages, effectiveLocale } = useLanguage();
+  const codex = messages.codex;
   const queryClient = useQueryClient();
   const status = snapshot.codexAuth;
   const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<CodexAuthFailure | null>(null);
+  const [failure, setFailure] = useState<IpcErrorDto | null>(null);
   const [pendingRequest, setPendingRequest] =
     useState<CodexAuthRequest>("export");
   const [confirmation, setConfirmation] = useState<SettingsConfirmation | null>(
@@ -189,7 +124,7 @@ export function CodexAuthSettingsSection({
     if (busy) return;
     setBusy(true);
     setFailure(null);
-    // 重试 repeats the request that failed — never a neighbouring one.
+    // Retry repeats the request that failed — never a neighbouring one.
     setPendingRequest(request);
     try {
       await (request === "restore" ? codexAuthRestore() : codexAuthExport());
@@ -213,10 +148,10 @@ export function CodexAuthSettingsSection({
 
   const storeUnsupported = !status.storeModeSupported;
   const copy: CodexAuthErrorCopy | null = failure
-    ? (codexAuthErrorCopy[failure.code] ?? {
+    ? (codex.authErrors[failure.code] ?? {
         tone: "danger",
-        label: "操作失败",
-        message: failure.message,
+        label: codex.authErrorFallbackLabel,
+        message: ipcErrorMessage(failure, messages),
         retryKind: "secondary",
       })
     : null;
@@ -245,42 +180,42 @@ export function CodexAuthSettingsSection({
   let heading: { tone: SettingsTone; label: string };
   switch (mode) {
     case "busy":
-      heading = { tone: "neutral", label: "正在读取 Chrome 会话…" };
+      heading = { tone: "neutral", label: codex.authHeadingBusy };
       break;
     case "store":
-      heading = { tone: "warning", label: "存储模式不支持" };
+      heading = { tone: "warning", label: codex.authStoreModeUnsupportedLabel };
       break;
     case "notice":
     case "error":
-      heading = { tone: copy?.tone ?? "danger", label: copy?.label ?? "操作失败" };
+      heading = {
+        tone: copy?.tone ?? "danger",
+        label: copy?.label ?? codex.authHeadingOperationFailed,
+      };
       break;
     case "keychain":
-      heading = { tone: "warning", label: "等待钥匙串授权" };
+      heading = { tone: "warning", label: codex.authKeychainDeniedLabel };
       break;
     case "drifted":
-      heading = { tone: "warning", label: "检测到外部修改" };
+      heading = { tone: "warning", label: codex.authHeadingDrifted };
       break;
     case "expired":
-      heading = { tone: "warning", label: "凭证已过期" };
+      heading = { tone: "warning", label: codex.authHeadingExpired };
       break;
     case "success":
-      heading = { tone: "success", label: "已写入" };
+      heading = { tone: "success", label: codex.authHeadingSuccess };
       break;
     default:
-      heading = { tone: "neutral", label: "未检测" };
+      heading = { tone: "neutral", label: codex.authHeadingIdle };
   }
 
   return (
     <SettingsSection
-      title="Codex 凭证"
+      title={codex.authSectionTitle}
       titleAccessory={
-        <SettingsHelpTooltip label="Codex 凭证说明">
-          <strong>仅支持 Chrome 系浏览器。</strong>
-          <span>
-            本功能读取本机 Chrome 的登录 Cookie，在本地生成并替换 Codex
-            凭证文件，不上传任何数据。
-          </span>
-          <span>凭证为一次性：过期后需重新导出。</span>
+        <SettingsHelpTooltip label={codex.authHelpLabel}>
+          <strong>{codex.authHelpStrong}</strong>
+          <span>{codex.authHelpBody}</span>
+          <span>{codex.authHelpNote}</span>
         </SettingsHelpTooltip>
       }
       status={
@@ -289,9 +224,7 @@ export function CodexAuthSettingsSection({
     >
       {mode === "idle" ? (
         <>
-          <p className="muted-text codex-auth-hint">
-            从 Chrome 读取已登录的 ChatGPT 会话，并在本地生成 Codex 凭证。
-          </p>
+          <p className="muted-text codex-auth-hint">{codex.authIdleHint}</p>
           <SettingsActionGroup>
             <SettingsButton
               variant="primary"
@@ -299,22 +232,20 @@ export function CodexAuthSettingsSection({
               disabled={busy}
               onClick={() => void run("export")}
             >
-              获取并替换 Codex 凭证
+              {codex.authExportAction}
             </SettingsButton>
           </SettingsActionGroup>
-          <p className="muted-text codex-auth-hint">
-            首次使用会请求钥匙串授权，请在系统弹窗中选择「始终允许」。
-          </p>
+          <p className="muted-text codex-auth-hint">{codex.authKeychainHint}</p>
         </>
       ) : null}
       {mode === "store" ? (
         <>
           <p className="inline-warning codex-auth-message">
-            {codexAuthStoreMessage(status)}
+            {codexAuthStoreMessage(status, codex)}
           </p>
           <SettingsActionGroup>
             <SettingsButton variant="primary" type="button" disabled>
-              获取并替换 Codex 凭证
+              {codex.authExportAction}
             </SettingsButton>
             {status.managedLocked ? null : (
               <SettingsButton
@@ -322,7 +253,7 @@ export function CodexAuthSettingsSection({
                 onClick={() => void openConfigFile()}
               >
                 <FolderOpen aria-hidden="true" size={16} />
-                打开 Codex 配置
+                {codex.authOpenConfigAction}
               </SettingsButton>
             )}
           </SettingsActionGroup>
@@ -331,7 +262,7 @@ export function CodexAuthSettingsSection({
       {mode === "keychain" ? (
         <>
           <p className="inline-warning codex-auth-message">
-            钥匙串授权被拒绝。请重新点击下方按钮，并在系统弹窗中选择「始终允许」。
+            {codex.authKeychainDeniedMessage}
           </p>
           <SettingsActionGroup>
             <SettingsButton
@@ -340,7 +271,7 @@ export function CodexAuthSettingsSection({
               disabled={busy}
               onClick={() => void run("export")}
             >
-              重试
+              {codex.authRetryAction}
             </SettingsButton>
           </SettingsActionGroup>
         </>
@@ -349,8 +280,8 @@ export function CodexAuthSettingsSection({
         <>
           <p className="inline-warning codex-auth-message">
             {failure?.code === "codex_auth_store_mode_unsupported"
-              ? codexAuthStoreMessage(status)
-              : (copy?.message ?? failure?.message)}
+              ? codexAuthStoreMessage(status, codex)
+              : copy?.message}
           </p>
           {failure?.code === "codex_auth_store_mode_unsupported" &&
           !status.managedLocked ? (
@@ -360,7 +291,7 @@ export function CodexAuthSettingsSection({
                 onClick={() => void openConfigFile()}
               >
                 <FolderOpen aria-hidden="true" size={16} />
-                打开 Codex 配置
+                {codex.authOpenConfigAction}
               </SettingsButton>
             </SettingsActionGroup>
           ) : null}
@@ -376,7 +307,7 @@ export function CodexAuthSettingsSection({
             }
             role="alert"
           >
-            {copy?.message ?? failure?.message}
+            {copy?.message}
           </p>
           <SettingsActionGroup>
             <SettingsButton
@@ -384,7 +315,7 @@ export function CodexAuthSettingsSection({
               disabled={busy}
               onClick={() => void run(pendingRequest)}
             >
-              重试
+              {codex.authRetryAction}
             </SettingsButton>
           </SettingsActionGroup>
         </>
@@ -393,7 +324,7 @@ export function CodexAuthSettingsSection({
         <SettingsActionGroup>
           <SettingsButton variant="primary" type="button" disabled>
             <LoaderCircle aria-hidden="true" className="spin" size={15} />
-            正在读取…
+            {codex.authBusyAction}
           </SettingsButton>
         </SettingsActionGroup>
       ) : null}
@@ -401,14 +332,15 @@ export function CodexAuthSettingsSection({
         <>
           {mode === "drifted" ? (
             <p className="inline-warning codex-auth-message">
-              检测到 ~/.codex/auth.json
-              已被外部修改。重新导出将覆盖当前文件；原文件会先备份。
+              {codex.authDriftedMessage}
             </p>
           ) : null}
           <CodexAuthRows
             status={status}
             expired={mode === "expired"}
             showPlan={mode === "success"}
+            codex={codex}
+            locale={effectiveLocale}
           />
           <SettingsActionGroup>
             <SettingsButton
@@ -417,7 +349,7 @@ export function CodexAuthSettingsSection({
               disabled={busy}
               onClick={() => void run("export")}
             >
-              重新导出
+              {codex.authReexportAction}
             </SettingsButton>
             {mode === "success" && status.backupAvailable ? (
               <SettingsButton
@@ -426,9 +358,9 @@ export function CodexAuthSettingsSection({
                 disabled={busy}
                 onClick={() =>
                   setConfirmation({
-                    title: "还原原凭证？",
-                    body: "将用上次导出的备份覆盖当前 ~/.codex/auth.json。当前文件不会被保留。",
-                    confirmLabel: "还原",
+                    title: codex.authRestoreConfirmTitle,
+                    body: codex.authRestoreConfirmBody,
+                    confirmLabel: codex.authRestoreConfirmLabel,
                     destructive: true,
                     onConfirm: () => {
                       setConfirmation(null);
@@ -437,15 +369,12 @@ export function CodexAuthSettingsSection({
                   })
                 }
               >
-                还原原凭证
+                {codex.authRestoreAction}
               </SettingsButton>
             ) : null}
           </SettingsActionGroup>
           {mode === "success" || mode === "expired" ? (
-            <p className="muted-text codex-auth-hint">
-              请重启 Codex
-              使新凭证生效。凭证为一次性：过期后需重新导出。
-            </p>
+            <p className="muted-text codex-auth-hint">{codex.authRestartHint}</p>
           ) : null}
         </>
       ) : null}

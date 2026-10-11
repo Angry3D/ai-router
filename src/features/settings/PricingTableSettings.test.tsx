@@ -8,8 +8,19 @@ import {
   usePricingTableSnapshot,
 } from "../../api/query";
 import type { PricingTableDto } from "../../generated";
-import { pricingPresentation } from "./pricingPresentation";
+import { languageMessages } from "../language/languageMessages";
+import { pricingPresentation, type PricingPresentation } from "./pricingPresentation";
 import { PricingTableSettings } from "./PricingTableSettings";
+
+const pricingMessages = languageMessages["zh-CN"].imagesPricing.pricing;
+
+/** `pricingPresentation` pinned to the zh-CN segment the settings window renders. */
+function pricingView(
+  snapshot: PricingTableDto | null,
+  syncing?: boolean,
+): PricingPresentation {
+  return pricingPresentation(snapshot, pricingMessages, syncing);
+}
 
 const ipc = vi.hoisted(() => ({
   openPricingSource: vi.fn(),
@@ -81,7 +92,7 @@ function bundledSnapshot(): PricingTableDto {
 
 /** The status-line copy a failed snapshot shows for the given failure. */
 function failureCopy(failure: PricingTableDto["failure"]): string {
-  return pricingPresentation(snapshot({ status: "error", failure })).actionText;
+  return pricingView(snapshot({ status: "error", failure })).actionText;
 }
 
 function renderSection(value: PricingTableDto | null) {
@@ -122,38 +133,38 @@ beforeEach(() => {
 
 describe("pricing presentation", () => {
   it("maps every local and sync state to the approved copy", () => {
-    expect(pricingPresentation(null)).toEqual({
+    expect(pricingView(null)).toEqual({
       sectionLabel: "未同步",
       sectionTone: "neutral",
       actionText: "尚未同步，当前使用内置价格。",
       actionTone: "neutral",
     });
-    expect(pricingPresentation(null, true)).toEqual({
+    expect(pricingView(null, true)).toEqual({
       sectionLabel: "未同步",
       sectionTone: "neutral",
       actionText: "正在访问官网…",
       actionTone: "neutral",
     });
-    expect(pricingPresentation(snapshot({ localState: "missing" }))).toEqual({
+    expect(pricingView(snapshot({ localState: "missing" }))).toEqual({
       sectionLabel: "未同步",
       sectionTone: "neutral",
       actionText: "尚未同步，当前使用内置价格。",
       actionTone: "neutral",
     });
-    expect(pricingPresentation(snapshot({ localState: "corrupt" }))).toEqual({
+    expect(pricingView(snapshot({ localState: "corrupt" }))).toEqual({
       sectionLabel: "未同步",
       sectionTone: "neutral",
       actionText: "本地价格表不可用，已回退内置",
       actionTone: "neutral",
     });
-    expect(pricingPresentation(snapshot())).toEqual({
+    expect(pricingView(snapshot())).toEqual({
       sectionLabel: "已同步 · 2026-09-29 21:40",
       sectionTone: "success",
       actionText: "",
       actionTone: "neutral",
     });
     expect(
-      pricingPresentation(
+      pricingView(
         snapshot({ status: "syncing", localState: "missing", syncedAtMs: null }),
       ),
     ).toEqual({
@@ -162,13 +173,13 @@ describe("pricing presentation", () => {
       actionText: "正在访问官网…",
       actionTone: "neutral",
     });
-    expect(pricingPresentation(snapshot({ status: "syncing" }))).toEqual({
+    expect(pricingView(snapshot({ status: "syncing" }))).toEqual({
       sectionLabel: "已同步 · 2026-09-29 21:40",
       sectionTone: "neutral",
       actionText: "正在访问官网…",
       actionTone: "neutral",
     });
-    expect(pricingPresentation(snapshot({ status: "error", failure: null }))).toEqual({
+    expect(pricingView(snapshot({ status: "error", failure: null }))).toEqual({
       sectionLabel: "已同步 · 2026-09-29 21:40",
       sectionTone: "neutral",
       actionText: "同步失败：官网暂时无法访问，已保留上次数据。",
@@ -199,7 +210,7 @@ describe("pricing presentation", () => {
       "同步失败：官网暂时无法访问，已保留上次数据。",
     );
     expect(
-      pricingPresentation(
+      pricingView(
         snapshot({
           status: "error",
           failure: { kind: "page", reason: "pricing-families-not-found" },

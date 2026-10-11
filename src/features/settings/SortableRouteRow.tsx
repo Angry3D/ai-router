@@ -3,6 +3,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { GripVertical } from "lucide-react";
 
 import type { RouteId, SettingsSnapshotDto } from "../../generated";
+import { useLanguage } from "../language/useLanguage";
 import type { RouteHealthPresentation } from "./routeHealthPresentation";
 import { toRouteOrderItemId } from "./routeOrderSequence";
 
@@ -85,6 +86,8 @@ export function SortableRouteRow({
   routeIndex,
   onSelectRoute,
 }: SortableRouteRowProps) {
+  const { messages } = useLanguage();
+  const listMessages = messages.routes.list;
   const itemId = toRouteOrderItemId(route.routeId);
   const {
     attributes,
@@ -115,8 +118,8 @@ export function SortableRouteRow({
         type="button"
         className="settings-route-drag-handle"
         disabled={disabled}
-        aria-label={`拖动调整路由顺序：${route.name}`}
-        title="拖动调整路由顺序"
+        aria-label={listMessages.dragHandleLabel(route.name)}
+        title={listMessages.dragHandleTitle}
         data-sortable-handle={itemId}
         {...attributes}
         {...listeners}
@@ -128,7 +131,11 @@ export function SortableRouteRow({
         className="settings-route-select"
         aria-label={
           healthPresentation.detail
-            ? `${route.name}，${route.baseUrlHost}，${healthPresentation.detail}`
+            ? listMessages.routeSelectLabel(
+                route.name,
+                route.baseUrlHost,
+                healthPresentation.detail,
+              )
             : undefined
         }
         onClick={() => onSelectRoute(route.routeId)}

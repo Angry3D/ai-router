@@ -10,6 +10,8 @@ import type {
 } from "../../generated";
 import type { UsageRecordColumn } from "./usageRecordColumns";
 import { isRedirectedModel } from "./modelDisplay";
+import { useLanguage } from "../language/useLanguage";
+import type { UsageMessages } from "../language/catalog/usage";
 import {
   compactToken,
   formatCompactLatency,
@@ -23,49 +25,67 @@ import {
   formatUsagePreviewTime,
 } from "./usageRecordFormatting";
 
-const COLUMN_LABELS: Record<UsageRecordColumn, string> = {
-  route: "路由",
-  model: "模型",
-  state: "类型/状态",
-  tokens: "TOKEN",
-  totalTokens: "Token",
-  cost: "费用",
-  latency: "延迟",
-  firstOutputLatency: "首 Token",
-  completedAt: "完成时间",
-  request: "请求",
-};
-
-const COMPLETION_LABELS: Record<CompletionState, string> = {
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-  no_upstream: "无上游",
-};
-
-const FAST_LABELS: Record<UsageFastStatusDto, string> = {
-  confirmed: "Fast",
-  unconfirmed: "Fast 未确认",
-};
-
-function stateLabel(state: CompletionState, httpStatus: number | null) {
-  if (state === "completed" || httpStatus === null)
-    return COMPLETION_LABELS[state];
-  return `${COMPLETION_LABELS[state]}（${httpStatus}）`;
+function columnLabels(
+  messages: UsageMessages,
+): Record<UsageRecordColumn, string> {
+  return {
+    route: messages.routeLabel,
+    model: messages.modelLabel,
+    state: messages.columnState,
+    tokens: messages.columnTokens,
+    totalTokens: messages.columnTotalTokens,
+    cost: messages.cost,
+    latency: messages.columnLatency,
+    firstOutputLatency: messages.columnFirstOutputLatency,
+    completedAt: messages.completedAtColumn,
+    request: messages.columnRequest,
+  };
 }
 
-function compactCostLabel(cost: UsageCostDto) {
+function completionLabels(
+  messages: UsageMessages,
+): Record<CompletionState, string> {
+  return {
+    completed: messages.completionCompleted,
+    failed: messages.completionFailed,
+    cancelled: messages.completionCancelled,
+    no_upstream: messages.completionNoUpstream,
+  };
+}
+
+function fastLabels(
+  messages: UsageMessages,
+): Record<UsageFastStatusDto, string> {
+  return {
+    confirmed: messages.fastConfirmed,
+    unconfirmed: messages.fastUnconfirmed,
+  };
+}
+
+function stateLabel(
+  state: CompletionState,
+  httpStatus: number | null,
+  messages: UsageMessages,
+) {
+  const label = completionLabels(messages)[state];
+  if (state === "completed" || httpStatus === null) return label;
+  return messages.completionWithStatus(label, httpStatus);
+}
+
+function compactCostLabel(cost: UsageCostDto, messages: UsageMessages) {
   switch (cost.state) {
     case "exact":
-      return formatCompactUsd(cost.amountPicoUsd);
+      return formatCompactUsd(cost.amountPicoUsd, messages.costUnavailable);
     case "partial":
-      return `至少 ${formatCompactUsd(cost.amountPicoUsd, "down")}`;
+      return messages.costAtLeast(
+        formatCompactUsd(cost.amountPicoUsd, messages.costUnavailable, "down"),
+      );
     case "pre_v0_3a":
-      return "未计价（V0.3A 前）";
+      return messages.costNotPricedPreV03A;
     case "unavailable":
-      return "不可用";
+      return messages.costUnavailable;
     case "not_applicable":
-      return "不适用";
+      return messages.costNotApplicable;
   }
 }
 
@@ -80,11 +100,18 @@ export function UsageRequestState({
   streaming: boolean;
   includeStreaming?: boolean;
 }) {
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
   return (
     <div className="usage-request-state">
-      {includeStreaming ? <span>{streaming ? "流式" : "同步"}</span> : null}
+      {includeStreaming ? (
+        <span>
+          {streaming ? usageMessages.streaming : usageMessages.synchronous}
+        </span>
+      ) : null}
       <span className={`usage-completion usage-completion-${state}`}>
-        {stateLabel(state, httpStatus)}
+        {stateLabel(state, httpStatus, usageMessages)}
       </span>
     </div>
   );
@@ -97,10 +124,11 @@ export function UsageTokenCell({
   tokens: UsageTokensDto;
   mode?: "breakdown" | "total";
 }) {
+  const { effectiveLocale } = useLanguage();
   if (mode === "total") {
     return (
       <div className="usage-metric-cell usage-token-cell usage-token-total-cell">
-        <span>{compactToken(tokens.total)}</span>
+        <span>{compactToken(tokens.total, effectiveLocale)}</span>
       </div>
     );
   }
@@ -111,16 +139,16 @@ export function UsageTokenCell({
         <div className="usage-token-primary">
           <span>
             <ArrowDown aria-hidden="true" size={13} />
-            {compactToken(tokens.uncachedInput)}
+            {compactToken(tokens.uncachedInput, effectiveLocale)}
           </span>
           <span>
             <ArrowUp aria-hidden="true" size={13} />
-            {compactToken(tokens.output)}
+            {compactToken(tokens.output, effectiveLocale)}
           </span>
         </div>
         <div className="usage-token-cache">
           <Database aria-hidden="true" size={12} />
-          {compactToken(tokens.cachedInput)}
+          {compactToken(tokens.cachedInput, effectiveLocale)}
         </div>
       </div>
     </div>
@@ -128,13 +156,18 @@ export function UsageTokenCell({
 }
 
 export function UsageCostCell({ cost }: { cost: UsageCostDto }) {
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
   const fastLabel =
-    cost.fastStatus === null ? null : FAST_LABELS[cost.fastStatus];
+    cost.fastStatus === null
+      ? null
+      : fastLabels(usageMessages)[cost.fastStatus];
   return (
     <div
       className={`usage-metric-cell usage-cost-cell usage-cost-${cost.state}`}
     >
-      <span>{compactCostLabel(cost)}</span>
+      <span>{compactCostLabel(cost, usageMessages)}</span>
       {fastLabel === null ? null : (
         <span className={`usage-cost-tier usage-cost-tier-${cost.fastStatus}`}>
           {fastLabel}
@@ -155,6 +188,9 @@ export function UsageLatencyCell({
 }) {
   const firstTone = latencyTone(firstMs);
   const slowFirst = firstTone === "warning";
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
   const firstValueClass = slowFirst
     ? "usage-latency-value is-warning"
     : firstMs === null
@@ -183,9 +219,9 @@ export function UsageLatencyCell({
         />
         <span className={totalMs === null ? "is-unknown" : ""} />
       </span>
-      <span className="usage-latency-label">首字</span>
+      <span className="usage-latency-label">{usageMessages.latencyFirst}</span>
       <span className={firstValueClass}>{formatCompactLatency(firstMs)}</span>
-      <span className="usage-latency-label">总耗时</span>
+      <span className="usage-latency-label">{usageMessages.totalLatency}</span>
       <span
         className={
           totalMs === null
@@ -200,6 +236,9 @@ export function UsageLatencyCell({
 }
 
 function UsageModelCell({ row }: { row: UsageHistoryRowDto }) {
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
   const requested = row.requestedModel ?? "-";
   const redirected = isRedirectedModel(row.requestedModel, row.actualModel);
   const reasoningEffort = row.reasoningEffort ?? "-";
@@ -208,26 +247,37 @@ function UsageModelCell({ row }: { row: UsageHistoryRowDto }) {
       className="usage-model-cell"
       title={
         redirected
-          ? `${requested}\n→${row.actualModel}\n推理 ${reasoningEffort}`
-          : `${requested}\n推理 ${reasoningEffort}`
+          ? usageMessages.modelRedirectTitle(
+              requested,
+              row.actualModel ?? "",
+              reasoningEffort,
+            )
+          : usageMessages.modelTitle(requested, reasoningEffort)
       }
     >
       <span>{requested}</span>
       {redirected ? (
         <span className="usage-model-redirect">→{row.actualModel}</span>
       ) : null}
-      <span>推理 {reasoningEffort}</span>
+      <span>{usageMessages.reasoningInline(reasoningEffort)}</span>
     </div>
   );
 }
 
 function UsagePreviewRequestCell({ row }: { row: UsageHistoryRowDto }) {
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
   const requested = row.requestedModel ?? "-";
   const redirected = isRedirectedModel(row.requestedModel, row.actualModel);
   const reasoningEffort = row.reasoningEffort ?? "-";
   const timestamp =
     row.finishedAtMs === null ? "-" : formatUsagePreviewTime(row.finishedAtMs);
-  const completion = stateLabel(row.completionState, row.httpStatus);
+  const completion = stateLabel(
+    row.completionState,
+    row.httpStatus,
+    usageMessages,
+  );
   return (
     <div
       className="usage-preview-request-cell"
@@ -262,6 +312,11 @@ export function UsageRecordTable({
   bodyFallback?: ReactNode;
   className?: string;
 }) {
+  const {
+    messages: { usage: usageMessages },
+    effectiveLocale,
+  } = useLanguage();
+  const labels = columnLabels(usageMessages);
   const preview = columns.includes("request");
   return (
     <table
@@ -270,7 +325,7 @@ export function UsageRecordTable({
       <thead>
         <tr>
           {columns.map((column) => (
-            <th key={column}>{COLUMN_LABELS[column]}</th>
+            <th key={column}>{labels[column]}</th>
           ))}
         </tr>
       </thead>
@@ -357,8 +412,10 @@ export function UsageRecordTable({
                         <button
                           type="button"
                           className="usage-row-link"
-                          title={formatUsageDateTime(row.finishedAtMs)}
-                          aria-label={`查看请求 ${formatUsageDateTime(row.finishedAtMs)}`}
+                          title={formatUsageDateTime(row.finishedAtMs, effectiveLocale)}
+                          aria-label={usageMessages.viewRequestAriaLabel(
+                            formatUsageDateTime(row.finishedAtMs, effectiveLocale),
+                          )}
                           onClick={() => onSelectRequest(row.requestId)}
                         >
                           {row.finishedAtMs === null ? (
@@ -366,16 +423,22 @@ export function UsageRecordTable({
                           ) : (
                             <>
                               <span>
-                                {formatUsageCompactDate(row.finishedAtMs)}
+                                {formatUsageCompactDate(
+                                  row.finishedAtMs,
+                                  effectiveLocale,
+                                )}
                               </span>
                               <span>
-                                {formatUsageCompactTime(row.finishedAtMs)}
+                                {formatUsageCompactTime(
+                                  row.finishedAtMs,
+                                  effectiveLocale,
+                                )}
                               </span>
                             </>
                           )}
                         </button>
                       ) : (
-                        formatUsageDateTime(row.finishedAtMs)
+                        formatUsageDateTime(row.finishedAtMs, effectiveLocale)
                       )}
                     </td>
                   );

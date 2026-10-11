@@ -12,7 +12,8 @@ import { CircleHelp } from "lucide-react";
 import { forwardRef, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { appVariant, appVersionLabel } from "../../appVariant";
+import { appVariant } from "../../appVariant";
+import { useLanguage } from "../language/useLanguage";
 import { AppScrollArea } from "../shared/AppScrollArea";
 
 export type SettingsSectionId = "routes" | "usage" | "codex" | "system";
@@ -52,8 +53,10 @@ export function SettingsSidebar({
   isRepositoryPending: boolean;
   version: string | null;
 }) {
+  const { messages } = useLanguage();
+  const shell = messages.shell;
   return (
-    <nav className="settings-nav" aria-label="设置分区">
+    <nav className="settings-nav" aria-label={shell.navigationLabel}>
       <div
         className="settings-drag-region"
         data-tauri-drag-region
@@ -75,7 +78,7 @@ export function SettingsSidebar({
           key={item.id}
           aria-label={
             item.indicatorLabel
-              ? `${item.label}，${item.indicatorLabel}`
+              ? shell.navItemLabel(item.label, item.indicatorLabel)
               : item.label
           }
           aria-current={activeSection === item.id ? "page" : undefined}
@@ -95,13 +98,13 @@ export function SettingsSidebar({
       ))}
       <div className="settings-nav-footer">
         <p className="settings-nav-version">
-          {appVersionLabel(version, appVariant)}
+          {shell.versionLabel(version, appVariant.badge)}
         </p>
         <button
           className="settings-github-link"
           type="button"
-          aria-label="打开 GitHub 项目"
-          title="打开 GitHub 项目"
+          aria-label={shell.openRepositoryLabel}
+          title={shell.openRepositoryLabel}
           disabled={isRepositoryPending}
           onClick={onOpenRepository}
         >
@@ -399,6 +402,8 @@ export function SettingsCombobox({
   invalid?: boolean;
   placement?: "below" | "above";
 }) {
+  const { messages } = useLanguage();
+  const shell = messages.shell;
   const generatedId = useId();
   const inputId = id ?? `settings-combobox-${generatedId}`;
   const listboxId = `${inputId}-listbox`;
@@ -477,7 +482,7 @@ export function SettingsCombobox({
       role="listbox"
     >
       {filtered.length === 0 ? (
-        <div className="settings-combobox-hint">无匹配模型</div>
+        <div className="settings-combobox-hint">{shell.comboboxNoMatches}</div>
       ) : (
         filtered.map((option, index) => (
           <div
@@ -495,7 +500,9 @@ export function SettingsCombobox({
           >
             <span className="settings-combobox-option-label">{option.id}</span>
             {option.disabled ? (
-              <span className="settings-combobox-badge">已添加</span>
+              <span className="settings-combobox-badge">
+                {shell.comboboxAdded}
+              </span>
             ) : null}
           </div>
         ))
@@ -653,6 +660,7 @@ export function SettingsConfirmDialog({
   confirmation: SettingsConfirmation;
   onCancel: () => void;
 }) {
+  const { messages } = useLanguage();
   return (
     <div className="dialog-backdrop" role="presentation">
       <section
@@ -674,7 +682,7 @@ export function SettingsConfirmDialog({
         ) : null}
         <div className="dialog-actions">
           <SettingsButton type="button" onClick={onCancel} autoFocus>
-            {confirmation.cancelLabel ?? "取消"}
+            {confirmation.cancelLabel ?? messages.shell.cancel}
           </SettingsButton>
           <SettingsButton
             type="button"

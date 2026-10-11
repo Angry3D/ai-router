@@ -192,6 +192,7 @@ export const previewMenuSnapshot: MenuSnapshotDto = {
     proxyStatus: "running",
     lifecycle: { phase: "running", issue: null },
     appearancePreference: "system",
+    language: { preference: "system", effectiveLocale: "en" },
   },
   codexStatus: "connected",
   codexRestartNotice: {
@@ -831,11 +832,12 @@ export const previewUsageStatistics: UsageStatisticsDto = {
   redirectedRequestCount: 1,
   redirectedTotalTokens: "60054",
   granularity: "hour",
+  timeZone: "Asia/Shanghai",
   trend: [
     {
       startedAtMs: previewNow - 3 * 60 * 60_000,
       finishedAtMs: previewNow - 2 * 60 * 60_000,
-      label: "07/30 22:00",
+      includeUtcOffset: false,
       requestCount: 1,
       tokens: {
         total: "60054",
@@ -849,7 +851,7 @@ export const previewUsageStatistics: UsageStatisticsDto = {
     {
       startedAtMs: previewNow - 2 * 60 * 60_000,
       finishedAtMs: previewNow - 60 * 60_000,
-      label: "07/30 23:00",
+      includeUtcOffset: false,
       requestCount: 2,
       tokens: {
         total: "60054",

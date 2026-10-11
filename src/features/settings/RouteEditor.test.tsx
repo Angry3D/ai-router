@@ -481,7 +481,7 @@ describe("RouteEditor interactions", () => {
     fireEvent.click(visibility);
     fireEvent.click(save);
 
-    expect(await screen.findByText("测试失败")).toHaveAttribute(
+    expect(await screen.findByText("操作失败，请重试。")).toHaveAttribute(
       "role",
       "alert",
     );
@@ -771,7 +771,7 @@ describe("RouteEditor interactions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
 
-    const status = await screen.findByText("测试失败");
+    const status = await screen.findByText("操作失败，请重试。");
     expect(status).toHaveAttribute("role", "alert");
     expect(status).toHaveClass("settings-status-danger");
   });
@@ -1419,7 +1419,7 @@ describe("RouteEditor interactions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "测试余额查询" }));
 
-    const result = await screen.findByText("测试失败");
+    const result = await screen.findByText("操作失败，请重试。");
     const testBalance = screen.getByRole("button", { name: "测试余额查询" });
     expect(result).toHaveClass("settings-status-danger", "balance-test-result");
     expect(result).toHaveAttribute("role", "alert");
