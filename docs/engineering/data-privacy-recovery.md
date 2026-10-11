@@ -1,138 +1,181 @@
-# 数据、隐私与恢复
+# Data, privacy, and recovery
 
-AI Router 不提供账户或云同步。数据主要位于当前 macOS 用户目录，但“本地”不等于“已加密”或“可
-公开分享”。
+AI Router has no accounts and no cloud sync. Data lives mainly in the current macOS user directory,
+but "local" does not mean "encrypted" or "safe to share publicly".
 
-## 数据位置
+## Data locations
 
-生产 bundle identifier 是 `com.relax.airouter`。在标准 macOS 环境中，Tauri 将应用数据和日志解析
-到以下位置：
+The production bundle identifier is `com.relax.airouter`. On a standard macOS environment, Tauri
+resolves app data and logs to the following locations:
 
-| 内容         | 位置                                                              |
-| ------------ | ----------------------------------------------------------------- |
-| 应用数据     | `~/Library/Application Support/com.relax.airouter/`               |
-| 主数据库     | 应用数据目录下的 `router.sqlite3`                                 |
-| 恢复点       | 应用数据目录下的 `recovery/`                                      |
-| MCP 图片资产 | 应用数据目录下的 `mcp-images/<assetId>.png`                       |
-| 派生模型目录 | 应用数据目录下的 `codex-model-catalog.json`（存在自定义模型时）   |
-| 本地价格表   | 应用数据目录下的 `pricing/local-pricing.json`（手动同步官网后）   |
-| 运行日志     | `~/Library/Logs/com.relax.airouter/`                              |
-| 事故记录     | 运行日志目录下的 `incident-<毫秒时间戳>.json`                     |
-| Codex 配置   | `~/.codex/config.toml`（由 Codex 所有，AI Router 只做受保护投影） |
+| Content                 | Location                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------- |
+| App data                | `~/Library/Application Support/com.relax.airouter/`                                               |
+| Main database           | `router.sqlite3` in the app data directory                                                        |
+| Recovery points         | `recovery/` in the app data directory                                                             |
+| MCP image assets        | `mcp-images/<assetId>.png` in the app data directory                                              |
+| Derived model catalog   | `codex-model-catalog.json` in the app data directory (when custom models exist)                   |
+| Local price table       | `pricing/local-pricing.json` in the app data directory (after a manual official-site sync)        |
+| Run logs                | `~/Library/Logs/com.relax.airouter/`                                                              |
+| Incident records        | `incident-<millisecond timestamp>.json` in the run log directory                                   |
+| Codex configuration     | `~/.codex/config.toml` (owned by Codex; AI Router only makes a protected projection)              |
 
-系统 API 最终解析的目录可能受沙箱或系统策略影响。设置中的“打开日志目录”是查看运行日志的权威入口，
-不要在代码或 Issue 中硬编码维护者机器的绝对路径。
+The directory the system APIs finally resolve to may be affected by the sandbox or system policy.
+"Open log directory" in Settings is the authoritative entry point for viewing run logs; do not
+hard-code a maintainer machine's absolute path in code or in an issue.
 
-QA bundle 使用 `com.relax.airouter.qa` 的独立系统数据目录；自动化验收还可以使用带安全标记的临时
-root。QA 数据不能从生产数据库复制。
+The QA bundle uses a separate system data directory under `com.relax.airouter.qa`; automated
+acceptance may also use a temporary root with a safety marker. QA data must not be copied from the
+production database.
 
-## 数据分类
+## Data classification
 
-`router.sqlite3` 保存路由、Base URL、API Key、余额脚本、active route、回退设置、gateway token、
-Codex 原始/恢复配置快照、自定义模型、请求/尝试元数据和用量统计。
+`router.sqlite3` stores routes, base URLs, API keys, balance scripts, the active route, fallback
+settings, the gateway token, Codex original/recovery configuration snapshots, custom models,
+request/attempt metadata, and usage statistics.
 
-API Key 和 gateway token 以原始字节保存在 SQLite 中。数据库、WAL、恢复点和备份依赖私有目录/
-文件权限（目录 `0700`、关键文件 `0600`），但当前不使用 macOS Keychain，也不做应用层加密。拥有
-用户文件读取权限的人仍可能读取这些密钥。
+API keys and the gateway token are stored in SQLite as raw bytes. The database, WAL, recovery points,
+and backups rely on private directory/file permissions (directory `0700`, key files `0600`), but
+macOS Keychain is not used today and there is no application-layer encryption. Anyone with read
+access to the user's files may still be able to read these secrets.
 
-请求历史不保存原始请求 body、提示词、完整响应、Authorization header 或任意上游 header。费用是
-根据带日期的本地价格快照计算的估算，不是账单或当前价格承诺。价格快照有两条来源：内嵌基线（随
-应用发布）与用户在设置中手动触发的「同步官网」。同步只在一个隐藏、无 capability、无痕的只读
-WebView 中访问固定官方定价页，回传内容仅限模型 id 与价格，落盘为 `pricing/local-pricing.json`
-（含来源 URL 与同步时间）；不上传本地数据、不导出 cookie、不读取页面其他内容，失败时保留上一次
-的本地价格表。已写入历史的请求保留自己的 catalog 版本，不会因为后来同步而重新计价。
+Request history does not store raw request bodies, prompts, full responses, the Authorization header,
+or arbitrary upstream headers. Cost is an estimate computed from a dated local price snapshot, not a
+bill or a current-price commitment. Price snapshots have two sources: the embedded baseline (shipped
+with the app) and the manual "sync official site" triggered by the user in Settings. The sync visits a
+fixed official pricing page only in a hidden, capability-less, incognito read-only WebView; the
+returned content is limited to model IDs and prices and is written to `pricing/local-pricing.json`
+(including the source URL and sync time); it does not upload local data, export cookies, or read any
+other page content, and on failure it keeps the previous local price table. Requests already written
+to history keep their own catalog version and are not repriced by a later sync.
 
-图片 MCP 会将成功生成并验证的 PNG 作为本地资产写入 `mcp-images/`，再只返回文件路径、实际尺寸、
-字节数和 SHA-256。图片可以来自上游 Base64 或受控下载的 URL；两种来源都经过相同的 PNG 校验。
-PNG、上游 Base64 和原始响应不进入 SQLite、恢复点或运行日志。该目录保存的是
-用户本机上的生成结果，不是数据库状态，也不等同于备份。
+The Images MCP writes a successfully generated and validated PNG as a local asset under
+`mcp-images/`, then returns only the file path, actual dimensions, byte count, and SHA-256. An image
+may come from upstream base64 or a controlled downloaded URL; both sources go through the same PNG
+validation. PNGs, upstream base64, and raw responses never enter SQLite, recovery points, or the run
+log. This directory holds generation results on the user's own machine, not database state, and it is
+not the same as a backup.
 
-图片 URL、签名查询参数和重定向 Location 只在本次调用内存中存在，不写入错误描述、数据库、恢复点、
-运行日志或普通 IPC，也不持久缓存失败 URL。下载请求不携带生成接口密钥、本地 gateway token 或客户端
-凭据。来源解析、下载、PNG 校验和发布共用一个高内存许可；取消调用不能提前释放仍在执行的阻塞任务
-所持许可。严格有界内容解码器同时限制 zstd 窗口，避免只有响应字节受限而解码内存不受限。
+Image URLs, signature query parameters, and redirect Locations exist only in memory for the current
+call; they are not written to error descriptions, the database, recovery points, the run log, or
+ordinary IPC, and a failed URL is not persistently cached. Download requests carry no generation-API
+key, local gateway token, or client credential. Source resolution, download, PNG validation, and
+publication share one high-memory permit; cancelling a call cannot release early a permit held by a
+blocking task that is still running. A strictly bounded content decoder also limits the zstd window
+so that decode memory stays bounded even though only the response bytes are capped.
 
-图片 MCP 失败只返回稳定本地 code、本地 requestId、封闭 stage/category、数值或 null 的上游状态和
-retryable。已知上游类别使用固定安全描述；只有未知类别可以在当次 MCP message 中追加一条经过控制
-字符清理、空白折叠和长度限制的 provider message。这个例外只存在于当前响应：provider code/message、
-provider request ID、任意上游 header、原始请求/响应和底层网络、解码、IO 错误都不会进入 error.data、
-运行日志、诊断、请求/尝试历史、SQLite、恢复点或普通 IPC。
+An Images MCP failure returns only a stable local code, a local requestId, a closed stage/category, a
+numeric-or-null upstream status, and retryable. Known upstream categories use fixed safe descriptions;
+only an unknown category may append to that MCP message a single provider message cleaned of control
+characters, whitespace-collapsed, and length-limited. This exception exists only in the current
+response: provider codes/messages, provider request IDs, arbitrary upstream headers, raw
+requests/responses, and underlying network, decode, and IO errors never enter error.data, the run log,
+diagnostics, request/attempt history, SQLite, recovery points, or ordinary IPC.
 
-运行日志每行以本地时间和显式时区偏移开头（形如 `2026-09-24T15:09:48.303+08:00`），后面是级别、
-target 和消息；无法获取偏移时使用 UTC。每条最多 8 KiB，单文件最多 2 MiB，最多十个文件/20 MiB，
-并保留最多七天。日志只应包含固定 code、安全组件名和有界计数；即使如此，分享前仍要人工检查，并且
-不能直接上传完整日志。
+Each run log line starts with local time and an explicit timezone offset (of the form
+`2026-09-24T15:09:48.303+08:00`), followed by the level, target, and message; UTC is used when the
+offset is unavailable. Each line is at most 8 KiB, each file at most 2 MiB, at most ten files/20 MiB,
+and at most seven days are retained. Logs should contain only fixed codes, safe component names, and
+bounded counts; even so, review them by hand before sharing, and do not upload full logs directly.
 
-事故记录是独立的诊断文件：每次检测到数据库损坏、尝试自动修复、隔离不可用主库或重新开始数据库时，
-应用在运行日志目录写入一份 `incident-<毫秒时间戳>.json`（目录 `0700`、文件 `0600`，最多保留 20 份）。
-内容只有检测时间、损坏分类、`pragma integrity_check` 的消息文本（最多 32 条/4 KiB，超出以
-`<n> more messages truncated` 标记）、应用版本、主库字节数与 SHA-256、执行的动作、复检结果和耗时。
-它不包含密钥、Base URL、请求/响应内容、数据行或 Codex 配置，也不属于恢复点内容；日志上限/清理
-只处理 `ai-router*` 日志文件本身，不会删除事故记录。
+Incident records are separate diagnostic files: whenever the app detects database corruption, attempts
+an automatic repair, quarantines an unusable main database, or starts the database over, it writes an
+`incident-<millisecond timestamp>.json` file in the run log directory (directory `0700`, file `0600`,
+at most 20 retained). The content is only the detection time, corruption classification, the
+`pragma integrity_check` message text (at most 32 messages/4 KiB, with overflow marked
+`<n> more messages truncated`), the app version, the main database byte count and SHA-256, the actions
+taken, the recheck result, and the elapsed time. It contains no secrets, base URLs, request/response
+content, data rows, or Codex configuration, and it is not part of recovery-point content; the log
+cap/cleanup only handles `ai-router*` log files themselves and never deletes incident records.
 
-## Codex 配置所有权
+## Codex configuration ownership
 
-生产模式首次连接前读取并保存 `~/.codex/config.toml` 的存在状态、原始字节和 Unix mode，形成不可变
-基线。连接和重连保留当前 `model_provider` 标识及无关 provider/MCP/权限，只管理选中 provider 的
-传输字段、AI Router 自有模型目录指针和可选图片 MCP 条目。写入使用 fingerprint、同目录临时文件、
-fsync 和替换前竞态检查。
+Before the first production connection, the app reads and saves the existence state, raw bytes, and
+Unix mode of `~/.codex/config.toml` to form an immutable baseline. Connecting and reconnecting
+preserve the current `model_provider` identifier and unrelated provider/MCP/permission settings,
+managing only the selected provider's transport fields, the AI Router-owned model catalog pointer, and
+the optional image MCP entry. Writes use a fingerprint, a temporary file in the same directory, fsync,
+and a pre-replacement race check.
 
-普通断开恢复可更新的“断开目标”；完整基线始终保留为首次接管前的所有权证据。外部编辑、symlink、
-无效 TOML、同名 MCP 冲突或 fingerprint 变化都会失败关闭，不应通过直接覆盖文件解决。
+An ordinary disconnect can update the "disconnect target"; the full baseline is always retained as
+evidence of ownership before the first takeover. External edits, symlinks, invalid TOML, an MCP entry
+with a conflicting name, or a fingerprint change all fail closed and should not be resolved by
+overwriting the file directly.
 
-## Codex 凭证（auth.json）
+## Codex credentials (auth.json)
 
-设置中的「Codex 凭证」功能从本机 Chrome 系浏览器只读读取其 Cookie 数据库，仅解密
-`__Secure-next-auth.session-token.*` 两个分片（浏览器安全存储密钥经系统钥匙串读取），在隐藏、
-无 capability、无痕的只读 WebView 中访问固定端点 `https://chatgpt.com/api/auth/session`（遵循系统
-代理），在本地生成 `$CODEX_HOME/auth.json`（默认 `~/.codex/auth.json`）并原子替换。Cookie 值、
-会话 JSON 和生成的 token 只在内存中短暂存在并清零，不会写入运行日志、诊断、请求/尝试历史、
-SQLite、恢复点或崩溃信息；WebView 注入的 Cookie 在每次运行结束时删除。这是该功能唯一新增的出站
-流量，不上传任何本地数据。
+The "Codex credentials" feature in Settings read-only reads the cookie database of a local
+Chrome-family browser and decrypts only the two `__Secure-next-auth.session-token.*` shards (the
+browser's secure-storage key is read through the system keychain); it visits the fixed endpoint
+`https://chatgpt.com/api/auth/session` in a hidden, capability-less, incognito read-only WebView
+(following the system proxy), generates `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`)
+locally, and replaces it atomically. Cookie values, the session JSON, and the generated token exist
+only briefly in memory and are zeroed; they are not written to the run log, diagnostics,
+request/attempt history, SQLite, recovery points, or crash information; cookies injected into the
+WebView are deleted at the end of each run. This is the only new outbound traffic the feature adds,
+and it does not upload any local data.
 
-写入前会把已有的 `auth.json` 备份到应用数据目录下的 `codex-auth-backups/`（目录 `0700`、文件
-`0600`，保留最近 5 份，文件名为时间戳加短指纹），用户可在设置中「还原原凭证」取回。同一目录下的
-`codex-auth-meta.json` 只保存非秘密元数据（导出时间、过期时间、脱敏邮箱、套餐类型和写入文件的
-SHA-256），用于显示状态并检测外部修改；它不包含 Cookie、token 或会话 JSON。该目录是敏感文件，
-应按密钥材料保护。恢复点、SQLite 和请求历史都不包含凭证内容。凭证为一次性：Codex 的刷新端点
-（`auth.openai.com`）不接受网页会话令牌，过期后需要重新导出；应用不会自动重启 Codex。
+Before writing, the existing `auth.json` is backed up to `codex-auth-backups/` in the app data
+directory (directory `0700`, file `0600`, the 5 most recent kept, named by timestamp plus a short
+fingerprint), which the user can retrieve with "restore original credentials" in Settings.
+`codex-auth-meta.json` in the same directory stores only non-secret metadata (export time, expiry
+time, redacted email, plan type, and the SHA-256 of the written file) to show status and detect
+external modification; it contains no cookies, tokens, or session JSON. That directory is sensitive
+and should be protected as key material. Recovery points, SQLite, and request history all contain no
+credential content. Credentials are single-use: Codex's refresh endpoint (`auth.openai.com`) does not
+accept a web session token, so they must be re-exported after expiry; the app does not automatically
+restart Codex.
 
-## 恢复点
+## Recovery points
 
-关键配置提交后，恢复 worker 在短暂安静期后生成一个 SQLite Backup API 副本，删除历史/用量/日志等
-非关键表内容，执行完整性、外键、schema、领域引用和权限校验，再原子发布。最多保留五个有效恢复点
-和一个隔离的损坏主库。
+After a critical configuration commit, a recovery worker produces a SQLite Backup API copy after a
+short quiet period, deletes non-critical table content such as history/usage/logs, validates
+integrity, foreign keys, schema, domain references, and permissions, then publishes atomically. At
+most five valid recovery points and one quarantined corrupt main database are retained.
 
-恢复点包含路由密钥、gateway token、Codex 基线/断开目标和自定义模型，因此同样是敏感文件。它们
-不包含请求/尝试历史、Usage 行、日志、余额缓存、外部 `config.toml` 文件、派生模型 JSON 或
-`mcp-images/` 图片资产。
+Recovery points contain route secrets, the gateway token, the Codex baseline/disconnect target, and
+custom models, so they are likewise sensitive files. They do not contain request/attempt history,
+usage rows, logs, balance caches, the external `config.toml` file, derived model JSON, or
+`mcp-images/` image assets.
 
-正常设置只允许查看保护状态和手动创建恢复点。主数据库缺失、损坏或领域无效时，启动进入独立恢复
-流程，只有通过当前 schema 和完整校验的候选才能恢复。恢复和“重新开始”都不会读取或写入
-`~/.codex/config.toml`。
+Normal settings only allow viewing protection status and creating a recovery point manually. When the
+main database is missing, corrupt, or domain-invalid, startup enters a separate recovery flow, and
+only a candidate that passes the current schema and full validation can be restored. Neither recovery
+nor "start over" reads or writes `~/.codex/config.toml`.
 
-## 索引级损坏自动修复
+## Automatic repair of index-level corruption
 
-启动检查会读取 `pragma integrity_check` 的**全部**消息：只有当损坏全部是索引不一致（索引缺少行、
-条目数不符或索引条目不可精确表示）时，应用才在保留一份隔离副本（`recovery/quarantine-*.sqlite3`，
-修复前字节）后重建索引，并在复检通过后继续启动；任何页级/结构损坏、无法读取的报告或不确定分类都
-仍然进入上述恢复流程。修复不会静默删除数据：行数在修复前后一致，复检失败时保留隔离副本并回落到
-原有恢复流程。
+The startup check reads **all** messages from `pragma integrity_check`: only when the corruption is
+entirely index inconsistency (an index missing rows, a mismatched entry count, or an index entry that
+cannot be represented exactly) does the app rebuild the index after keeping a quarantined copy
+(`recovery/quarantine-*.sqlite3`, the bytes from before the repair) and continue startup once the
+recheck passes; any page-level/structural corruption, unreadable report, or uncertain classification
+still enters the recovery flow above. The repair never silently deletes data: row counts are identical
+before and after, and if the recheck fails the quarantined copy is kept and the app falls back to the
+existing recovery flow.
 
-运行期每 6 小时（启动后首次为 10 分钟后）在最近 5 分钟没有在途请求的前提下做一次只读自检；发现
-索引级损坏时暂停转发、原地修复并复检通过后恢复转发，发现不可修复损坏时只标记保护状态，不改动数据。
+At runtime, once every 6 hours (the first time is 10 minutes after startup) and provided there has been
+no in-flight request in the last 5 minutes, a read-only self-check runs; on finding index-level
+corruption it pauses forwarding, repairs in place, and resumes forwarding after the recheck passes,
+and on finding unrepairable corruption it only marks the protection status without touching the data.
 
-应用数据目录下的 `router.sqlite3.lock` 是进程独占锁，用于避免两个实例同时写同一个数据库；第二个
-实例会得到可重试的“数据目录已被占用”提示，而不是继续启动。
+`router.sqlite3.lock` in the app data directory is a process-exclusive lock that prevents two
+instances from writing the same database at once; a second instance gets a retryable "data directory
+already in use" message instead of continuing to start.
 
-## 备份与问题报告
+## Backup and issue reporting
 
-备份整个应用数据目录会同时备份凭据和 Codex 配置快照，应使用加密存储并限制访问。不要在应用运行时
-只复制 `router.sqlite3` 而忽略 WAL；优先完全退出应用后备份整个目录。手工编辑数据库、恢复点或
-`config.toml` 可能破坏 fingerprint 和恢复所有权，请先保留原件。
+Backing up the whole app data directory also backs up credentials and Codex configuration snapshots,
+so use encrypted storage and restrict access. Do not copy only `router.sqlite3` while the app is
+running and ignore the WAL; prefer fully quitting the app and then backing up the whole directory.
+Editing the database, recovery points, or `config.toml` by hand may break fingerprints and recovery
+ownership, so keep the originals first.
 
-`mcp-images/` 中的 PNG 只是本地生成资产。除非用户另行将这些文件纳入自己的备份方案，否则文件损坏、
-删除或应用数据目录丢失后无法依赖 SQLite 恢复点找回。
+The PNGs in `mcp-images/` are only local generation assets. Unless the user separately includes these
+files in their own backup scheme, corrupted or deleted files or a lost app data directory cannot be
+recovered from SQLite recovery points.
 
-公开问题报告只提供合成复现、版本、稳定错误码和必要的有界字段。数据库、恢复点、完整配置、完整日志
-和真实请求内容只能通过 [安全政策](../../SECURITY.md) 中约定的私下渠道讨论，而且通常不需要上传。
+Public issue reports provide only a synthetic reproduction, a version, a stable error code, and the
+necessary bounded fields. Databases, recovery points, full configuration, full logs, and real request
+content should be discussed only through the private channels agreed in the
+[security policy](../../SECURITY.md), and usually do not need to be uploaded.

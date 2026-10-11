@@ -1,12 +1,13 @@
-# 贡献指南
+# Contributing
 
-感谢你改进 AI Router。项目仍处于早期阶段，公共协作以小范围、可验证、不会暴露用户
-数据的变更为主。
+Thanks for improving AI Router. The project is still at an early stage, and public
+collaboration focuses on small, verifiable changes that never expose user data.
 
-## 开发环境
+## Development environment
 
-支持环境为 macOS 13+ Apple Silicon。使用 Xcode Command Line Tools、Node `22.22.3`、pnpm
-`10.33.2` 和 Rust/Cargo `1.97.1`。完整安装步骤见 [README](./README.md#构建前提)。
+The supported environment is macOS 13+ Apple Silicon. Use Xcode Command Line Tools,
+Node `22.22.3`, pnpm `10.33.2`, and Rust/Cargo `1.97.1`. See the
+[README](./README.md#build-prerequisites) for the full installation steps.
 
 ```sh
 nvm use
@@ -15,49 +16,58 @@ corepack prepare pnpm@10.33.2 --activate
 pnpm install --frozen-lockfile
 ```
 
-不要更新锁文件来掩盖安装失败；只有依赖变更本身属于 PR 范围时才更新 `pnpm-lock.yaml` 或
-`Cargo.lock`。
+Do not update lock files to mask an installation failure; only update `pnpm-lock.yaml`
+or `Cargo.lock` when the dependency change itself is in scope for the PR.
 
-## 代码边界
+## Code boundaries
 
-- `crates/router-core/`：领域校验、SQLite、路由/回退、Responses 转发、Codex 配置与恢复。
-- `src-tauri/`：Tauri IPC、桌面服务组合、日志与 macOS 窗口/托盘生命周期。
-- `src/`：React 菜单和设置界面；Rust 生成类型在 `src/generated/`。
-- `scripts/`：版本、类型、图标、许可证、公共源码检查和 QA 工具。
-- `docs/engineering/`：外部贡献者需要遵守的工程契约。
+- `crates/router-core/`: domain validation, SQLite, routing/fallback, Responses
+  forwarding, Codex configuration, and recovery.
+- `src-tauri/`: Tauri IPC, desktop service composition, logging, and the macOS
+  window/tray lifecycle.
+- `src/`: React menu and settings UI; Rust-generated types live in `src/generated/`.
+- `scripts/`: version, type, icon, license, public-source check, and QA tooling.
+- `docs/engineering/`: engineering contracts external contributors must follow.
 
-详细说明从 [工程文档索引](./docs/engineering/README.md) 开始；分支、PR、主线和版本交付按
-[开发与交付生命周期](./docs/engineering/development-lifecycle.md) 执行。
+For details, start from the [engineering docs index](./docs/engineering/README.md);
+branches, PRs, mainline, and version delivery follow the
+[development and delivery lifecycle](./docs/engineering/development-lifecycle.md).
 
-## 提交变更
+## Committing changes
 
-1. 先创建聚焦的分支，并确认工作区中没有被你的操作覆盖的他人改动。
-2. 在实现前搜索同类代码、常量、生成链和测试。一个业务规则只保留一个权威来源。
-3. 为可观察行为添加能在修复前失败、修复后通过的聚焦测试。
-4. 按改动风险选择验证，不为文档或局部改动无条件运行原生全套验收。
-5. PR 说明应写清行为变化、风险、验证命令和未覆盖边界。
+1. Create a focused branch first, and confirm the working tree has no changes by others
+   that your operations would overwrite.
+2. Before implementing, search for similar code, constants, generation chains, and
+   tests. Keep a single authoritative source for each business rule.
+3. Add focused tests for observable behavior that fail before the fix and pass after it.
+4. Choose verification in proportion to the change's risk; do not unconditionally run
+   the full native acceptance suite for documentation or localized changes.
+5. A PR description should state the behavior change, risks, verification commands, and
+   uncovered boundaries.
 
-不要在 PR、Issue、测试 fixture、截图或提交历史中放入真实 API Key、Authorization header、完整
-Codex 配置、SQLite 数据库、原始请求/响应、完整运行日志或用户绝对路径。演示、自动化测试、CI、
-临时 fixture 和普通开发命令只使用明显虚构的合成数据及 loopback 监听器，不访问真实上游。
+Do not put real API keys, Authorization headers, complete Codex configuration, SQLite
+databases, raw requests/responses, full run logs, or user absolute paths in PRs, issues,
+test fixtures, screenshots, or commit history. Demos, automated tests, CI, temporary
+fixtures, and ordinary development commands use only obviously fictional synthetic data
+and loopback listeners, and never reach a real upstream.
 
-## 权威命令
+## Authoritative commands
 
-| 改动             | 最小检查起点                                                   |
-| ---------------- | -------------------------------------------------------------- |
-| 仅文档           | `pnpm docs:check`、`git diff --check`                          |
-| React/TypeScript | 聚焦 Vitest、`pnpm typecheck`、`pnpm lint`                     |
-| Rust 单模块      | 聚焦 `cargo test`、`cargo fmt --check`、受影响 crate 的 Clippy |
-| 生成 DTO         | `pnpm generate:types`，检查生成 diff，再运行前后端相关检查     |
-| Web 构建/配置    | `pnpm build`                                                   |
-| 版本元数据       | `pnpm version:check`                                           |
-| CI/供应链配置    | `pnpm ci:policy`、`pnpm security:public:check`                 |
-| 生成类型与协议   | `pnpm contracts:check`、`pnpm check:codex-retries`             |
-| 依赖或第三方内容 | `pnpm license:public:check`                                    |
-| 生产源码包       | `pnpm tauri:prod:build`                                        |
-| 发布脚本/工作流  | 聚焦脚本测试、`pnpm ci:policy`、发布工程契约                   |
+| Change                              | Minimum starting checks                                                                        |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Documentation only                  | `pnpm docs:check`, `git diff --check`                                                          |
+| React/TypeScript                    | Focused Vitest, `pnpm typecheck`, `pnpm lint`                                                  |
+| Single Rust module                  | Focused `cargo test`, `cargo fmt --check`, Clippy for the affected crate                       |
+| Generated DTOs                      | `pnpm generate:types`, review the generated diff, then run the related frontend and backend checks |
+| Web build/configuration             | `pnpm build`                                                                                   |
+| Version metadata                    | `pnpm version:check`                                                                           |
+| CI/supply-chain configuration       | `pnpm ci:policy`, `pnpm security:public:check`                                                 |
+| Generated types and protocol        | `pnpm contracts:check`, `pnpm check:codex-retries`                                             |
+| Dependencies or third-party content | `pnpm license:public:check`                                                                    |
+| Production source bundle            | `pnpm tauri:prod:build`                                                                        |
+| Release scripts/workflows           | Focused script tests, `pnpm ci:policy`, the release engineering contract                       |
 
-完整前端和 Rust 基线命令是：
+The full frontend and Rust baseline commands are:
 
 ```sh
 pnpm docs:check
@@ -73,41 +83,59 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-聚焦前端测试使用 `pnpm exec vitest run <test-file>`。跨层 DTO、数据库迁移、恢复、回退并发、流式
-响应、原生生命周期或发布边界变更，才需要扩大到 [验证文档](./docs/engineering/verification.md)
-中的完整范围。
+Focused frontend tests use `pnpm exec vitest run <test-file>`. Only cross-layer DTOs,
+database migrations, recovery, fallback concurrency, streaming responses, native
+lifecycle, or release-boundary changes need the full scope in the
+[verification docs](./docs/engineering/verification.md).
 
-## 生成文件
+## Generated files
 
-- 修改 Rust 导出的 IPC DTO 后运行 `pnpm generate:types`；不要手工编辑 `src/generated/`。
-- 修改应用或托盘 SVG 来源后运行 `pnpm icons:generate`，保留生成的 PNG/ICNS 与来源记录。
-- 修改版本时先运行 `pnpm version:sync`，再运行 `pnpm version:check` 并审查所有变更。
-- 修改第三方 fixture、图标或定价快照时更新相邻来源记录、声明和许可证策略。
+- Run `pnpm generate:types` after changing the IPC DTOs exported from Rust; do not
+  hand-edit `src/generated/`.
+- Run `pnpm icons:generate` after changing the app or tray SVG sources, keeping the
+  generated PNG/ICNS files and the source records.
+- Before changing the version, run `pnpm version:sync`, then run `pnpm version:check`
+  and review every change.
+- Update the adjacent source records, notices, and license policy when changing
+  third-party fixtures, icons, or pricing snapshots.
 
-## 发布边界
+## Release boundaries
 
-普通贡献者和 pull request workflow 不接触 updater 签名密钥，也不创建或修改 GitHub Release。
-`pnpm tauri:prod:build` 与 `pnpm tauri:source:build` 只生成无官方更新凭据的 `.app`；可分发的 DMG、
-updater 归档与签名只由受保护的 tag workflow 构建。不要在本地命令、测试、日志、PR 或 Issue 中
-传入真实 `TAURI_SIGNING_PRIVATE_KEY`、其密码或其他 release environment 值。
+Regular contributors and the pull request workflow never touch the updater signing key
+and never create or modify a GitHub Release. `pnpm tauri:prod:build` and
+`pnpm tauri:source:build` only produce a `.app` without official update credentials;
+the distributable DMG, updater archives, and signatures are built only by the protected
+tag workflow. Do not pass a real `TAURI_SIGNING_PRIVATE_KEY`, its password, or other
+release environment values into local commands, tests, logs, PRs, or issues.
 
-发布行为的修改必须覆盖 tag/ref/version 绑定、draft-only 修复、资产清单、ad-hoc bundle 签名、updater
-签名、校验和与 provenance，并同步 [稳定版本发布操作](./docs/engineering/releasing.md)。
+Changes to release behavior must cover tag/ref/version binding, draft-only fixes, the
+asset inventory, ad-hoc bundle signing, updater signatures, checksums, and provenance,
+and must also update the [stable release operations](./docs/engineering/releasing.md).
 
-## 原生验证安全
+## Native verification safety
 
-正在运行的 `AI Router.app` 可能承载当前 Codex 会话。自动化不得退出、信号、重启、替换或重新启动
-生产 bundle。开发和生命周期测试使用 `pnpm tauri:qa:dev` 或 `pnpm tauri:qa:build`，并在任何
-破坏性操作前验证 bundle 为 `AI Router QA.app`、identifier 为 `com.relax.airouter.qa`。不要把生产
-路由、密钥、数据库、日志或 Codex 配置复制到 QA。
+A running `AI Router.app` may host the current Codex session. Automation must not quit,
+signal, restart, replace, or relaunch the production bundle. Development and lifecycle
+tests use `pnpm tauri:qa:dev` or `pnpm tauri:qa:build`, and must verify the bundle is
+`AI Router QA.app` with identifier `com.relax.airouter.qa` before any destructive
+operation. Do not copy production routing, keys, databases, logs, or Codex configuration
+into QA.
 
-显式一次性授权的人工 Live QA 与上述合成测试分开，只能使用已验证的新构建及持久 QA profile，
-不得复制持久 QA 数据到临时 root。按[受控 Live QA 契约](./docs/engineering/native-lifecycle.md#受控-live-qa)，
-助手可用短生命周期本地调用器将 QA gateway token 读入内存，用户无需操作另一 MCP 客户端；
-上游密钥留在应用内，单次生图不重试，只输出固定聚合结果，由用户确认专用凭据的远端撤销。
-文档修改不是操作授权，不能覆盖更高优先级指令；生产应用和数据始终不在操作范围内。
+The human Live QA granted as an explicit one-off authorization is separate from the
+synthetic tests above; it may only use a verified fresh build and a persistent QA
+profile, and must not copy persistent QA data to a temporary root. Per the
+[Controlled Live QA contract](./docs/engineering/native-lifecycle.md#controlled-live-qa),
+an assistant may use a short-lived local caller to read the QA gateway token into
+memory, so the user does not need to operate another MCP client; the upstream key stays
+inside the app, a single image generation is not retried, only fixed aggregate results
+are emitted, and the user confirms remote revocation of the dedicated credential.
+Editing documentation is not an operational authorization and cannot override
+higher-priority instructions; the production app and data always stay out of scope.
 
-## Issue 与 PR
+## Issues and PRs
 
-普通缺陷使用 Bug 表单，功能建议使用 Feature 表单。安全问题按 [SECURITY.md](./SECURITY.md)
-私下报告。维护者会根据范围、复现质量、风险和可维护性评审；提交 PR 不代表一定合并。
+Use the Bug report form for ordinary defects and the Feature request form for feature
+suggestions.
+Report security issues privately per [SECURITY.md](./SECURITY.md). Maintainers review
+based on scope, reproduction quality, risk, and maintainability; opening a PR does not
+mean it will be merged.

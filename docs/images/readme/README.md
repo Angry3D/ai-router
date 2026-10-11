@@ -1,47 +1,52 @@
-# README 截图来源
+# README screenshot sources
 
 <!-- provenance:readme-product-screenshots -->
 
-本目录保存根 README 使用的 AI Router 产品截图。截图中的 AI Router 界面构图属于项目自有
-内容，按仓库根目录的 MIT License 发布；界面中渲染的 Lucide 图标仍受 Lucide ISC 许可证
-约束。
+This directory holds the AI Router product screenshots used by the root README. The AI Router UI
+composition in the screenshots is project-owned content released under the root MIT License; the
+Lucide icons rendered in the UI remain subject to the Lucide ISC License.
 
-## 捕获记录
+## Capture record
 
-- 捕获日期：2026-08-20 至 2026-08-21
-- 源码版本：`9dd77e99df4a5a5845a525a406a21e3b706b7f3c`
-- 应用身份：`AI Router QA.app` / `com.relax.airouter.qa`
-- 菜单视图：`384 x 364` 像素
-- 路由视图：`920 x 640` 像素
+- Capture dates: 2026-08-20 to 2026-08-21
+- Source version: `9dd77e99df4a5a5845a525a406a21e3b706b7f3c`
+- App identity: `AI Router QA.app` / `com.relax.airouter.qa`
+- Menu view: `384 x 364` pixels
+- Route view: `920 x 640` pixels
 
-菜单图片来自 2026-08-20 的隔离 QA 运行；路由图片来自 2026-08-21 的两次隔离 QA 运行。
-每次运行都使用全新的临时 QA 数据目录、仅监听 IPv4 loopback 的仓库 fixture、四条名为
-`Synthetic A` 至 `Synthetic D` 的合成路由，以及 320 条合成请求记录。路由截图的主题、
-窗口几何、路由名称和排序一致；因为使用独立运行，画面中的临时 loopback 端口不同。
-深色菜单截图中的设置按钮处于 hover 状态，浅色菜单没有；该差异只影响按钮背景，不改变
-应用状态或数据。
+The menu images come from an isolated QA run on 2026-08-20; the route images come from two
+isolated QA runs on 2026-08-21. Every run used a fresh temporary QA data directory, the repository
+fixture listening only on IPv4 loopback, four synthetic routes named `Synthetic A` through
+`Synthetic D`, and 320 synthetic request records. The route screenshots are consistent in theme,
+window geometry, route names, and ordering; because they come from independent runs, the temporary
+loopback port differs between frames. The settings button in the dark menu screenshot is in a
+hover state, and the light menu has no such state; that difference only affects the button
+background and does not change app state or data.
 
-捕获过程只启动 QA bundle，没有操作、退出、重启或读取生产 `AI Router.app`。捕获结束后，
-QA 进程和 fixture 已停止，临时数据目录通过仓库的 QA 身份校验器删除。
+The capture process only launched the QA bundle; it did not operate, quit, restart, or read the
+production `AI Router.app`. After capture finished, the QA processes and fixture were stopped, and
+the temporary data directories were deleted through the repository's QA identity validator.
 
-## 发布前检查
+## Pre-release checks
 
-每张图片均完成以下检查：
+Every image passed the following checks:
 
-- 查看完整画面，确认只包含 AI Router QA 窗口和合成数据；
-- 检查 API Key、Authorization header、用户路径、生产路由名和真实请求内容等敏感信息；
-- 重新编码为 PNG，检查文件类型、尺寸、alpha 行为、Display P3 色彩配置和 PNG 元数据；
-- 在最终字节上计算 SHA-256，并由 `scripts/license-policy.json` 绑定。
+- Reviewing the full frame to confirm it contains only the AI Router QA window and synthetic data;
+- Checking for sensitive information such as API keys, Authorization headers, user paths, production
+  route names, and real request content;
+- Re-encoding as PNG and checking the file type, dimensions, alpha behavior, the Display P3 color
+  profile, and PNG metadata;
+- Computing SHA-256 over the final bytes and binding it through `scripts/license-policy.json`.
 
-最终文件：
+Final files:
 
-| 文件                       | SHA-256                                                            |
+| File                       | SHA-256                                                            |
 | -------------------------- | ------------------------------------------------------------------ |
 | `menu-overview-light.png`  | `13fd3aed0e73babaf668c1df8615398a62f0b9853ce0817f57b1b9b7325806a9` |
 | `menu-overview-dark.png`   | `6d742befee5a4f5cbae058006a2eb621d89f7bd22c5ed76359f2e45aa8c62a6b` |
 | `route-overview-light.png` | `4671029bbad6291584a8792ad86d2802833ccc05b34930d83aa051f52d83d9aa` |
 | `route-overview-dark.png`  | `65fca16ffdeb0c10c9bcc5fdf50f3695cac9e9b3eff9769e1252125e4819209b` |
 
-Lucide 的上游信息和 ISC 许可证全文见
-[第三方声明](../../../THIRD_PARTY_NOTICES.md)与
-[`third-party/licenses/ISC-Lucide.txt`](../../../third-party/licenses/ISC-Lucide.txt)。
+Lucide upstream information and the full ISC license text are in the
+[third-party notices](../../../THIRD_PARTY_NOTICES.md) and
+[`third-party/licenses/ISC-Lucide.txt`](../../../third-party/licenses/ISC-Lucide.txt).

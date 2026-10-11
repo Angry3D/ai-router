@@ -1,54 +1,76 @@
-# 安全政策
+# Security policy
 
-## 支持范围
+## Supported scope
 
-AI Router 处于 `0.1.x` 早期阶段。安全修复只面向最新的 `main` 和最新稳定官方版本，不承诺旧提交、
-非官方 fork、自行修改的二进制或未支持平台的长期维护。官方 DMG 使用 ad-hoc 签名，不包含 Apple
-Developer ID 身份，也没有经过 Apple 公证。
+AI Router is at an early `0.1.x` stage. Security fixes only target the latest `main` and
+the latest stable official version; no long-term maintenance is promised for older
+commits, unofficial forks, self-modified binaries, or unsupported platforms. The
+official DMG is ad-hoc signed, contains no Apple Developer ID identity, and is not
+Apple-notarized.
 
-## 私下报告
+## Private reporting
 
-请通过 GitHub 的
-[Private vulnerability reporting](https://github.com/Angry3D/ai-router/security/advisories/new)
-提交安全问题。报告至少包含：受影响版本或提交、macOS/Codex 版本、风险影响、使用合成数据的最小
-复现步骤，以及界面显示的稳定错误码。
+Report security issues through GitHub's
+[Private vulnerability reporting](https://github.com/Angry3D/ai-router/security/advisories/new).
+A report should include at least: the affected version or commit, macOS/Codex version,
+risk impact, minimal reproduction steps using synthetic data, and the stable error code
+shown in the UI.
 
-不要在公开 Issue、Discussion、PR、截图或附件中提交真实 API Key、Authorization header、完整配置
-（包括 Codex 配置）、SQLite 数据库、原始请求/响应、原始日志、恢复点或用户绝对路径。不要为了证明
-问题而访问不属于你的账户、上游或设备。
+Do not submit real API keys, Authorization headers, complete configuration (including
+Codex configuration), SQLite databases, raw requests/responses, raw logs, recovery
+points, or user absolute paths in public issues, discussions, PRs, screenshots, or
+attachments. Do not access accounts, upstreams, or devices that are not yours in order
+to demonstrate a problem.
 
-如果 GitHub 私下报告入口暂不可用，可以创建一个不含技术细节和敏感材料的公开 Issue，仅请求维护者
-提供私下联系渠道。维护者确认渠道前不要补充漏洞内容。
+If GitHub's private reporting entry point is temporarily unavailable, you may create a
+public issue that contains no technical details or sensitive material, asking only for
+the maintainers to provide a private contact channel. Do not add vulnerability details
+before the maintainers confirm the channel.
 
-## 处理方式
+## Handling
 
-维护者会尽力确认收到、评估影响并协调修复，但个人维护项目不提供固定响应时限或漏洞奖励。公开披露
-时间应在修复和受影响用户可采取行动之后共同确定。
+Maintainers make a best effort to acknowledge receipt, assess impact, and coordinate a
+fix, but a personally maintained project provides no fixed response time or bug bounty.
+Public disclosure timing should be agreed jointly after a fix and after affected users
+can act.
 
-以下通常属于安全范围：
+The following are usually in security scope:
 
-- loopback 边界、网关 token 或上游凭据泄露；
-- Codex 配置未经授权覆盖、恢复或所有权判断错误；
-- SQLite、恢复点、日志或请求元数据越权暴露；
-- 公共源码、构建或依赖链携带凭据和未声明第三方内容；
-- updater 私钥泄露、`latest.json`/归档替换、签名绕过或发布资产与 tag/commit 不一致；
-- 能跨越生产/QA 数据或 bundle 隔离的原生生命周期问题。
+- leaks of the loopback boundary, gateway token, or upstream credentials;
+- unauthorized Codex configuration overwrites, recovery, or ownership misjudgment;
+- unauthorized exposure of SQLite, recovery points, logs, or request metadata;
+- credentials and undeclared third-party content in public source, the build, or the
+  dependency chain;
+- updater private key leaks, `latest.json`/archive replacement, signature bypass, or
+  release assets inconsistent with the tag/commit;
+- native lifecycle problems that cross the production/QA data or bundle isolation.
 
-普通崩溃、界面问题、兼容性建议和不含安全影响的上游错误请按 [支持说明](./SUPPORT.md) 使用公开
-Issue。
+For ordinary crashes, UI problems, compatibility suggestions, and upstream errors
+without security impact, use the public issue process per [support](./SUPPORT.md).
 
-## 安全事实
+## Security facts
 
-本地代理只监听 loopback。API Key 以原始字节存入私有权限的 SQLite 文件，当前不使用 Keychain 或
-应用层加密；恢复点也包含关键配置。运行日志被设计为只记录有界固定码，但完整文件仍按敏感材料处理。
+The local proxy only listens on loopback. API Keys are stored as raw bytes in a
+private-permission SQLite file; Keychain or application-layer encryption is not currently
+used, and recovery points also contain critical configuration. Run logs are designed to
+record only bounded fixed codes, but the full file should still be treated as sensitive
+material.
 
-「Codex 凭证」功能有意引入两个本地读取面：以只读方式读取本机 Chrome 系浏览器的 Cookie 数据库，
-并通过系统钥匙串读取浏览器的安全存储密钥（`Chrome Safe Storage`）。首次读取会触发系统授权弹窗，
-用户拒绝时失败关闭并显示稳定错误码；解密的 Cookie 值与会话令牌只在内存中存在并清零，不写入日志、
-诊断、恢复点或请求历史。该功能只处理 `chatgpt.com` 的会话 Cookie，且要求用户本机已登录
-chatgpt.com。更多边界见 [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)。
+The "Codex credentials" feature intentionally introduces two local read surfaces: it
+reads the Cookie database of Chrome-family browsers on this machine read-only, and reads
+the browser's secure storage key (`Chrome Safe Storage`) through the system keychain. The
+first read triggers a system authorization prompt; if the user declines, it fails closed
+and shows a stable error code. Decrypted Cookie values and session tokens exist only in
+memory and are zeroed there, never written to logs, diagnostics, recovery points, or
+request history. The feature only handles session Cookies for `chatgpt.com` and requires
+the user to already be signed in to chatgpt.com on this machine. See
+[data, privacy, and recovery](./docs/engineering/data-privacy-recovery.md) for more
+boundaries.
 
-官方应用内更新同时依赖 canonical GitHub HTTPS 边界和项目 updater 签名。ad-hoc macOS 签名、
-SHA-256 或 provenance 都不能单独替代 updater 签名校验。签名私钥与密码只存在于需要人工批准的
-GitHub `release` environment 和离线备份中，不进入仓库、应用 bundle、日志或 pull request job。
-密钥轮换与泄露处理见 [发布与应用更新](./docs/engineering/application-updates.md)。
+Official in-app updates rely on both the canonical GitHub HTTPS boundary and the project
+updater signature. ad-hoc macOS signing, SHA-256, or provenance cannot each replace the
+updater signature check. The signing private key and password exist only in the GitHub
+`release` environment, which requires human approval, and in offline backups, and never
+enter the repository, the app bundle, logs, or a pull request job. See
+[releases and application updates](./docs/engineering/application-updates.md) for key
+rotation and leak handling.

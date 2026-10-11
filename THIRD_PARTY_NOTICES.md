@@ -1,101 +1,116 @@
-# 第三方声明
+# Third-party notices
 
-AI Router 的根 `LICENSE` 只授权项目自有内容。本文件列出的第三方内容不因进入本仓库而
-重新授权为 MIT；使用和再分发时应同时遵守对应的上游许可证。
+AI Router's root `LICENSE` covers only the project's own content. The third-party content
+listed in this file is not relicensed as MIT by entering this repository; using and
+redistributing it must also comply with the corresponding upstream licenses.
 
 <!-- provenance:openai-codex-base-instructions -->
 
 ## OpenAI Codex base instructions
 
-- 本地文件：`fixtures/codex-base-instructions-v0.150.1.md`
-- 上游项目：`openai/codex`
-- 上游版本：`rust-v0.150.1`
-- 上游路径：`codex-rs/protocol/src/prompts/base_instructions/default.md`
-- 上游地址：<https://github.com/openai/codex>
-- 许可证：Apache License 2.0
-- 本地处理：内容未修改；同目录 provenance JSON 绑定上游版本、路径和 SHA-256。
+- Local file: `fixtures/codex-base-instructions-v0.150.1.md`
+- Upstream project: `openai/codex`
+- Upstream version: `rust-v0.150.1`
+- Upstream path: `codex-rs/protocol/src/prompts/base_instructions/default.md`
+- Upstream address: <https://github.com/openai/codex>
+- License: Apache License 2.0
+- Local handling: content unmodified; the provenance JSON in the same directory binds the
+  upstream version, path, and SHA-256.
 
-Apache License 2.0 全文见
-[`third-party/licenses/Apache-2.0.txt`](./third-party/licenses/Apache-2.0.txt)。
+The full Apache License 2.0 text is in
+[`third-party/licenses/Apache-2.0.txt`](./third-party/licenses/Apache-2.0.txt).
 
 <!-- provenance:lucide-icons -->
 
 ## Lucide icons
 
-- 本地文件：`src-tauri/icons/app-icon*.{svg,png,icns}`、`icon.png` 以及
-  `src-tauri/icons/tray-*.{svg,png}`；`docs/images/readme/*.png` 中还包含应用界面渲染的
-  Lucide 图标
-- 上游项目：`lucide-icons/lucide`
-- 使用版本：`lucide-react 0.468.0`
-- 上游地址：<https://github.com/lucide-icons/lucide>
-- 许可证：ISC
-- 本地处理：Route、TriangleAlert 和 CircleX 几何经过缩放、描边和组合；应用图标的背景、
-  颜色、QA 标记及整体构图为 AI Router 项目自有设计。PNG 与 ICNS 由仓库脚本从 SVG 生成。
-  README 截图是第一方界面的 QA 运行结果，截图中的 Lucide 图标随界面渲染；截图捕获与
-  SHA-256 记录见 `docs/images/readme/README.md`。
+- Local files: `src-tauri/icons/app-icon*.{svg,png,icns}`, `icon.png`, and
+  `src-tauri/icons/tray-*.{svg,png}`; `docs/images/readme/*.png` also contain Lucide
+  icons rendered in the app UI
+- Upstream project: `lucide-icons/lucide`
+- Version used: `lucide-react 0.468.0`
+- Upstream address: <https://github.com/lucide-icons/lucide>
+- License: ISC
+- Local handling: the Route, TriangleAlert, and CircleX geometry is scaled, stroked, and
+  combined; the app icon's background, colors, QA markers, and overall composition are
+  AI Router project designs. The PNG and ICNS files are generated from SVG by repository
+  scripts. The README screenshots are QA run results of the first-party UI, and the
+  Lucide icons in them render with the UI; see `docs/images/readme/README.md` for
+  screenshot capture and SHA-256 records.
 
-Lucide 的版权与 ISC 许可全文见
-[`third-party/licenses/ISC-Lucide.txt`](./third-party/licenses/ISC-Lucide.txt)。
-图标源文件、生成链路和输出边界见
-[`src-tauri/icons/README.md`](./src-tauri/icons/README.md)。
+Lucide's copyright and the full ISC license text are in
+[`third-party/licenses/ISC-Lucide.txt`](./third-party/licenses/ISC-Lucide.txt). See
+[`src-tauri/icons/README.md`](./src-tauri/icons/README.md) for icon source files, the
+generation chain, and output boundaries.
 
 <!-- provenance:readme-product-screenshots -->
 
-## README 产品截图
+## README product screenshots
 
-- 本地文件：`docs/images/readme/*.png`
-- 来源：AI Router 项目在 `AI Router QA.app` 中渲染的第一方界面
-- 许可证：第一方界面构图采用根 MIT License；其中渲染的 Lucide 图标继续采用 ISC
-- 本地处理：截图使用隔离 QA 数据和合成请求生成，发布前重新编码为 PNG，并完成画面、OCR、
-  元数据和 SHA-256 检查。
+- Local files: `docs/images/readme/*.png`
+- Source: first-party UI rendered by the AI Router project in `AI Router QA.app`
+- License: the first-party UI composition uses the root MIT License; the Lucide icons
+  rendered within it remain ISC
+- Local handling: the screenshots are generated with isolated QA data and synthetic
+  requests, re-encoded as PNG before release, and checked for visuals, OCR, metadata, and
+  SHA-256.
 
-捕获过程、合成数据边界和最终哈希见
-[`docs/images/readme/README.md`](./docs/images/readme/README.md)。Lucide 的 ISC 许可全文见
-[`third-party/licenses/ISC-Lucide.txt`](./third-party/licenses/ISC-Lucide.txt)。
+See [`docs/images/readme/README.md`](./docs/images/readme/README.md) for the capture
+process, synthetic data boundaries, and final hashes. Lucide's full ISC license text is
+in [`third-party/licenses/ISC-Lucide.txt`](./third-party/licenses/ISC-Lucide.txt).
 
 <!-- provenance:openai-pricing-snapshots -->
 
 ## OpenAI pricing snapshots
 
-- 本地文件：`crates/router-core/pricing/catalogs/openai-standard-2026-07-27.json`、
+- Local files: `crates/router-core/pricing/catalogs/openai-standard-2026-07-27.json`,
   `crates/router-core/pricing/catalogs/openai-priority-2026-07-28.json`
-- 数据来源：OpenAI 官方定价、Prompt Caching 和 Fast mode 文档；每份 JSON 内保留具体 URL
-  与捕获日期。
-- 本地处理：只记录公开的事实费率并转换为整数
-  `micro_usd_per_million_tokens`；未复制上游代码或说明文案。JSON 模式和实现代码属于
-  AI Router 项目自有内容，采用根 MIT 许可证。
-- 运行期同步：设置中的「同步官网」由用户手动触发，在隐藏只读 WebView 中读取同一官方定价页并
-  只把 GPT 模型的价格行写入本地价格表；发行版不包含同步结果，也不分发页面内容。
+- Data source: OpenAI's official pricing, Prompt Caching, and Fast mode documentation;
+  each JSON file keeps the specific URL and capture date.
+- Local handling: only public factual rates are recorded and converted to the integer
+  `micro_usd_per_million_tokens`; no upstream code or explanatory prose is copied. The
+  JSON schema and implementation code are AI Router project content under the root MIT
+  License.
+- Runtime sync: "Sync from website" in settings is triggered manually by the user, reads
+  the same official pricing page in a hidden read-only WebView, and writes only GPT model
+  price rows into the local price table; releases do not include sync results or
+  distribute page content.
 
-这些快照只用于本地估算，不是 OpenAI 的账单、报价或持续有效承诺。上游可能随时调整费率，
-使用者应以实际账单和当前官方文档为准。详细单位与更新规则见
-[`crates/router-core/pricing/catalogs/README.md`](./crates/router-core/pricing/catalogs/README.md)。
+These snapshots are only for local estimation; they are not OpenAI's billing, a quote, or
+an ongoing commitment. Upstream rates may change at any time, and users should rely on
+actual billing and the current official documentation. See
+[`crates/router-core/pricing/catalogs/README.md`](./crates/router-core/pricing/catalogs/README.md)
+for detailed units and update rules.
 
 <!-- provenance:cc-switch-chat-bridge -->
 
 ## Codex Chat bridge literals
 
-- 本地文件：`crates/router-core/src/proxy/chat_bridge.rs`、
+- Local files: `crates/router-core/src/proxy/chat_bridge.rs`,
   `third-party/cc-switch-chat-bridge.provenance.json`
-- 上游项目：`farion1231/cc-switch`
-- 上游提交：`0555c09d9aa06e5f93bf6d57ecf8faa9e6305c4b`
-- 上游路径：`src-tauri/src/proxy/providers/transform_codex_chat.rs`
-- 上游地址：<https://github.com/farion1231/cc-switch>
-- 许可证：MIT
-- 版权：Copyright (c) 2025 Jason Young
-- 本地处理：只按上游逐字复制模型可见的短字面量——合成 `tool_search` 函数声明（含名称、
-  描述、`query`/`limit` 参数模式）、自定义工具包装输入的描述文本，以及
-  `Original tool definition:` 标题及其代码块格式。声明字面量的 SHA-256
-  （`e684675e547c7e60317a9a43834d2133d3655704902296e0881619c13f48b06c`）由单元测试固定。
-  未复制任何上游源文件；其余转换逻辑、错误分类和边界处理均为 AI Router 自有实现。
+- Upstream project: `farion1231/cc-switch`
+- Upstream commit: `0555c09d9aa06e5f93bf6d57ecf8faa9e6305c4b`
+- Upstream path: `src-tauri/src/proxy/providers/transform_codex_chat.rs`
+- Upstream address: <https://github.com/farion1231/cc-switch>
+- License: MIT
+- Copyright: Copyright (c) 2025 Jason Young
+- Local handling: only model-visible short literals are copied verbatim from upstream —
+  the synthetic `tool_search` function declaration (including its name, description, and
+  `query`/`limit` parameter schema), the description text that wraps custom tool input,
+  and the `Original tool definition:` heading and its code block format. The SHA-256 of
+  the declared literals
+  (`e684675e547c7e60317a9a43834d2133d3655704902296e0881619c13f48b06c`) is pinned by a
+  unit test. No upstream source files are copied; the remaining transformation logic,
+  error classification, and boundary handling are AI Router's own implementation.
 
-MIT 许可全文见
-[`third-party/licenses/MIT-cc-switch.txt`](./third-party/licenses/MIT-cc-switch.txt)，
-逐字内容、改编行为与有意分歧见
-[`third-party/cc-switch-chat-bridge.provenance.json`](./third-party/cc-switch-chat-bridge.provenance.json)。
+The full MIT license text is in
+[`third-party/licenses/MIT-cc-switch.txt`](./third-party/licenses/MIT-cc-switch.txt), and
+the verbatim content, adaptation behavior, and intentional divergences are in
+[`third-party/cc-switch-chat-bridge.provenance.json`](./third-party/cc-switch-chat-bridge.provenance.json).
 
-## 依赖项
+## Dependencies
 
-npm 与 Cargo 传递依赖不会因出现在 lockfile 中而重新授权为 MIT。运行
-`pnpm license:check` 可从当前 lockfile 和已安装依赖生成审计摘要；策略位于
-`scripts/license-policy.json`。任何缺失、未知或未审核的许可证都会阻断检查。
+npm and Cargo transitive dependencies are not relicensed as MIT by appearing in the
+lockfile. Run `pnpm license:check` to generate an audit summary from the current lockfile
+and installed dependencies; the policy is in `scripts/license-policy.json`. Any missing,
+unknown, or unreviewed license blocks the check.

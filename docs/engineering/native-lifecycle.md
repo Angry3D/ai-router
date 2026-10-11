@@ -1,39 +1,46 @@
-# macOS 原生生命周期
+# macOS native lifecycle
 
-AI Router 是 `Accessory` 激活策略的菜单栏应用。`menu` WebView 启动时隐藏，并在 macOS 上转换为非
-激活的 `NSPanel`；`settings` 保持普通窗口。托盘点击、首次展示和 LaunchServices Reopen 都复用同一
-展示路径。
+AI Router is a menu bar app with the `Accessory` activation policy. The `menu` WebView starts hidden
+and is converted to a non-activating `NSPanel` on macOS; `settings` stays a normal window. Tray
+clicks, the first reveal, and a LaunchServices Reopen all reuse the same reveal path.
 
-## 菜单面板
+## Menu panel
 
-隐藏 WebView 可能暂停 WebContent 或停止调度 `requestAnimationFrame`。原生层先显示并定位窗口，再
-发送带单调 generation 的准备事件；前端完成布局后回传高度，并同时提供 timer fallback。原生主线程
-在真正展示前再次检查 generation，旧请求不能重新唤醒已隐藏菜单或写入首次展示状态。
+A hidden WebView may suspend WebContent or stop scheduling `requestAnimationFrame`. The native layer
+first shows and positions the window, then sends a prepare event carrying a monotonic generation; the
+frontend reports back a height after finishing layout and also provides a timer fallback. The native
+main thread rechecks the generation right before the actual reveal, so an old request cannot
+re-awaken a hidden menu or write the first-reveal state.
 
-菜单使用 key-capable、non-main、non-activating panel，使用户可以操作菜单而不把整个应用带到前台。
-显式打开 Settings 才调用普通窗口聚焦。Escape、托盘切换、close request 和失焦隐藏菜单，不退出
-进程。
+The menu uses a key-capable, non-main, non-activating panel so that the user can operate the menu
+without bringing the whole app to the foreground. Only an explicit open of Settings calls ordinary
+window focus. Escape, a tray toggle, a close request, and loss of focus hide the menu, but do not quit
+the process.
 
-修改菜单几何或 route usage preview 时，尺寸、位置、固定 backing 和 controller 状态必须在同一主
-线程转换中提交；失败要回滚为完整基础几何，不能让异步旧命令覆盖新 revision。
+When changing menu geometry or the route usage preview, the size, position, fixed backing, and
+controller state must be committed in the same main-thread transition; a failure must roll back to the
+full base geometry, and an asynchronous old command must not overwrite a newer revision.
 
-## 生产与 QA 身份
+## Production and QA identity
 
-| 模式 | bundle             | identifier              | Codex/data 行为                                          |
-| ---- | ------------------ | ----------------------- | -------------------------------------------------------- |
-| 生产 | `AI Router.app`    | `com.relax.airouter`    | 使用生产 app data；显式连接时管理 `~/.codex/config.toml` |
-| QA   | `AI Router QA.app` | `com.relax.airouter.qa` | 使用独立 app data、隔离 Codex home 和系统分配代理端口    |
+| Mode       | bundle             | identifier              | Codex/data behavior                                                                       |
+| ---------- | ------------------ | ----------------------- | ----------------------------------------------------------------------------------------- |
+| Production | `AI Router.app`    | `com.relax.airouter`    | Uses production app data; manages `~/.codex/config.toml` on an explicit connection        |
+| QA         | `AI Router QA.app` | `com.relax.airouter.qa` | Uses separate app data, an isolated Codex home, and a system-assigned proxy port          |
 
-生产应用可能正在为当前 Codex 会话提供代理。自动化和贡献者脚本不得退出、signal、重启、替换或重新
-启动生产 bundle。原生生命周期和破坏性恢复验收只能针对已验证 identifier 的 QA bundle，并使用
-合成数据。
+The production app may be serving the proxy for the current Codex session. Automation and contributor
+scripts must not quit, signal, restart, replace, or relaunch the production bundle. Native lifecycle
+and destructive recovery acceptance may target only a QA bundle with a verified identifier, using
+synthetic data.
 
-人工 QA 直接使用持久 QA 系统数据目录；自动化测试、CI、临时 fixture 和普通开发命令只使用合成
-数据及 loopback 监听器，不访问真实上游。自动化生命周期/恢复测试可使用临时 acceptance root；
-临时 root 不是第二个 QA 产品，也不应用于普通人工验收。不得把持久 QA 数据复制到临时 root。
-任何模式都不得复制生产路由、API Key、历史、数据库、日志或 Codex 配置到 QA。
+Manual QA uses the persistent QA system data directory directly; automated tests, CI, temporary
+fixtures, and ordinary development commands use only synthetic data and loopback listeners and never
+touch a real upstream. Automated lifecycle/recovery tests may use a temporary acceptance root; a
+temporary root is not a second QA product and should not be used for ordinary manual acceptance. Do
+not copy persistent QA data into a temporary root. No mode may copy production routes, API keys,
+history, database, logs, or Codex configuration into QA.
 
-## 构建
+## Building
 
 ```sh
 pnpm tauri:dev
@@ -42,89 +49,129 @@ pnpm tauri:qa:build
 pnpm tauri:prod:build
 ```
 
-`pnpm tauri:dev` 与 `pnpm tauri:qa:dev` 都使用 QA 标识；debug 构建若使用生产标识
-（`com.relax.airouter`）会在 setup 阶段 fail closed，避免开发进程触碰生产数据目录和真实 Codex
-配置。原生破坏性验收只用 QA bundle 与合成数据。
+`pnpm tauri:dev` and `pnpm tauri:qa:dev` both use the QA identity; a debug build that uses the
+production identity (`com.relax.airouter`) fails closed in setup so that a development process cannot
+touch the production data directory and the real Codex configuration. Destructive native acceptance
+uses only the QA bundle and synthetic data.
 
-普通生产、QA 和 CI source 构建统一使用根 `target/`，只生成 `.app`，且不消费 release secret。
-生产和 QA 构建分别检查名称、identifier、图标和最低 macOS 版本。受保护的 tag workflow 使用独立
-release 配置生成 DMG、显式 ad-hoc-signed `.app` 和 Tauri updater 归档；不使用 Developer ID、Apple
-公证、stapling 或 App Store。
+Ordinary production, QA, and CI source builds all use the root `target/`, produce only a `.app`, and
+consume no release secret. The production and QA builds each check the name, identifier, icons, and
+minimum macOS version. The protected tag workflow uses a separate release configuration to produce
+the DMG, an explicitly ad-hoc-signed `.app`, and the Tauri updater archive; it does not use Developer
+ID, Apple notarization, stapling, or the App Store.
 
-更新安装完成后先发送一个可被 `ExitRequested` 拦截的专用退出意图。既有路径完成
-`AppCoordinator::shutdown()` 后才调用 Tauri restart request；不能先调用 restart request，因为 Tauri
-会忽略该事件的 `prevent_exit()`。普通 Quit 行为不变。自动化 restart/install 验收必须验证 exact QA
-identifier、PID、executable、acceptance root 和生产连续性，不能对生产 bundle 执行更新验收。
+After the update installation completes, a dedicated exit intent that `ExitRequested` can intercept is
+sent first. The Tauri restart request is called only after the existing path has completed
+`AppCoordinator::shutdown()`; it must not be called first, because Tauri ignores `prevent_exit()` for
+that event. Normal Quit behavior is unchanged. Automated restart/install acceptance must verify the
+exact QA identifier, PID, executable, acceptance root, and production continuity, and must not run
+update acceptance against a production bundle.
 
-仅做文档、React 单元或 Rust 单模块改动时不要为了仪式运行原生 bundle。只有改动 Tauri 配置、图标、
-面板/托盘生命周期、打包脚本或发布边界时，才需要 `.app` 构建和 QA 原生验收。
+Do not run a native bundle for ceremony when the change is only documentation, React units, or a
+single Rust module. An `.app` build and QA native acceptance are needed only when changing Tauri
+configuration, icons, panel/tray lifecycle, packaging scripts, or release boundaries.
 
-## 受控 Live QA
+## Controlled Live QA
 
-这是与合成自动化测试分开的、由用户显式一次性授权的人工操作，不是默认测试模式或持续运行的
-服务。助手可以操作短生命周期本地 MCP 调用器，用户无需另行操作 MCP 客户端。项目文档的修改
-本身不构成授权，也不能覆盖更高优先级指令；没有本次授权就不读取凭据、不发送真实调用。
+This is a manual operation, separate from synthetic automated tests, that the user explicitly
+authorizes one time only; it is not a default test mode or a continuously running service. The
+assistant may operate a short-lived local MCP invoker, and the user does not need to operate an MCP
+client separately. Editing this project's documentation is not itself an authorization and cannot
+override higher-priority instructions; without this authorization, the assistant neither reads
+credentials nor sends real calls.
 
-### 调用前检查
+### Preflight checks
 
-以下检查必须在读取 QA gateway token 和发送带凭据的请求之前完成；缺失、过期、不匹配或身份
-不明确时失败关闭，只报告固定阻断原因，不用真实调用探测环境。
+The following checks must complete before reading the QA gateway token and sending a credentialed
+request; when something is missing, expired, mismatched, or of unclear identity, fail closed and
+report only the fixed blocking reason rather than probing the environment with a real call.
 
-1. 使用 `pnpm tauri:qa:build` 成功生成的唯一规范 bundle：
-   `target/release/bundle/macos/AI Router QA.app`，identifier 必须为 `com.relax.airouter.qa`。
-   构建凭据必须由成功构建产生，关联 source commit、包含相关未提交变更的构建输入内容指纹、QA
-   身份及该 bundle 可执行文件的 SHA-256。调用前核对当前源码、bundle 与凭据；仅版本号、名称、
-   修改时间或错误字符串扫描不能证明新构建，不能给旧 bundle 事后补凭据。
-   使用 `node scripts/v0-2a-qa-identity.mjs verify-build` 检查构建记录；记录位于
-   `target/release/qa-build-receipt.json`，不写入已打包的应用。先确定源码提交再构建；之后提交变化
-   会使旧记录失效，未提交的任务或文档笔记不影响源码内容指纹。
-2. 替换 QA bundle 或切换数据 profile 前，先核实旧 QA 的 exact PID、可执行文件、identifier 和
-   数据 profile，仅安全停止该进程。构建后重新启动已验证的 QA bundle，核实唯一运行实例的 PID、
-   实际可执行文件和构建凭据一致；不能因为磁盘路径相同而接受仍运行旧映像的进程。
-   使用 `node scripts/v0-2a-qa-identity.mjs verify-process --pid <qa-pid>` 核验；临时 profile
-   另传 `--root <temporary-root>`。进程启动必须晚于构建完成所在秒，避免 macOS 秒级启动时间的
-   歧义；临时启动 helper 自动等待，手工启动同样需要满足此条件。
-   全程不得退出、signal、重启、替换或启动生产应用，也不得操作生产数据或凭据。
-3. 先通过同一已验证 QA 可执行文件完成实际应用 MCP 的合成 URL-only 验收：临时 root 从合成数据
-   开始，本地上游只返回图片 URL，观察一次生成 POST、资产 GET、无凭据转发和有效私有 PNG。
-   停止该 exact QA 进程后，只清理已验证的临时 root，不复制或删除持久 QA 数据。
-4. Live QA 必须重新使用持久 QA profile，确认 `AI_ROUTER_QA_ACCEPTANCE_ROOT` 未设置，实际 app
-   data、Codex home 与生产隔离。核实该 QA PID 实际拥有的 IPv4-loopback listener，只向其
-   `127.0.0.1` 地址和实际端口的 `/mcp` 发请求；不猜端口，不用生产 listener，不经过环境代理，
-   不跟随重定向到其他地址。入口检查不改变应用的上游或资产下载契约。
-5. 用户在 QA 中配置并确认专用、可撤销的上游凭据，不复用生产密钥；助手只读取图片启用状态、
-   已选图片路由、模型和超时等必要非敏感 readiness 字段。确认沿用已批准路由/模型及
-   `size=1664x944`、`quality=medium`，不修改参数以强制某种返回载体。
+1. Use the single canonical bundle successfully produced by `pnpm tauri:qa:build`:
+   `target/release/bundle/macos/AI Router QA.app`, whose identifier must be
+   `com.relax.airouter.qa`. The build receipt must come from a successful build and associate the
+   source commit, the content fingerprint of the build inputs including the relevant uncommitted
+   changes, the QA identity, and the SHA-256 of that bundle's executable. Before invoking, verify the
+   current source, bundle, and receipt; a version number, name, modification time, or error-string
+   scan alone cannot prove a new build, and an old bundle cannot be given a receipt after the fact.
+   Use `node scripts/v0-2a-qa-identity.mjs verify-build` to check the build record; the record lives at
+   `target/release/qa-build-receipt.json` and is not written into the packaged app. Determine the
+   source commit before building; a later commit change invalidates the old record, and uncommitted
+   task or documentation notes do not affect the source content fingerprint.
+2. Before replacing the QA bundle or switching the data profile, verify the exact PID, executable,
+   identifier, and data profile of the old QA process and stop only that process safely. After
+   building, restart the verified QA bundle and verify that the PID, the actual executable, and the
+   build receipt of the single running instance agree; do not accept a process still running an old
+   image just because the disk path is the same. Use
+   `node scripts/v0-2a-qa-identity.mjs verify-process --pid <qa-pid>` to verify; for a temporary
+   profile also pass `--root <temporary-root>`. The process start must be later than the second in
+   which the build completed, to avoid ambiguity from macOS's second-level start time; a temporary
+   launch helper waits automatically, and a manual launch must satisfy the same condition.
+   Throughout, do not quit, signal, restart, replace, or start the production app, and do not touch
+   production data or credentials.
+3. First perform the synthetic URL-only acceptance of the real app MCP through the same verified QA
+   executable: start the temporary root from synthetic data, have the local upstream return only an
+   image URL, and observe one generation POST, an asset GET, credential-free forwarding, and a valid
+   private PNG. After stopping that exact QA process, clean up only the verified temporary root and
+   do not copy or delete persistent QA data.
+4. Live QA must reuse the persistent QA profile, confirm that `AI_ROUTER_QA_ACCEPTANCE_ROOT` is
+   unset, and isolate the actual app data and Codex home from production. Verify the IPv4-loopback
+   listener actually owned by that QA PID and send the request only to its `127.0.0.1` address and
+   actual port at `/mcp`; do not guess the port, do not use a production listener, do not go through
+   an environment proxy, and do not follow redirects to another address. The entry check does not
+   change the app's upstream or asset download contract.
+5. The user configures and confirms a dedicated, revocable upstream credential in QA and does not
+   reuse a production key; the assistant reads only the necessary non-sensitive readiness fields such
+   as image-enabled state, the selected image route, model, and timeout. Confirm the use of the
+   approved route/model and `size=1664x944`, `quality=medium`, and do not modify parameters to force a
+   particular return carrier.
 
-### 单次调用与凭据边界
+### Single invocation and credential boundary
 
-- 前置检查与本次授权都满足后，调用器只将 QA 本地 gateway token 这一项密钥读入本进程内存，
-  用于上述 loopback 请求的 Authorization。上游路由密钥只由 QA 应用读取和使用；不得读取完整
-  SQLite/config、转储 headers、要求用户在聊天中粘贴秘密，或把秘密放进命令参数、shell tracing、
-  日志、文件和持久 evaluator/kernel 变量。调用器退出即结束其凭据持有期。
-- 调用前固定并执行初始化、单次生成/响应读取和调用器整体的有限超时，给出明确秒数；整体截止
-  时间需容纳当前 QA 图片生成超时以及现有响应体读取、资产下载期限，不能只依赖 socket 空闲
-  超时。调用器有界地在内存中解析请求/响应，不打印原始帧、provider message 或异常堆栈。
-- 完成 MCP `initialize` / `initialized` 协议交互后，恰好发送一次 `tools/call` 调用
-  `generate_image`，使用不显示内容的合成提示词。初始化不计作生成；发送生成请求即消耗本次
-  授权，失败、超时、结果未知或资产处理失败都不退还授权。不得自动重试、切换路由/模型、改变
-  参数或再生成；即使错误标记 `retryable`，也必须另获明确授权才能再次调用。
-- 响应形态未知时失败关闭。只有返回文件位于预期持久 QA app data 的 `mcp-images` 私有根内，
-  是非符号链接的普通私有文件，并通过 PNG 内容及返回的字节数、SHA-256、宽高一致性检查，才算
-  图片成功。只返回成功 HTTP/MCP 状态或 health 通过都不算图片验收；不得放宽现有 TLS、资源、
-  解码、PNG 校验或私有发布边界，详见[图片结果契约](./routing-resilience.md#图片结果兼容)。
+- Only after both the preflight checks and this authorization pass does the invoker read the single
+  secret, the QA local gateway token, into this process's memory for the Authorization of the loopback
+  request above. Upstream route keys are read and used only by the QA app; do not read the full
+  SQLite/config, dump headers, ask the user to paste secrets into the chat, or put secrets into
+  command arguments, shell tracing, logs, files, or persistent evaluator/kernel variables. The
+  invoker's credential lifetime ends when it exits.
+- Before invoking, pin and enforce finite timeouts for initialization, the single
+  generation/response read, and the invoker as a whole, stating the exact seconds; the overall
+  deadline must accommodate the current QA image-generation timeout plus the existing
+  response-body-read and asset-download deadlines, and must not rely only on a socket idle timeout.
+  The invoker parses the request/response in memory within bounds and does not print raw frames,
+  provider messages, or exception stack traces.
+- After completing the MCP `initialize` / `initialized` protocol interaction, send exactly one
+  `tools/call` invoking `generate_image`, with a synthetic prompt that displays no content.
+  Initialization does not count as a generation; sending the generation request consumes this
+  authorization, and a failure, timeout, unknown result, or asset-handling failure does not refund
+  the authorization. Do not automatically retry, switch route/model, change parameters, or
+  regenerate; even when an error is marked `retryable`, another explicit authorization is required to
+  call again.
+- Fail closed when the response shape is unknown. An image counts as success only when the returned
+  file is inside the private `mcp-images` root of the expected persistent QA app data, is a regular
+  non-symlink private file, and passes the PNG content and the consistency checks of the returned
+  byte count, SHA-256, width, and height. Returning only a successful HTTP/MCP status or a passing
+  health check does not count as image acceptance; do not relax any existing TLS, resource, decode,
+  PNG validation, or private-publication boundary, see the
+  [image result contract](./routing-resilience.md#image-result-compatibility).
 
-### 固定证据与收尾
+### Fixed evidence and wrap-up
 
-调用器对外只输出白名单聚合字段：QA 身份、source commit/内容指纹、可执行文件摘要、来源/进程
-匹配布尔值、观察到的调用与 GET 计数、固定 status/code/stage、数值或 null 的 upstreamStatus、
-retryable、PNG/完整性布尔值、载体观察枚举和清理确认。未知错误映射为固定失败类别；不输出 URL、
-host/query、提示词、私有路由名、provider ID、绝对路径、资产字节、秘密、原始响应或完整运行日志。
+The invoker emits only allowlisted aggregate fields: QA identity, source commit/content fingerprint,
+executable digest, source/process match booleans, observed invocation and GET counts, fixed
+status/code/stage, numeric-or-null upstreamStatus, retryable, PNG/integrity booleans, the
+carrier-observation enum, and cleanup confirmation. Unknown errors map to fixed failure categories;
+do not emit URLs, host/query, prompts, private route names, provider IDs, absolute paths, asset bytes,
+secrets, raw responses, or full run logs.
 
-生成阶段失败、资产阶段失败和有效 PNG 成功必须分开记录；上游 502 不是下载器回归的证据。
-合成 URL-only 实际应用验收与有效 Live PNG 是两项独立证据；Live 载体只能报告已安全观察到的
-Base64、URL 或未观察，不能从成功图片推断发生了 Live GET，也不能为观察载体额外付费调用。
+Generation-phase failure, asset-phase failure, and valid PNG success must be recorded separately; an
+upstream 502 is not evidence of a downloader regression. Synthetic URL-only real-app acceptance and a
+valid Live PNG are two independent pieces of evidence; a Live carrier may only report base64, URL, or
+not observed as safely observed, and a successful image must not be used to infer that a Live GET
+happened, nor may a carrier be observed with an extra paid call.
 
-操作结束后退出调用器并移除临时驱动，只保留上述安全证据。用户确认提供方已撤销专用上游凭据
-才能关闭撤销项；本地删除密钥不等于远端撤销，未确认时不能声称全部完成。只做获准的本地 QA
-凭据清理，保留持久 QA 的非秘密路由、模型和设置，不清空整个 QA 目录；生产应用与数据不受影响。
+After the operation, exit the invoker and remove the temporary driver, keeping only the safe evidence
+above. Only after the user confirms that the provider has revoked the dedicated upstream credential
+may the revocation item be closed; deleting a key locally is not remote revocation, and without
+confirmation you must not claim everything is complete. Perform only the authorized local QA
+credential cleanup, keep the persistent QA non-secret routes, models, and settings, and do not wipe
+the whole QA directory; the production app and data are unaffected.

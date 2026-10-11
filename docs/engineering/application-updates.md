@@ -1,103 +1,135 @@
-# 发布与应用更新
+# Release and app updates
 
-AI Router 只为 macOS 13+ Apple Silicon 发布稳定版本。官方分发不使用 Apple Developer ID、Apple
-公证、stapling 或 App Store；DMG 内的应用使用显式 ad-hoc 签名。ad-hoc 签名能保持 bundle 内代码
-结构一致，但不能证明发布者身份，也不代表 Apple 已验证该应用。
+AI Router ships stable releases only for macOS 13+ Apple Silicon. Official distribution does not use
+Apple Developer ID, Apple notarization, stapling, or the App Store; the app inside the DMG uses an
+explicit ad-hoc signature. An ad-hoc signature keeps the code structure inside the bundle consistent
+but cannot prove the publisher's identity, nor does it mean Apple has verified the app.
 
-## Release 资产
+## Release assets
 
-每个稳定 Release 必须同时包含以下五个资产：
+Every stable Release must contain all five of these assets:
 
-| 文件                              | 用途                                    | 普通用户是否需要     |
-| --------------------------------- | --------------------------------------- | -------------------- |
-| `AI.Router_<version>_aarch64.dmg` | Finder 首次安装和手动恢复更新           | 是，首次安装只下载它 |
-| `AI.Router.app.tar.gz`            | Tauri 应用内更新下载的应用归档          | 否，由应用自动获取   |
-| `AI.Router.app.tar.gz.sig`        | 归档的项目 updater 签名                 | 否，由 updater 校验  |
-| `latest.json`                     | 稳定版本、说明、归档 URL 和签名元数据   | 否，由应用检查       |
-| `SHA256SUMS`                      | 五个内容资产中前四个文件的 SHA-256 清单 | 可选，供人工核对     |
+| File                              | Purpose                                                 | Needed by ordinary users              |
+| --------------------------------- | ------------------------------------------------------- | ------------------------------------- |
+| `AI.Router_<version>_aarch64.dmg` | First install from Finder and manual update recovery    | Yes; it is the only first-install download |
+| `AI.Router.app.tar.gz`            | The app archive downloaded by Tauri in-app updates      | No; fetched automatically by the app  |
+| `AI.Router.app.tar.gz.sig`        | The project updater signature for the archive           | No; verified by the updater           |
+| `latest.json`                     | Stable version, notes, archive URL, and signature metadata | No; checked by the app             |
+| `SHA256SUMS`                      | SHA-256 list for the first four of the five content assets | Optional; for manual verification  |
 
-GitHub artifact provenance 不是第六个下载文件，而是 GitHub 对这些资产生成的可查询 attestation。
-它把构建产物绑定到 workflow、repository 和 source revision。SHA-256 与 provenance 有助于人工审计，
-但应用内安装授权仍以 updater 签名为准。
+GitHub artifact provenance is not a sixth download file but a queryable attestation GitHub produces
+for these assets. It binds the build output to the workflow, repository, and source revision. SHA-256
+and provenance help manual auditing, but the in-app installation authorization is still based on the
+updater signature.
 
-## 信任边界
+## Trust boundary
 
-`latest.json` 和下载内容都按不可信远端输入处理。Rust coordinator 只接受 canonical repository、
-`darwin-aarch64`、严格稳定且高于运行版本的 SemVer、canonical 归档 URL、有界版本说明和有界签名。
-这些检查决定是否展示更新，不授予安装权限。用户确认下载后，Tauri updater 必须使用 bundle 中的
-项目公钥验证归档签名，验证成功才进入安装。签名还必须记录它对应的版本：应用启用
-`requireSignedVersion`，会把 `latest.json` 声明的版本与签名 trusted comment 中的版本比对，
-不一致或缺失即拒绝安装。这样"把更大的版本号与另一个合法签名包配对"的做法无法促成降级安装。
-该校验从启用它的构建开始生效；更早的已安装版本不校验签名里的版本。
+`latest.json` and downloaded content are both treated as untrusted remote input. The Rust coordinator
+accepts only the canonical repository, `darwin-aarch64`, a strictly stable SemVer higher than the
+running version, a canonical archive URL, bounded release notes, and a bounded signature. These
+checks decide whether to show an update; they do not grant installation permission. Once the user
+confirms the download, the Tauri updater must verify the archive signature with the project public key
+in the bundle and only then proceed to install. The signature must also record the version it
+corresponds to: the app enables `requireSignedVersion`, which compares the version declared in
+`latest.json` with the version in the signature's trusted comment and rejects installation if they
+differ or are missing. This way, "pairing a larger version number with another legitimately signed
+package" cannot cause a downgrade install. This check takes effect from the build that enables it;
+earlier installed versions do not verify the version inside the signature.
 
-新版本说明由提交在 `release-notes/v<version>.md` 的审核内容生成。Rust 只解析受限的标题和平铺
-项目符号，并向界面投影 `重点更新`、`问题修复`、`注意事项` 三组数据；React 不解析 Markdown 或
-HTML。设置页默认展示最多三条重点更新，按需展开全部分类项目。旧 manifest 的普通文本仍以有界
-兼容模式展示，并保留 canonical GitHub Release 入口。
+New release notes are generated from the reviewed content committed at `release-notes/v<version>.md`.
+Rust parses only restricted headings and flat bullet items and projects the three data groups
+`Highlights`, `Fixes`, and `Notices` to the UI; React does not parse Markdown or HTML. The Settings
+page shows at most three highlights by default and expands all categorized items on demand. Notes in
+the legacy plain-text form are still displayed with bounded compatibility, and the canonical GitHub
+Release entry point is retained.
 
-自动检查在应用进入 `Running` 后立即执行，尝试时间先写入 SQLite，再执行网络请求。此后调度器在同一
-进程内长期运行：成功后等待 24 小时，网络或元数据失败后等待 6 小时，另一项更新操作占用互斥门时以
-有界短延迟重试且不记录尝试。等待按墙钟时间分段计算，机器休眠不会拉长实际周期；时钟回拨超过周期
-按到期处理。每次重新启动都会重置本进程的等待周期并立即检查——持久化的尝试时间只是运行记录，不再
-跨启动抑制检查，恢复点仍会清除该非关键时间戳。数据库恢复（还原恢复点、重新开始、重试启动）成功后
-同样进入 `Running`，因此也会启动调度器；调度器在一个进程内只认领一次，重复调用是空操作。安装完成
-进入 `restart_ready` 后本进程停止调度，由
-新进程重新开始。后台失败保持安静。手动检查绕过 cadence，并显示有界、可重试错误和 canonical
-Release 入口。
+Automatic checks run immediately after the app enters `Running`, writing the attempt time to SQLite
+before performing the network request. After that the scheduler runs long-lived inside the same
+process: after a success it waits 24 hours, after a network or metadata failure it waits 6 hours, and
+when another update operation holds the mutex gate it retries after a bounded short delay without
+recording an attempt. The wait is computed in wall-clock segments, so machine sleep does not lengthen
+the actual period; a clock rollback of more than a period is treated as due. Every restart resets the
+wait period for this process and checks immediately — the persisted attempt time is only a record and
+no longer suppresses checks across restarts, and recovery points still clear that non-critical
+timestamp. After a successful database recovery (restoring a recovery point, starting over, retrying
+startup) the app likewise enters `Running` and therefore also starts the scheduler; the scheduler is
+claimed only once per process and repeated calls are no-ops. Once an install completes and the app
+enters `restart_ready`, this process stops scheduling and the new process starts over. Background
+failures stay quiet. A manual check bypasses the cadence and shows a bounded, retryable error and the
+canonical Release entry point.
 
-下载、安装和重启都不会自动发生。下载/安装与重启分别需要确认；重启通过既有 graceful shutdown
-路径关闭代理、余额、数据库和恢复服务。一个时间点只允许一个更新操作，旧 generation 不能覆盖新
-状态，进度 channel 不触发全局查询失效。
+Download, installation, and restart never happen automatically. Download/install and restart each
+require confirmation; restart shuts down the proxy, balance, database, and recovery services through
+the existing graceful shutdown path. Only one update operation is allowed at a time, an old generation
+cannot overwrite newer state, and the progress channel does not trigger global query invalidation.
 
-## 出站代理
+## Outbound proxy
 
-应用内更新检查（`latest.json` 元数据）与更新包下载都使用设置页的“全局出站代理”，与推理、余额、
-模型发现等请求共用同一份代理设置。
+In-app update checks (`latest.json` metadata) and update-package downloads both use Settings' "global
+outbound proxy", sharing one set of proxy settings with inference, balance, model discovery, and
+similar requests.
 
-「跟随系统」使用 macOS 的手动 HTTP/HTTPS/SOCKS 代理和绕过规则；未配置适用代理且未启用自动代理时
-直连。「自定义代理」覆盖系统配置。回环目标（`localhost`、`127.0.0.1`、`::1` 及映射形式）始终直连，
-因此 QA 回环 updater 端点（`AI_ROUTER_QA_UPDATER_ENDPOINT`）语义不变。环境变量代理不会改变决策。
+"Follow system" uses macOS's manual HTTP/HTTPS/SOCKS proxies and bypass rules; when no applicable
+proxy is configured and automatic proxy is disabled it connects directly. "Custom proxy" overrides
+the system configuration. Loopback targets (`localhost`, `127.0.0.1`, `::1`, and mapped forms) are
+always direct, so the QA loopback updater endpoint (`AI_ROUTER_QA_UPDATER_ENDPOINT`) keeps its
+semantics. Environment-variable proxies do not change the decision.
 
-不执行 PAC/WPAD：混合配置使用适用的手动代理或绕过规则；仅有自动配置可用、系统读取失败或配置无效
-时拒绝外部请求，并提示检查系统设置或改用自定义代理。选中代理不可达时也不会回退直连。手动检查
-显示有界错误，自动检查保持安静并沿用既有失败节奏。设置页的「测试连接」只验证代理端点连通性，
-不验证 GitHub 可达性。
+PAC/WPAD is not executed: a mixed configuration uses the applicable manual proxy or bypass rules; when
+only automatic configuration is available, the system read fails, or the configuration is invalid,
+external requests are rejected and the user is prompted to check system settings or switch to a custom
+proxy. When the selected proxy is unreachable it also does not fall back to a direct connection.
+Manual checks show a bounded error while automatic checks stay quiet and keep the existing failure
+cadence. Settings' "Test connection" verifies only proxy-endpoint connectivity, not GitHub
+reachability.
 
-更新检查和下载各自捕获不可变策略，并对初始目标及重定向重新判定路由。缓存的 `Update` 在之后下载时
-采用当前策略，不重新检查或替换已选版本；进行中的操作继续使用旧快照。客户端仍经 updater 插件的
-`configure_client` 注入，下载、签名验证和安装仍由插件负责。
+Update checks and downloads each capture an immutable policy and re-decide routing for the initial
+target and each redirect. A cached `Update` adopts the current policy when downloaded later, and does
+not re-check or replace the selected version; an in-progress operation keeps using the old snapshot.
+The client is still injected through the updater plugin's `configure_client`, and downloading,
+signature verification, and installation are still the plugin's responsibility.
 
-该设置只作用于应用自身发出的 HTTP 请求（更新、推理转发、余额、模型发现等）。设置中的“同步官网”
-在隐藏的只读 WebView 中加载官方定价页，属于平台 WebView 网络栈：它的出口由 macOS 系统网络配置
-决定（系统 HTTP/HTTPS/SOCKS 代理、例外清单与 PAC），既不读取「自定义代理」，也不读取环境变量
-代理。若系统未配置代理而目标网络又必须经由代理，同步会
-失败关闭并保留上一次的本地价格表，不会静默回退或降级成功提示。
+This setting applies only to HTTP requests the app itself sends (updates, inference forwarding,
+balance, model discovery, and so on). The "sync official site" in Settings loads the official pricing
+page in a hidden read-only WebView and belongs to the platform WebView network stack: its egress is
+decided by the macOS system network configuration (system HTTP/HTTPS/SOCKS proxies, the exception
+list, and PAC) and it neither reads "custom proxy" nor reads environment-variable proxies. If the
+system has no proxy configured while the target network requires one, the sync fails closed and keeps
+the previous local price table, without silently falling back or reporting a degraded success.
 
-## 首次安装与 Gatekeeper
+## First install and Gatekeeper
 
-普通用户只下载 DMG。由于没有 Apple Developer ID 与公证，macOS 可能阻止首次打开。文档与支持只
-推荐系统路径：“系统设置 -> 隐私与安全性”，在“安全性”中确认 `AI Router.app` 后选择“仍要打开”。
-不要建议 `xattr`、`spctl --master-disable` 或其他终端绕过方式。
+Ordinary users download only the DMG. Because there is no Apple Developer ID and no notarization,
+macOS may block the first open. Documentation and support recommend only the system path: "System
+Settings -> Privacy & Security", confirm `AI Router.app` under "Security", then choose "Open Anyway".
+Do not suggest `xattr`, `spctl --master-disable`, or any other terminal bypass.
 
-源码构建不嵌入官方 updater 公钥，也不是官方更新链的一部分。第一个 updater-capable 稳定版本必须
-作为手动桥接版本通过 DMG 安装；只有已经嵌入受信公钥的官方版本才能接受后续应用内更新。
+A source build does not embed the official updater public key and is not part of the official update
+chain. The first updater-capable stable version must be installed via the DMG as a manual bridge
+version; only official versions that already embed the trusted public key can accept subsequent
+in-app updates.
 
-## 密钥备份与轮换
+## Key backup and rotation
 
-`TAURI_SIGNING_PRIVATE_KEY`、密码和发布用公钥值只配置在受保护的 GitHub `release` environment。
-私钥不得进入 git、workflow 参数、构建输出、应用 bundle、日志或 PR job。至少保留一份加密、离线、
-经过恢复演练的备份，并把备份访问与 GitHub environment 审批分离。
+`TAURI_SIGNING_PRIVATE_KEY`, the password, and the release public-key value are configured only in the
+protected GitHub `release` environment. The private key must not enter git, workflow arguments, build
+output, the app bundle, logs, or pull-request jobs. Keep at least one encrypted, offline backup that
+has been recovery-drilled, and separate backup access from GitHub environment approval.
 
-正常轮换采用桥接版本：用旧私钥签署一个仍受旧版信任、但内嵌新公钥的稳定版本；确认采用窗口后，
-下一版本改用新私钥签署。旧私钥在桥接采用窗口结束前保持离线可恢复。若旧私钥已经泄露，不能再用它
-签署桥接版本；立即停止应用内发布，撤销环境值，并要求用户通过明确说明 hashes 与 provenance 的新
-DMG 手动升级。
+Normal rotation uses a bridge version: sign with the old private key a stable version that is still
+trusted by old versions but embeds the new public key; after the adoption window is confirmed, the
+next version is signed with the new private key. The old private key stays offline and recoverable
+until the bridge adoption window ends. If the old private key has already leaked, it can no longer be
+used to sign a bridge version; stop in-app releases immediately, revoke the environment value, and
+require users to upgrade manually through a new DMG that clearly states the hashes and provenance.
 
-## 失败恢复
+## Failure recovery
 
-workflow 首先创建或验证 unpublished draft。构建、bundle 检查、updater 签名验证、`latest.json`、
-checksums、远端回读和 provenance 任一步失败时，Release 必须保持 draft。相同 tag 的重跑只可清理和
-修复该 draft；一旦发布，tag 与资产视为不可变，任何修正都使用更高 patch 版本。
+The workflow first creates or verifies an unpublished draft. If any step fails — build, bundle check,
+updater signature verification, `latest.json`, checksums, remote read-back, or provenance — the
+Release must stay a draft. A rerun of the same tag may only clean up and repair that draft; once
+published, the tag and assets are treated as immutable, and any correction uses a higher patch
+version.
 
-发布操作与 GitHub 保护设置见 [稳定版本发布操作](./releasing.md) 和
-[GitHub CI 与安全设置](./github-security-settings.md)。
+Release operations and GitHub protection settings are in [Stable release operations](./releasing.md)
+and [GitHub CI and security settings](./github-security-settings.md).

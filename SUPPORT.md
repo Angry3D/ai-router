@@ -1,49 +1,73 @@
-# 支持说明
+# Support
 
-AI Router 是早期个人维护项目，提供简体中文官方 DMG 与源码。维护者会尽力处理可复现
-问题，但不提供服务等级、响应时限、付费支持或旧版本长期维护。
+AI Router is an early-stage, personally maintained project that ships one official
+Apple Silicon DMG and source code. The same official DMG provides a Simplified Chinese
+and English interface with in-app language selection (Follow system / Simplified
+Chinese / English); other languages are not supported, and there are no per-language
+installers. Maintainers make a best effort on reproducible issues, but provide no
+service level, response time, paid support, or long-term maintenance for older
+versions.
 
-## 支持的使用方式
+## Supported usage
 
-- macOS 13 或更高版本、Apple Silicon；
-- 按 [README](./README.md) 使用 Node `22.22.3`、pnpm `10.33.2`、Rust `1.97.1` 和锁文件构建；
-- Codex CLI/App 与 OpenAI Responses API 兼容上游；自动兼容性证据固定为
-  `codex-cli 0.160.0`；
-- 路由可选择 Responses 或 Chat Completions 上游协议。Chat Completions 路由仍向 Codex 提供
-  Responses 契约，但只覆盖已记录的兼容行为；不透明 reasoning、更丰富的 `web_search` 声明、
-  远程压缩和非流式客户端请求会失败关闭，详见
-  [路由与韧性](./docs/engineering/routing-resilience.md#chat-completions-上游兼容)；
-- 设置中的「同步官网」是纯手动操作：它访问 `developers.openai.com` 的公开定价页并只保存 GPT 模型
-  价格；不登录、不采集账号信息，失败时保留上一次的本地价格表；
-- 使用 canonical GitHub Release 的官方 DMG，或项目原始源码和未修改的生产/QA 配置。
+- macOS 13 or later on Apple Silicon;
+- Build per the [README](./README.md) with Node `22.22.3`, pnpm `10.33.2`, Rust
+  `1.97.1`, and the lock file;
+- Codex CLI/App and upstreams compatible with the OpenAI Responses API; the automated
+  compatibility evidence is pinned to `codex-cli 0.160.0`;
+- Routing can select a Responses or Chat Completions upstream protocol. Chat Completions
+  routing still presents the Responses contract to Codex, but only covers the documented
+  compatibility behavior; opaque reasoning, richer `web_search` declarations, remote
+  compaction, and non-streaming client requests fail closed, as detailed in
+  [routing and resilience](./docs/engineering/routing-resilience.md#chat-completions-upstream-compatibility);
+- "Sync from website" in settings is a purely manual action: it visits the public pricing
+  page on `developers.openai.com` and only stores GPT model prices; it does not sign in
+  or collect account information, and keeps the previous local price table on failure;
+- The official DMG from the canonical GitHub Release, or the project's original source
+  and unmodified production/QA configuration.
 
-Windows、Linux、Intel Mac、其他语言、广域网代理、多人共享网关、Developer ID 签名、Apple 公证、
-App Store、静默更新和 Gatekeeper 绕过说明均不在当前支持范围。官方 DMG 只有 ad-hoc 签名，未经过
-Apple 验证或公证；源码构建也不嵌入官方 updater 公钥。
+Windows, Linux, Intel Macs, languages other than Simplified Chinese and English, WAN
+proxies, multi-user shared gateways, Developer ID signing, Apple notarization, the App
+Store, silent updates, and Gatekeeper bypass instructions are all outside the current
+support scope. The official DMG is ad-hoc signed only, so it is not Apple-verified or
+notarized; source builds also do not embed the official updater public key.
 
-## 获取帮助
+## Getting help
 
-提交 Bug 前请先运行 `pnpm docs:check`，检查 [README 故障排查](./README.md#故障排查)，并搜索已有
-Issue。公开报告应包含版本/提交、macOS、硬件、Codex 版本、构建方式、最小复现步骤、期望结果、
-实际结果和稳定错误码。
+Before filing a bug, run `pnpm docs:check`, check
+[README troubleshooting](./README.md#troubleshooting), and search existing issues. A
+public report should include the version/commit, macOS, hardware, Codex version, build
+method, minimal reproduction steps, expected result, actual result, and stable error
+code.
 
-不要在公开 Issue、PR 或附件中提交真实 API Key、Authorization header、完整配置（包括 Codex
-配置）、SQLite 数据库、原始请求/响应、原始日志、恢复点或用户绝对路径。必须分享诊断时，只摘录与复现直接
-相关的固定错误码，并再次检查内容。
+Do not submit real API keys, Authorization headers, complete configuration (including
+Codex configuration), SQLite databases, raw requests/responses, raw logs, recovery
+points, or user absolute paths in public issues, PRs, or attachments. When you must
+share diagnostics, quote only the fixed error codes directly relevant to the
+reproduction, and review the content again.
 
-安全问题使用 [安全政策](./SECURITY.md) 的私下渠道，不要创建公开漏洞报告。功能建议应说明当前
-痛点、目标用户、可验证结果和明确非目标，避免把某个外部产品的完整功能集当作默认范围。
+Use the private channel in the [security policy](./SECURITY.md) for security issues; do
+not create a public vulnerability report. Feature suggestions should state the current
+pain point, target users, verifiable outcome, and explicit non-goals, and should not
+treat the full feature set of some external product as the default scope.
 
-## 源码构建边界
+## Source-build boundaries
 
-维护者可以协助判断仓库脚本或受支持工具链中的可复现问题，但无法排查未知 shell 配置、第三方包管理
-器、企业设备策略、非官方签名工具或修改后的 fork。源码构建产生的本地应用由构建者自行保管和评估。
+Maintainers can help triage reproducible problems in the repository scripts or the
+supported toolchain, but cannot investigate unknown shell configurations, third-party
+package managers, corporate device policies, unofficial signing tools, or modified
+forks. Local apps produced by a source build are the builder's own to store and
+evaluate.
 
-## 安装与更新支持
+## Installation and update support
 
-首次安装下载 DMG 即可；Release 中的 `.app.tar.gz`、`.sig` 和 `latest.json` 是应用内更新所需文件，
-`SHA256SUMS` 与 GitHub provenance 用于独立核对内容和来源，不是需要手动安装的替代包。macOS 阻止
-首次启动时，只支持“系统设置 -> 隐私与安全性 -> 仍要打开”的系统授权路径。
+For a first install, just download the DMG. The `.app.tar.gz`, `.sig`, and `latest.json`
+files in a Release are what in-app updates need; `SHA256SUMS` and GitHub provenance are
+for independently verifying content and origin, not alternative packages to install by
+hand. When macOS blocks the first launch, only the system authorization path of
+"System Settings -> Privacy & Security -> Open Anyway" is supported.
 
-应用内更新只支持 canonical repository 发布、签名正确且严格更新的稳定版本。失败会保留当前安装；
-可从界面打开 canonical Release 后手动安装 DMG。第一个 updater-capable 版本必须手动通过 DMG 安装。
+In-app updates only support stable versions published from the canonical repository with
+a correct signature and a strict upgrade. A failure keeps the current installation; you
+can open the canonical Release from the UI and install the DMG manually. The first
+updater-capable version must be installed manually via the DMG.

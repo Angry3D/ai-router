@@ -1,5 +1,5 @@
-name: Bug 报告
-description: 报告可复现的 AI Router 缺陷
+name: Bug report
+description: Report a reproducible AI Router defect
 title: "[Bug]: "
 labels:
   - bug
@@ -7,54 +7,54 @@ body:
   - type: markdown
     attributes:
       value: |
-        感谢报告。不要提交真实 API Key、Authorization header、完整 Codex 配置、SQLite 数据库、原始请求/响应、完整运行日志、恢复点或用户绝对路径。安全问题请使用私下报告入口。
+        Thanks for the report. Do not submit real API keys, Authorization headers, complete Codex configuration, SQLite databases, raw requests/responses, full run logs, recovery points, or user absolute paths. For security issues, use the private reporting channel.
   - type: input
     id: version
     attributes:
-      label: AI Router 版本或提交
-      placeholder: 例如 0.1.0 或 commit SHA
+      label: AI Router version or commit
+      placeholder: e.g. 0.1.0 or a commit SHA
     validations:
       required: true
   - type: input
     id: macos
     attributes:
-      label: macOS 版本
-      placeholder: 例如 macOS 15.6
+      label: macOS version
+      placeholder: e.g. macOS 15.6
     validations:
       required: true
   - type: dropdown
     id: hardware
     attributes:
-      label: 硬件
+      label: Hardware
       options:
         - Apple Silicon
-        - 其他（当前不受支持）
+        - Other (currently unsupported)
     validations:
       required: true
   - type: input
     id: codex
     attributes:
-      label: Codex 版本
-      placeholder: 例如 codex-cli 0.160.0
+      label: Codex version
+      placeholder: e.g. codex-cli 0.160.0
     validations:
       required: true
   - type: dropdown
     id: build
     attributes:
-      label: 运行方式
+      label: Run method
       options:
-        - 官方 GitHub Release DMG
-        - 从源码构建的 AI Router.app
+        - Official GitHub Release DMG
+        - AI Router.app built from source
         - pnpm tauri:qa:dev
-        - 从源码构建的 AI Router QA.app
-        - 非官方构建
+        - AI Router QA.app built from source
+        - Unofficial build
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
-      label: 最小复现步骤
-      description: 使用虚构路由、合成数据和安全占位符。
+      label: Minimal reproduction steps
+      description: Use fictional routes, synthetic data, and safe placeholders.
       placeholder: |
         1. ...
         2. ...
@@ -64,27 +64,27 @@ body:
   - type: textarea
     id: expected
     attributes:
-      label: 期望结果
+      label: Expected result
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
-      label: 实际结果
-      description: 可填写界面显示的稳定错误码；不要粘贴完整日志。
+      label: Actual result
+      description: You may include a stable error code shown in the UI; do not paste full logs.
     validations:
       required: true
   - type: textarea
     id: additional
     attributes:
-      label: 其他已脱敏上下文
-      description: 只提供定位问题必需且已经人工检查的内容。
+      label: Other sanitized context
+      description: Provide only what is necessary to locate the issue and has been manually reviewed.
   - type: checkboxes
     id: safety
     attributes:
-      label: 敏感数据确认
+      label: Sensitive data confirmation
       options:
-        - label: 我确认本报告不含真实 API Key、完整配置、数据库、原始日志或用户绝对路径。
+        - label: I confirm this report contains no real API keys, complete configuration, databases, raw logs, or user absolute paths.
           required: true
-        - label: 我确认这不是需要私下报告的安全问题。
+        - label: I confirm this is not a security issue that requires private reporting.
           required: true
