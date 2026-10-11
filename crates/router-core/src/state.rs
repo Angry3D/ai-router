@@ -8,7 +8,10 @@ use thiserror::Error;
 use ts_rs::TS;
 
 use crate::{
-    domain::{AppearancePreference, InferenceStatus, ProxyRuntimeStatus, RouteId, RouteProtocol},
+    domain::{
+        AppLocale, AppearancePreference, InferenceStatus, LanguagePreference, ProxyRuntimeStatus,
+        RouteId, RouteProtocol,
+    },
     lifecycle::{AppLifecycleIssue, AppLifecyclePhase, AppLifecycleSnapshot},
     proxy::{RecoveryOrigin, RouteHealthSnapshot},
 };
@@ -100,6 +103,7 @@ pub enum StateArea {
     RuntimeLogs,
     Recovery,
     Appearance,
+    Language,
     MenuBar,
     ApplicationUpdate,
     PricingTable,
@@ -153,6 +157,14 @@ pub struct FallbackStateDto {
     pub has_next: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct LanguageSnapshotDto {
+    pub preference: LanguagePreference,
+    pub effective_locale: AppLocale,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -165,6 +177,7 @@ pub struct BootstrapSnapshotDto {
     pub proxy_status: ProxyRuntimeStatus,
     pub lifecycle: AppLifecycleSnapshot,
     pub appearance_preference: AppearancePreference,
+    pub language: LanguageSnapshotDto,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -211,6 +224,7 @@ struct RuntimeProjection {
     proxy_status: ProxyRuntimeStatus,
     lifecycle: AppLifecycleSnapshot,
     appearance_preference: AppearancePreference,
+    language: LanguageSnapshotDto,
     menu_bar_settings: Option<crate::app_api::MenuBarSettingsDto>,
 }
 
@@ -223,6 +237,12 @@ impl Default for RuntimeProjection {
             proxy_status: ProxyRuntimeStatus::Stopped,
             lifecycle: AppLifecycleSnapshot::default(),
             appearance_preference: AppearancePreference::System,
+            // Unresolved platform language falls back to English; the desktop
+            // runtime seeds the real platform result before native exposure.
+            language: LanguageSnapshotDto {
+                preference: LanguagePreference::System,
+                effective_locale: AppLocale::from_platform_tag(None),
+            },
             menu_bar_settings: None,
         }
     }
@@ -240,6 +260,7 @@ pub struct RuntimeProjectionUpdate {
     pub fallback: Option<FallbackStateDto>,
     pub proxy_status: Option<ProxyRuntimeStatus>,
     pub appearance_preference: Option<AppearancePreference>,
+    pub language: Option<LanguageSnapshotDto>,
     pub menu_bar_settings: Option<crate::app_api::MenuBarSettingsDto>,
 }
 
@@ -305,9 +326,9 @@ impl AppRuntimeState {
             proxy_status: projection.proxy_status.clone(),
             lifecycle: projection.lifecycle.clone(),
             appearance_preference: projection.appearance_preference,
+            language: projection.language,
         }
     }
-
     #[must_use]
     pub fn menu_bar_settings(&self) -> Option<crate::app_api::MenuBarSettingsDto> {
         self.projection
@@ -352,6 +373,9 @@ impl AppRuntimeState {
             }
             if let Some(appearance_preference) = update.appearance_preference {
                 projection.appearance_preference = appearance_preference;
+            }
+            if let Some(language) = update.language {
+                projection.language = language;
             }
             if let Some(menu_bar_settings) = update.menu_bar_settings {
                 projection.menu_bar_settings = Some(menu_bar_settings);
@@ -467,10 +491,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        AppRuntimeState, RouteSummaryDto, RuntimeProjectionUpdate, StateArea, StateChangedEventDto,
-        StateCoordinator, StateEventError, StateEventSink,
+        AppRuntimeState, LanguageSnapshotDto, RouteSummaryDto, RuntimeProjectionUpdate, StateArea,
+        StateChangedEventDto, StateCoordinator, StateEventError, StateEventSink,
     };
-    use crate::domain::{AppearancePreference, ProxyRuntimeStatus, RouteId, RouteProtocol};
+    use crate::domain::{
+        AppLocale, AppearancePreference, LanguagePreference, ProxyRuntimeStatus, RouteId,
+        RouteProtocol,
+    };
 
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<StateChangedEventDto>>);
@@ -535,6 +562,43 @@ mod tests {
     }
 
     #[test]
+    fn language_pair_projects_atomically() {
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = AppRuntimeState::new(sink.clone());
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::System,
+                effective_locale: AppLocale::En,
+            }
+        );
+        runtime
+            .apply_committed::<_, ()>(
+                Ok(()),
+                vec![StateArea::Language],
+                RuntimeProjectionUpdate {
+                    language: Some(LanguageSnapshotDto {
+                        preference: LanguagePreference::ZhCn,
+                        effective_locale: AppLocale::ZhCn,
+                    }),
+                    ..RuntimeProjectionUpdate::default()
+                },
+            )
+            .expect("language commit");
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::ZhCn,
+                effective_locale: AppLocale::ZhCn,
+            }
+        );
+        assert_eq!(
+            sink.0.lock().expect("sink lock")[0].areas,
+            vec![StateArea::Language]
+        );
+    }
+
+    #[test]
     fn runtime_projection_changes_only_after_commit() {
         let sink = Arc::new(RecordingSink::default());
         let runtime = AppRuntimeState::new(sink.clone());
@@ -572,6 +636,7 @@ mod tests {
                     fallback: None,
                     proxy_status: Some(ProxyRuntimeStatus::Running),
                     appearance_preference: None,
+                    language: None,
                     menu_bar_settings: None,
                 },
             )

@@ -110,6 +110,95 @@ impl AppearancePreference {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub enum LanguagePreference {
+    #[default]
+    #[serde(rename = "system")]
+    #[ts(rename = "system")]
+    System,
+    #[serde(rename = "zh-CN")]
+    #[ts(rename = "zh-CN")]
+    ZhCn,
+    #[serde(rename = "en")]
+    #[ts(rename = "en")]
+    En,
+}
+
+impl LanguagePreference {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::ZhCn => "zh-CN",
+            Self::En => "en",
+        }
+    }
+
+    /// Parses a persisted preference without silently substituting a default.
+    ///
+    /// # Errors
+    ///
+    /// Returns a field-specific validation error for an unknown value.
+    pub fn parse_persisted(value: &str) -> Result<Self, ValidationError> {
+        match value {
+            "system" => Ok(Self::System),
+            "zh-CN" => Ok(Self::ZhCn),
+            "en" => Ok(Self::En),
+            _ => Err(ValidationError::new(
+                "language_preference_invalid",
+                "languagePreference",
+            )),
+        }
+    }
+
+    /// Resolves the effective locale against a sampled platform locale.
+    ///
+    /// Explicit preferences bypass the platform result; `System` follows it.
+    #[must_use]
+    pub const fn resolve(self, platform: AppLocale) -> AppLocale {
+        match self {
+            Self::System => platform,
+            Self::ZhCn => AppLocale::ZhCn,
+            Self::En => AppLocale::En,
+        }
+    }
+}
+
+/// Effective locale for app-owned presentation text.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub enum AppLocale {
+    #[serde(rename = "zh-CN")]
+    #[ts(rename = "zh-CN")]
+    ZhCn,
+    #[serde(rename = "en")]
+    #[ts(rename = "en")]
+    En,
+}
+
+impl AppLocale {
+    /// Normalizes the first macOS preferred-language entry into a locale.
+    ///
+    /// Only the primary language subtag decides: every `zh` tag (Simplified,
+    /// Traditional, regional, or underscore variants) resolves to Simplified
+    /// Chinese; any other, empty, or unavailable result resolves to English.
+    #[must_use]
+    pub fn from_platform_tag(tag: Option<&str>) -> Self {
+        let Some(tag) = tag else {
+            return Self::En;
+        };
+        let primary = tag
+            .split(['-', '_'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if primary == "zh" {
+            Self::ZhCn
+        } else {
+            Self::En
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteName(String);
 
@@ -950,12 +1039,72 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        ApiKey, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
+        ApiKey, AppLocale, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
         DEFAULT_IMAGES_GENERATION_MODEL, ImagesGenerationModel, ImagesGenerationTimeout,
-        MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW, MAX_IMAGES_GENERATION_MODEL_BYTES,
-        MAX_OUTBOUND_PROXY_URL_BYTES, McpImageCapacityWarningThreshold, OutboundProxyConfig,
-        OutboundProxyUrl, RouteName, RouteProtocol,
+        LanguagePreference, MAX_BASE_URL_BYTES, MAX_CODEX_MODEL_CONTEXT_WINDOW,
+        MAX_IMAGES_GENERATION_MODEL_BYTES, MAX_OUTBOUND_PROXY_URL_BYTES,
+        McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl, RouteName,
+        RouteProtocol,
     };
+
+    #[test]
+    fn language_preference_parses_persisted_values_without_silent_defaults() {
+        assert_eq!(
+            LanguagePreference::parse_persisted("system"),
+            Ok(LanguagePreference::System)
+        );
+        assert_eq!(
+            LanguagePreference::parse_persisted("zh-CN"),
+            Ok(LanguagePreference::ZhCn)
+        );
+        assert_eq!(
+            LanguagePreference::parse_persisted("en"),
+            Ok(LanguagePreference::En)
+        );
+        let error = LanguagePreference::parse_persisted("zh").expect_err("unknown value");
+        assert_eq!(error.code, "language_preference_invalid");
+        assert_eq!(error.field, "languagePreference");
+        assert_eq!(LanguagePreference::En.as_str(), "en");
+    }
+
+    #[test]
+    fn app_locale_normalizes_platform_primary_language_tags() {
+        assert_eq!(AppLocale::from_platform_tag(Some("zh")), AppLocale::ZhCn);
+        assert_eq!(
+            AppLocale::from_platform_tag(Some("zh-Hans")),
+            AppLocale::ZhCn
+        );
+        assert_eq!(
+            AppLocale::from_platform_tag(Some("zh-Hant-TW")),
+            AppLocale::ZhCn
+        );
+        assert_eq!(AppLocale::from_platform_tag(Some("zh_TW")), AppLocale::ZhCn);
+        assert_eq!(AppLocale::from_platform_tag(Some("ZH-CN")), AppLocale::ZhCn);
+        assert_eq!(AppLocale::from_platform_tag(Some("en-US")), AppLocale::En);
+        assert_eq!(AppLocale::from_platform_tag(Some("fr")), AppLocale::En);
+        assert_eq!(AppLocale::from_platform_tag(Some("")), AppLocale::En);
+        assert_eq!(AppLocale::from_platform_tag(None), AppLocale::En);
+    }
+
+    #[test]
+    fn language_preference_resolution_follows_platform_only_in_system_mode() {
+        assert_eq!(
+            LanguagePreference::System.resolve(AppLocale::ZhCn),
+            AppLocale::ZhCn
+        );
+        assert_eq!(
+            LanguagePreference::System.resolve(AppLocale::En),
+            AppLocale::En
+        );
+        assert_eq!(
+            LanguagePreference::ZhCn.resolve(AppLocale::En),
+            AppLocale::ZhCn
+        );
+        assert_eq!(
+            LanguagePreference::En.resolve(AppLocale::ZhCn),
+            AppLocale::En
+        );
+    }
 
     #[derive(Deserialize)]
     struct BaseUrlFixture {

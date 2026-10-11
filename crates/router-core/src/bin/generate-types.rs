@@ -34,16 +34,17 @@ use router_core::{
     codex_auth::{CodexAuthStatusDto, CredentialStoreModeDto},
     codex_config::{CodexConfigStatus, ConfigOperationResult},
     domain::{
-        AppearancePreference, CompletionState, DeliveryState, InferenceFailureReason,
-        InferenceOutcome, InferenceStatus, InferenceStatusKind, ProxyRequestMetadata,
-        ProxyRuntimeStatus, ReachabilityResult, ReachabilityStatus, RouteMoveDirection,
-        RouteProtocol, UpstreamAttemptMetadata,
+        AppLocale, AppearancePreference, CompletionState, DeliveryState, InferenceFailureReason,
+        InferenceOutcome, InferenceStatus, InferenceStatusKind, LanguagePreference,
+        ProxyRequestMetadata, ProxyRuntimeStatus, ReachabilityResult, ReachabilityStatus,
+        RouteMoveDirection, RouteProtocol, UpstreamAttemptMetadata,
     },
     lifecycle::{AppLifecycleIssue, AppLifecyclePhase, AppLifecycleSnapshot},
     recovery::{DatabaseStartupIssue, RecoveryHealthKind},
     state::{
-        BootstrapSnapshotDto, FallbackStateDto, IpcErrorDto, MutationResultDto, RouteHealthDto,
-        RouteHealthOriginDto, RouteSummaryDto, StateArea, StateChangedEventDto,
+        BootstrapSnapshotDto, FallbackStateDto, IpcErrorDto, LanguageSnapshotDto,
+        MutationResultDto, RouteHealthDto, RouteHealthOriginDto, RouteSummaryDto, StateArea,
+        StateChangedEventDto,
     },
 };
 use ts_rs::TS;
@@ -148,6 +149,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     ConfigOperationResult::export_all_to(&output)?;
     CompletionState::export_all_to(&output)?;
     AppearancePreference::export_all_to(&output)?;
+    AppLocale::export_all_to(&output)?;
+    LanguagePreference::export_all_to(&output)?;
     RouteProtocol::export_all_to(&output)?;
     DeliveryState::export_all_to(&output)?;
     InferenceFailureReason::export_all_to(&output)?;
@@ -163,6 +166,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     DatabaseStartupIssue::export_all_to(&output)?;
     RecoveryHealthKind::export_all_to(&output)?;
     BootstrapSnapshotDto::export_all_to(&output)?;
+    LanguageSnapshotDto::export_all_to(&output)?;
     FallbackStateDto::export_all_to(&output)?;
     IpcErrorDto::export_all_to(&output)?;
     MutationResultDto::export_all_to(&output)?;

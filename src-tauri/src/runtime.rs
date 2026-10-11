@@ -10,6 +10,9 @@ use std::{
 };
 
 use async_trait::async_trait;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+
 use router_core::{
     app_api::{
         BalanceQueryEditDto, BalanceQuerySettingsDto, BalanceTestInputDto, CodexBaselineSummaryDto,
@@ -41,9 +44,10 @@ use router_core::{
         LocalCodexFilesystem, load_or_create_gateway_token,
     },
     domain::{
-        ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationModel,
-        ImagesGenerationTimeout, McpImageCapacityWarningThreshold, OutboundProxyConfig,
-        OutboundProxyUrl, ReachabilityResult, RouteId, RouteProtocol, ValidationError,
+        ApiKey, AppLocale, AppearancePreference, BalanceQueryPolicy, BaseUrl,
+        ImagesGenerationModel, ImagesGenerationTimeout, LanguagePreference,
+        McpImageCapacityWarningThreshold, OutboundProxyConfig, OutboundProxyUrl,
+        ReachabilityResult, RouteId, RouteProtocol, ValidationError,
     },
     lifecycle::{
         AppCoordinator, AppLifecycleIssue, AppLifecyclePhase, AppLifecycleServices,
@@ -70,8 +74,8 @@ use router_core::{
         classify_recovery_startup_error,
     },
     state::{
-        AppRuntimeState, FallbackStateDto, IpcErrorDto, MutationResultDto, RouteSummaryDto,
-        RuntimeProjectionUpdate, StateArea,
+        AppRuntimeState, FallbackStateDto, IpcErrorDto, LanguageSnapshotDto, MutationResultDto,
+        RouteSummaryDto, RuntimeProjectionUpdate, StateArea,
     },
     storage::{
         AppSettingsRecord, BalanceQueryInput, CodexModelRecord, CodexRestartNoticeRecord,
@@ -111,7 +115,7 @@ pub enum DesktopRuntimeProfile {
     Isolated,
 }
 
-const STARTUP_STATE_AREAS: [StateArea; 7] = [
+const STARTUP_STATE_AREAS: [StateArea; 8] = [
     StateArea::Routes,
     StateArea::Route,
     StateArea::Fallback,
@@ -119,6 +123,7 @@ const STARTUP_STATE_AREAS: [StateArea; 7] = [
     StateArea::McpImageAssets,
     StateArea::MenuBar,
     StateArea::PricingTable,
+    StateArea::Language,
 ];
 
 impl DesktopRuntimeProfile {
@@ -275,6 +280,19 @@ impl RecoveryEventSink for DesktopRecoveryEventSink {
     }
 }
 
+/// Samples the first macOS preferred-language entry; `None` means the
+/// platform result is unavailable and resolves to English.
+type PlatformLocaleSampler = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+fn default_platform_locale_sampler() -> PlatformLocaleSampler {
+    // The binding exists only on macOS; other targets never resolve a
+    // platform language and fall back to English through `from_platform_tag`.
+    #[cfg(target_os = "macos")]
+    return Arc::new(platform_locale::preferred_language_tag);
+    #[cfg(not(target_os = "macos"))]
+    Arc::new(|| None)
+}
+
 pub struct DesktopLifecycleServices {
     app_data_dir: PathBuf,
     codex_home: PathBuf,
@@ -307,6 +325,19 @@ pub struct DesktopLifecycleServices {
     balance_settings_write_gate: tokio::sync::Mutex<()>,
     outbound_proxy_settings_write_gate: tokio::sync::Mutex<()>,
     menu_bar_settings_write_gate: tokio::sync::Mutex<()>,
+    /// Serializes language preference mutations against platform-language
+    /// reconciliation so a stale sample cannot overwrite a newer explicit
+    /// choice; never held across a callback that reacquires it.
+    language_gate: tokio::sync::Mutex<()>,
+    /// Production samples macOS preferred languages through CoreFoundation;
+    /// tests install a synthetic sampler for deterministic resolution.
+    platform_locale_sampler: PlatformLocaleSampler,
+    /// Test-only fault switch for the durable language-preference read. It is
+    /// compiled out of production builds; tests use it to prove that an
+    /// installed database whose settings cannot be read keeps the current
+    /// projection instead of publishing a fabricated `System` preference.
+    #[cfg(test)]
+    language_preference_read_failure: Arc<AtomicBool>,
     /// Serializes the Codex credential write path between the two IPC commands.
     codex_auth_write_gate: tokio::sync::Mutex<()>,
     codex_model_retry: tokio::sync::Mutex<Option<CodexModelRetryPermit>>,
@@ -369,8 +400,29 @@ impl DesktopLifecycleServices {
         runtime_state: Arc<AppRuntimeState>,
         diagnostics: Arc<dyn RuntimeDiagnosticSink>,
     ) -> Arc<Self> {
+        Self::new_with_platform_locale_sampler(
+            app_data_dir,
+            user_home,
+            profile,
+            runtime_state,
+            diagnostics,
+            // Deterministic host-independent unit tests: no platform result,
+            // so System resolves to English exactly like an unavailable API.
+            Arc::new(|| None),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn new_with_platform_locale_sampler(
+        app_data_dir: PathBuf,
+        user_home: &std::path::Path,
+        profile: DesktopRuntimeProfile,
+        runtime_state: Arc<AppRuntimeState>,
+        diagnostics: Arc<dyn RuntimeDiagnosticSink>,
+        platform_locale_sampler: PlatformLocaleSampler,
+    ) -> Arc<Self> {
         let log_directory = app_data_dir.join("logs");
-        Self::new_with_activity_sink(
+        Self::new_inner(
             app_data_dir,
             user_home,
             profile,
@@ -382,6 +434,7 @@ impl DesktopLifecycleServices {
                 env!("CARGO_PKG_VERSION"),
                 RecoveryIdleWindow::new(),
             ),
+            platform_locale_sampler,
         )
     }
 
@@ -393,6 +446,29 @@ impl DesktopLifecycleServices {
         diagnostics: Arc<dyn RuntimeDiagnosticSink>,
         activity_sink: Arc<dyn LogicalRequestActivitySink>,
         recovery_wiring: DesktopRecoveryWiring,
+    ) -> Arc<Self> {
+        Self::new_inner(
+            app_data_dir,
+            user_home,
+            profile,
+            runtime_state,
+            diagnostics,
+            activity_sink,
+            recovery_wiring,
+            default_platform_locale_sampler(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        app_data_dir: PathBuf,
+        user_home: &std::path::Path,
+        profile: DesktopRuntimeProfile,
+        runtime_state: Arc<AppRuntimeState>,
+        diagnostics: Arc<dyn RuntimeDiagnosticSink>,
+        activity_sink: Arc<dyn LogicalRequestActivitySink>,
+        recovery_wiring: DesktopRecoveryWiring,
+        platform_locale_sampler: PlatformLocaleSampler,
     ) -> Arc<Self> {
         let codex_home = profile.codex_home(&app_data_dir, user_home);
         // The credential target honours `CODEX_HOME` in production while an
@@ -448,6 +524,10 @@ impl DesktopLifecycleServices {
             balance_settings_write_gate: tokio::sync::Mutex::new(()),
             outbound_proxy_settings_write_gate: tokio::sync::Mutex::new(()),
             menu_bar_settings_write_gate: tokio::sync::Mutex::new(()),
+            language_gate: tokio::sync::Mutex::new(()),
+            platform_locale_sampler,
+            #[cfg(test)]
+            language_preference_read_failure: Arc::new(AtomicBool::new(false)),
             codex_auth_write_gate: tokio::sync::Mutex::new(()),
             codex_model_retry: tokio::sync::Mutex::new(None),
             codex_model_retry_generation: AtomicU64::new(0),
@@ -680,6 +760,7 @@ impl DesktopLifecycleServices {
                 fallback: Some(fallback),
                 proxy_status: None,
                 appearance_preference: None,
+                language: None,
                 menu_bar_settings: None,
             },
         )?;
@@ -993,8 +1074,9 @@ impl DesktopLifecycleServices {
     }
 
     pub async fn menu_snapshot(&self) -> Result<MenuSnapshotDto, IpcErrorDto> {
-        let bootstrap = self.runtime_state.bootstrap_snapshot();
         let database = self.database_for_ipc().await?;
+        self.reconcile_language_projection(Some(&database)).await;
+        let bootstrap = self.runtime_state.bootstrap_snapshot();
         let settings = database.app_settings().await.map_err(map_storage_error)?;
         let balance_enabled_route_ids = SqliteBalanceRouteSource::new(database.clone())
             .eligible_route_ids()
@@ -1039,6 +1121,7 @@ impl DesktopLifecycleServices {
 
     pub async fn settings_snapshot(&self) -> Result<SettingsSnapshotDto, IpcErrorDto> {
         let database = self.database_for_ipc().await?;
+        self.reconcile_language_projection(Some(&database)).await;
         let recovery = self.recovery_for_ipc().await?;
         let settings = database.app_settings().await.map_err(map_storage_error)?;
         let mcp_image_capacity = self.mcp_image_capacity_snapshot(&database, &settings).await;
@@ -1989,6 +2072,121 @@ impl DesktopLifecycleServices {
         Ok(mutation)
     }
 
+    fn sample_platform_locale(&self) -> AppLocale {
+        AppLocale::from_platform_tag((self.platform_locale_sampler)().as_deref())
+    }
+
+    /// Projects the authoritative language pair from the durable preference
+    /// and a fresh platform sample. A changed system resolution publishes
+    /// without writing `SQLite`; without a readable database the pair falls
+    /// back to `system` plus the platform locale for fatal/recovery surfaces.
+    async fn reconcile_language_projection(&self, database: Option<&DatabaseExecutor>) {
+        let _guard = self.language_gate.lock().await;
+        let preference = match database {
+            // A readable database must return its durable preference. A
+            // momentary read failure is not "no durable preference": keep the
+            // current projection so a manual choice cannot be replaced by a
+            // fabricated System pair that the next successful read reverts.
+            Some(database) => match self.read_language_preference(database).await {
+                Ok(preference) => preference,
+                Err(_) => return,
+            },
+            // Without an installed database, fatal/recovery surfaces use the
+            // platform fallback until a durable preference is readable again.
+            None => LanguagePreference::System,
+        };
+        let pair = LanguageSnapshotDto {
+            preference,
+            effective_locale: preference.resolve(self.sample_platform_locale()),
+        };
+        if self.runtime_state.bootstrap_snapshot().language == pair {
+            return;
+        }
+        let _ = self.runtime_state.apply_committed::<_, ()>(
+            Ok(()),
+            vec![StateArea::Language],
+            RuntimeProjectionUpdate {
+                language: Some(pair),
+                ..RuntimeProjectionUpdate::default()
+            },
+        );
+    }
+
+    /// Reads the durable language preference, or reports why it is unavailable.
+    async fn read_language_preference(
+        &self,
+        database: &DatabaseExecutor,
+    ) -> Result<LanguagePreference, StorageError> {
+        #[cfg(test)]
+        if self
+            .language_preference_read_failure
+            .swap(false, Ordering::AcqRel)
+        {
+            // Stands in for an installed database whose settings cannot be
+            // read (I/O or decode failure); no preference was produced.
+            return Err(StorageError::ExecutorClosed);
+        }
+        Ok(database.app_settings().await?.language_preference)
+    }
+
+    /// Test-only: makes the next durable language-preference read report a
+    /// storage failure, as an installed database with unreadable settings would.
+    #[cfg(test)]
+    fn fail_next_language_preference_read(&self) {
+        self.language_preference_read_failure
+            .store(true, Ordering::Release);
+    }
+
+    /// Reconciles the authoritative language on an activation or window-show
+    /// lifecycle boundary.
+    ///
+    /// Unlike an incidental menu/settings snapshot query this boundary does not
+    /// require a readable database: an installed database keeps its durable
+    /// preference, while fatal/recovery surfaces (where the ordinary snapshot
+    /// queries are disabled) fall back to `system` plus a fresh platform
+    /// sample. A system resolution publishes the changed pair without writing
+    /// `SQLite`, a manual preference is never overridden, and an unchanged pair
+    /// publishes nothing.
+    pub async fn reconcile_authoritative_language(&self) {
+        let database = self.database.lock().await.clone();
+        self.reconcile_language_projection(database.as_ref()).await;
+    }
+
+    /// Persists a closed language preference and projects the committed pair.
+    ///
+    /// A true no-op (same preference and resolved locale) returns the current
+    /// revision without publishing; a real preference change publishes even
+    /// when its effective locale is unchanged.
+    pub async fn update_language_preference(
+        &self,
+        language_preference: LanguagePreference,
+    ) -> Result<MutationResultDto, IpcErrorDto> {
+        let database = self.database_for_ipc().await?;
+        let _guard = self.language_gate.lock().await;
+        let pair = LanguageSnapshotDto {
+            preference: language_preference,
+            effective_locale: language_preference.resolve(self.sample_platform_locale()),
+        };
+        let changed = database
+            .set_language_preference(language_preference)
+            .await
+            .map_err(map_storage_error)?;
+        if !changed && self.runtime_state.bootstrap_snapshot().language == pair {
+            return Ok(MutationResultDto {
+                revision: self.runtime_state.bootstrap_snapshot().revision,
+            });
+        }
+        let ((), mutation) = self.runtime_state.apply_committed::<_, IpcErrorDto>(
+            Ok(()),
+            vec![StateArea::Language],
+            RuntimeProjectionUpdate {
+                language: Some(pair),
+                ..RuntimeProjectionUpdate::default()
+            },
+        )?;
+        Ok(mutation)
+    }
+
     pub async fn update_menu_bar_settings(
         &self,
         input: MenuBarSettingsDto,
@@ -2900,8 +3098,12 @@ impl DesktopLifecycleServices {
         if force_current_point {
             let _ = recovery.create_point().await;
         }
-        *self.database.lock().await = Some(database);
+        *self.database.lock().await = Some(database.clone());
         *self.recovery.lock().await = Some(recovery);
+        // Seed the language authority from the validated database before any
+        // native text or WebView bootstrap is served (startup, retry, restore,
+        // and start-over all pass through here).
+        self.reconcile_language_projection(Some(&database)).await;
         Ok(())
     }
 }
@@ -3409,6 +3611,9 @@ impl ProxyPortStore for DatabaseProxyPortStore {
 #[async_trait]
 impl AppLifecycleServices for DesktopLifecycleServices {
     async fn initialize_database(&self) -> Result<(), LifecycleFailure> {
+        // Before any classification completes, fatal/recovery surfaces and
+        // native text already see a platform-derived locale.
+        self.reconcile_language_projection(None).await;
         self.acquire_directory_lock().await?;
         let path = self.app_data_dir.join("router.sqlite3");
         let manager = self.recovery_manager();
@@ -3557,6 +3762,7 @@ impl AppLifecycleServices for DesktopLifecycleServices {
                 fallback: Some(fallback),
                 proxy_status: None,
                 appearance_preference: Some(settings.appearance_preference),
+                language: None,
                 menu_bar_settings: Some(menu_bar_settings_dto(&settings)),
             },
         );
@@ -3642,7 +3848,26 @@ impl AppLifecycleServices for DesktopLifecycleServices {
     }
 }
 
+/// Reconciles the authoritative language on an activation or window-show
+/// boundary, spawning the durable read off the event callback.
+///
+/// An already-focused window receives no new focus event, and the recovery
+/// surfaces disable the ordinary menu/settings snapshot queries, so the
+/// language projection is reconciled here instead of relying on an incidental
+/// business query. The callback never blocks the main thread; an unchanged pair
+/// publishes nothing.
+pub fn reconcile_language_for_activation<R: Runtime>(app: &AppHandle<R>) {
+    let Some(services) = app.try_state::<Arc<DesktopLifecycleServices>>() else {
+        return;
+    };
+    let services = services.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        services.reconcile_authoritative_language().await;
+    });
+}
+
 pub fn activate_existing_instance<R: Runtime>(app: &AppHandle<R>) {
+    reconcile_language_for_activation(app);
     if let Some(settings) = app.get_webview_window("settings")
         && settings.is_visible().unwrap_or(false)
     {
@@ -3966,6 +4191,16 @@ pub async fn update_appearance_preference(
 }
 
 #[tauri::command]
+pub async fn update_language_preference(
+    services: State<'_, Arc<DesktopLifecycleServices>>,
+    language_preference: LanguagePreference,
+) -> Result<MutationResultDto, IpcErrorDto> {
+    services
+        .update_language_preference(language_preference)
+        .await
+}
+
+#[tauri::command]
 pub async fn update_menu_bar_settings(
     services: State<'_, Arc<DesktopLifecycleServices>>,
     input: MenuBarSettingsDto,
@@ -4213,6 +4448,7 @@ pub fn show_settings_window(
     target: Option<SettingsNavigationTarget>,
 ) -> Result<(), IpcErrorDto> {
     validate_settings_navigation(&section, target)?;
+    reconcile_language_for_activation(&app);
     crate::popover::hide_menu_window(&app);
     let window = app
         .get_webview_window("settings")
@@ -6638,6 +6874,371 @@ mod tests {
             .expect("unchanged appearance");
         assert_eq!(repeated.revision, mutation.revision);
         assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
+
+        services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn language_preference_mutation_persists_projects_and_publishes_once() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let services = DesktopLifecycleServices::new_with_platform_locale_sampler(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+            Arc::new(|| Some("zh-Hans-CN".to_owned())),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        // The install path seeds the pair from the synthetic platform result.
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::System,
+                effective_locale: AppLocale::ZhCn,
+            }
+        );
+        events.0.lock().expect("event sink lock").clear();
+
+        let mutation = services
+            .update_language_preference(LanguagePreference::En)
+            .await
+            .expect("update language");
+        assert_eq!(
+            services
+                .database()
+                .await
+                .expect("database")
+                .app_settings()
+                .await
+                .expect("settings")
+                .language_preference,
+            LanguagePreference::En
+        );
+        let bootstrap = runtime.bootstrap_snapshot();
+        assert_eq!(bootstrap.revision, mutation.revision);
+        assert_eq!(
+            bootstrap.language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::En,
+                effective_locale: AppLocale::En,
+            }
+        );
+        assert_eq!(
+            events.0.lock().expect("event sink lock").as_slice(),
+            &[StateChangedEventDto {
+                revision: mutation.revision,
+                areas: vec![StateArea::Language],
+            }]
+        );
+
+        // A true no-op (same preference, same resolved locale) publishes nothing.
+        let repeated = services
+            .update_language_preference(LanguagePreference::En)
+            .await
+            .expect("unchanged language");
+        assert_eq!(repeated.revision, mutation.revision);
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
+
+        services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn system_mode_platform_change_republishes_without_writing_sqlite() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let platform = Arc::new(std::sync::Mutex::new(Some("zh-Hans-CN".to_owned())));
+        let sampled = Arc::clone(&platform);
+        let services = DesktopLifecycleServices::new_with_platform_locale_sampler(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+            Arc::new(move || sampled.lock().expect("platform fixture").clone()),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        events.0.lock().expect("event sink lock").clear();
+
+        // A changed system resolution publishes without writing SQLite.
+        *platform.lock().expect("platform fixture") = Some("en-US".to_owned());
+        let database = services.database().await.expect("database");
+        services
+            .reconcile_language_projection(Some(&database))
+            .await;
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::System,
+                effective_locale: AppLocale::En,
+            }
+        );
+        assert_eq!(
+            database
+                .app_settings()
+                .await
+                .expect("settings")
+                .language_preference,
+            LanguagePreference::System
+        );
+        assert_eq!(
+            events.0.lock().expect("event sink lock").as_slice(),
+            &[StateChangedEventDto {
+                revision: runtime.bootstrap_snapshot().revision,
+                areas: vec![StateArea::Language],
+            }]
+        );
+
+        // An explicit preference ignores a later platform change.
+        services
+            .update_language_preference(LanguagePreference::ZhCn)
+            .await
+            .expect("explicit override");
+        events.0.lock().expect("event sink lock").clear();
+        *platform.lock().expect("platform fixture") = Some("en-US".to_owned());
+        services
+            .reconcile_language_projection(Some(&database))
+            .await;
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::ZhCn,
+                effective_locale: AppLocale::ZhCn,
+            }
+        );
+        assert!(events.0.lock().expect("event sink lock").is_empty());
+
+        services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn activation_boundary_reconciles_system_and_preserves_manual_preference() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let platform = Arc::new(Mutex::new(Some("zh-Hans-CN".to_owned())));
+        let sampled = Arc::clone(&platform);
+        let services = DesktopLifecycleServices::new_with_platform_locale_sampler(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+            Arc::new(move || sampled.lock().expect("platform fixture").clone()),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+        events.0.lock().expect("event sink lock").clear();
+
+        // The activation/show boundary resolves the durable preference from the
+        // database, so a system resolution follows a fresh platform sample and
+        // publishes the changed pair without writing SQLite.
+        *platform.lock().expect("platform fixture") = Some("en-US".to_owned());
+        services.reconcile_authoritative_language().await;
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::System,
+                effective_locale: AppLocale::En,
+            }
+        );
+        assert_eq!(
+            services
+                .database()
+                .await
+                .expect("database")
+                .app_settings()
+                .await
+                .expect("settings")
+                .language_preference,
+            LanguagePreference::System
+        );
+        assert_eq!(
+            events.0.lock().expect("event sink lock").as_slice(),
+            &[StateChangedEventDto {
+                revision: runtime.bootstrap_snapshot().revision,
+                areas: vec![StateArea::Language],
+            }]
+        );
+
+        // A manual preference is never overridden by the same boundary.
+        services
+            .update_language_preference(LanguagePreference::ZhCn)
+            .await
+            .expect("explicit override");
+        events.0.lock().expect("event sink lock").clear();
+        *platform.lock().expect("platform fixture") = Some("en-US".to_owned());
+        services.reconcile_authoritative_language().await;
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::ZhCn,
+                effective_locale: AppLocale::ZhCn,
+            }
+        );
+        assert!(events.0.lock().expect("event sink lock").is_empty());
+
+        services.close_database().await;
+    }
+
+    #[tokio::test]
+    async fn activation_boundary_without_database_uses_platform_fallback() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let platform = Arc::new(Mutex::new(Some("zh-Hans-CN".to_owned())));
+        let sampled = Arc::clone(&platform);
+        let services = DesktopLifecycleServices::new_with_platform_locale_sampler(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+            Arc::new(move || sampled.lock().expect("platform fixture").clone()),
+        );
+
+        // No database is installed, as on recovery/fatal surfaces where the
+        // ordinary snapshot queries are disabled; the boundary still follows
+        // the platform sample through the `None` fallback.
+        assert!(services.database().await.is_err());
+        events.0.lock().expect("event sink lock").clear();
+        services.reconcile_authoritative_language().await;
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::System,
+                effective_locale: AppLocale::ZhCn,
+            }
+        );
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 1);
+
+        // A later platform change still reconciles without a database.
+        *platform.lock().expect("platform fixture") = Some("en-US".to_owned());
+        services.reconcile_authoritative_language().await;
+        assert_eq!(
+            runtime.bootstrap_snapshot().language,
+            LanguageSnapshotDto {
+                preference: LanguagePreference::System,
+                effective_locale: AppLocale::En,
+            }
+        );
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 2);
+
+        // An unchanged pair publishes nothing.
+        services.reconcile_authoritative_language().await;
+        assert_eq!(events.0.lock().expect("event sink lock").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn installed_database_read_failure_keeps_the_committed_language_pair() {
+        for (preference, platform_tag, expected_locale) in [
+            (LanguagePreference::En, "zh-Hans-CN", AppLocale::En),
+            (LanguagePreference::ZhCn, "en-US", AppLocale::ZhCn),
+        ] {
+            let directory = TempDir::new().expect("app data fixture");
+            let events = Arc::new(RecordingEventSink::default());
+            let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+            let platform = Arc::new(std::sync::Mutex::new(Some(platform_tag.to_owned())));
+            let sampled = Arc::clone(&platform);
+            let services = DesktopLifecycleServices::new_with_platform_locale_sampler(
+                directory.path().to_path_buf(),
+                directory.path(),
+                DesktopRuntimeProfile::Isolated,
+                Arc::clone(&runtime),
+                Arc::new(NoopDiagnosticSink),
+                Arc::new(move || sampled.lock().expect("platform fixture").clone()),
+            );
+            services
+                .initialize_database()
+                .await
+                .expect("initialize database");
+            services
+                .update_language_preference(preference)
+                .await
+                .expect("explicit preference");
+            events.0.lock().expect("event sink lock").clear();
+
+            let expected = LanguageSnapshotDto {
+                preference,
+                effective_locale: expected_locale,
+            };
+            assert_eq!(runtime.bootstrap_snapshot().language, expected);
+
+            // The installed database fails once to return its settings; the
+            // platform sample meanwhile resolves the OTHER language, so a
+            // fabricated System fallback would be visible immediately.
+            let database = services.database().await.expect("database");
+            services.fail_next_language_preference_read();
+            services
+                .reconcile_language_projection(Some(&database))
+                .await;
+            assert_eq!(runtime.bootstrap_snapshot().language, expected);
+            assert!(
+                events.0.lock().expect("event sink lock").is_empty(),
+                "a failed settings read must not publish a language event"
+            );
+
+            // A later readable read still projects the durable preference and
+            // remains a no-op for the already committed pair.
+            services
+                .reconcile_language_projection(Some(&database))
+                .await;
+            assert_eq!(runtime.bootstrap_snapshot().language, expected);
+            assert!(events.0.lock().expect("event sink lock").is_empty());
+
+            services.close_database().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_language_writers_serialize_to_a_consistent_pair() {
+        let directory = TempDir::new().expect("app data fixture");
+        let events = Arc::new(RecordingEventSink::default());
+        let runtime = Arc::new(AppRuntimeState::new(events.clone()));
+        let services = DesktopLifecycleServices::new_with_platform_locale_sampler(
+            directory.path().to_path_buf(),
+            directory.path(),
+            DesktopRuntimeProfile::Isolated,
+            Arc::clone(&runtime),
+            Arc::new(NoopDiagnosticSink),
+            Arc::new(|| None),
+        );
+        services
+            .initialize_database()
+            .await
+            .expect("initialize database");
+
+        let (first, second) = tokio::join!(
+            services.update_language_preference(LanguagePreference::ZhCn),
+            services.update_language_preference(LanguagePreference::En),
+        );
+        first.expect("writer zh-CN");
+        second.expect("writer en");
+        let durable = services
+            .database()
+            .await
+            .expect("database")
+            .app_settings()
+            .await
+            .expect("settings")
+            .language_preference;
+        let projected = runtime.bootstrap_snapshot().language;
+        assert_eq!(projected.preference, durable);
+        assert_eq!(
+            projected.effective_locale,
+            durable.resolve(AppLocale::from_platform_tag(None))
+        );
 
         services.close_database().await;
     }

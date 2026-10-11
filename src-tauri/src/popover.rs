@@ -17,10 +17,10 @@ use tauri_nspanel::{
     WebviewWindowExt as _, panel::NSAutoresizingMaskOptions, tauri_panel,
 };
 
-use crate::runtime::DesktopLifecycleServices;
+use crate::runtime::{DesktopLifecycleServices, reconcile_language_for_activation};
 use router_core::{
     balance::{BalanceDisplaySnapshot, BalanceDisplayStatus, BalanceResult},
-    domain::ProxyRuntimeStatus,
+    domain::{AppLocale, ProxyRuntimeStatus},
     proxy::LogicalRequestActivityPhase,
     state::BootstrapSnapshotDto,
 };
@@ -43,6 +43,125 @@ const TRAY_ROUTE_NAME_PREFIX_GRAPHEMES: usize = 6;
 const TRAY_ROUTE_NAME_SUFFIX_GRAPHEMES: usize =
     TRAY_ROUTE_NAME_GRAPHEMES - TRAY_ROUTE_NAME_PREFIX_GRAPHEMES - 1;
 const TRAY_BALANCE_GRAPHEMES: usize = 16;
+
+/// App-owned native strings for tray tooltip/status composition, resolved
+/// from the committed effective locale. Route names, balance amounts and QA
+/// identity pass through unchanged.
+pub(crate) struct NativeText {
+    pub(crate) starting: &'static str,
+    pub(crate) settings_title_suffix: &'static str,
+    pub(crate) no_route: &'static str,
+    pub(crate) balance_available: &'static str,
+    pub(crate) balance_unavailable: &'static str,
+    pub(crate) balance_refreshing: &'static str,
+    pub(crate) balance_refreshing_with_amount: fn(&str) -> String,
+    pub(crate) balance_fresh_with_amount: fn(&str) -> String,
+    pub(crate) balance_stale_with_amount: fn(&str) -> String,
+    pub(crate) balance_last_good_with_amount: fn(&str) -> String,
+    pub(crate) balance_failed: &'static str,
+    pub(crate) status_proxy_failure: &'static str,
+    pub(crate) status_working: &'static str,
+    pub(crate) status_waiting: &'static str,
+    pub(crate) status_ok: &'static str,
+    pub(crate) status_attention: &'static str,
+}
+
+const ZH_CN_NATIVE_TEXT: NativeText = NativeText {
+    starting: "正在启动",
+    settings_title_suffix: "设置",
+    no_route: "无中转",
+    balance_available: "余额可用",
+    balance_unavailable: "尚无余额",
+    balance_refreshing: "正在刷新余额",
+    balance_refreshing_with_amount: |amount| format!("余额 {amount}，正在刷新"),
+    balance_fresh_with_amount: |amount| format!("余额 {amount}"),
+    balance_stale_with_amount: |amount| format!("余额 {amount}，已过期"),
+    balance_last_good_with_amount: |amount| format!("上次余额 {amount}"),
+    balance_failed: "余额查询失败",
+    status_proxy_failure: "代理故障",
+    status_working: "处理中",
+    status_waiting: "等待工具继续",
+    status_ok: "正常",
+    status_attention: "需要处理",
+};
+
+const EN_NATIVE_TEXT: NativeText = NativeText {
+    starting: "starting",
+    settings_title_suffix: "Settings",
+    no_route: "No route",
+    balance_available: "Balance available",
+    balance_unavailable: "No balance yet",
+    balance_refreshing: "Refreshing balance",
+    balance_refreshing_with_amount: |amount| format!("Balance {amount}, refreshing"),
+    balance_fresh_with_amount: |amount| format!("Balance {amount}"),
+    balance_stale_with_amount: |amount| format!("Balance {amount}, stale"),
+    balance_last_good_with_amount: |amount| format!("Last balance {amount}"),
+    balance_failed: "Balance query failed",
+    status_proxy_failure: "Proxy error",
+    status_working: "Working",
+    status_waiting: "Waiting for tool",
+    status_ok: "OK",
+    status_attention: "Action needed",
+};
+
+#[must_use]
+pub(crate) fn native_text(locale: AppLocale) -> &'static NativeText {
+    match locale {
+        AppLocale::ZhCn => &ZH_CN_NATIVE_TEXT,
+        AppLocale::En => &EN_NATIVE_TEXT,
+    }
+}
+
+/// Samples the platform language before any durable projection exists; the
+/// committed pair replaces it once `initialize_database` reconciles.
+pub(crate) fn startup_locale_sample() -> AppLocale {
+    #[cfg(target_os = "macos")]
+    let tag = platform_locale::preferred_language_tag();
+    #[cfg(not(target_os = "macos"))]
+    let tag = None;
+    AppLocale::from_platform_tag(tag.as_deref())
+}
+
+/// Startup tooltip text in the sampled platform language; the first committed
+/// tray projection replaces it.
+#[must_use]
+pub(crate) fn startup_tooltip(app_name: &str) -> String {
+    format!(
+        "{app_name} {}",
+        native_text(startup_locale_sample()).starting
+    )
+}
+
+/// Locale of the last native title application, so activity-driven tray
+/// refreshes do not re-issue an identical window title.
+static APPLIED_NATIVE_LOCALE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(u8::MAX);
+
+/// Applies app-owned native text outside the tray projection: the settings
+/// window title follows the effective locale.
+pub(crate) fn apply_native_language(app: &AppHandle, locale: AppLocale) {
+    let encoded = match locale {
+        AppLocale::ZhCn => 0_u8,
+        AppLocale::En => 1_u8,
+    };
+    if APPLIED_NATIVE_LOCALE.swap(encoded, std::sync::atomic::Ordering::AcqRel) == encoded {
+        return;
+    }
+    let Some(window) = app.get_webview_window("settings") else {
+        return;
+    };
+    let title = format!(
+        "{} {}",
+        app.package_info().name,
+        native_text(locale).settings_title_suffix
+    );
+    let _ = window.set_title(&title);
+}
+
+/// Applies startup native text from the platform-language sample.
+pub(crate) fn apply_startup_native_language(app: &AppHandle) {
+    apply_native_language(app, startup_locale_sample());
+}
 
 #[cfg(target_os = "macos")]
 tauri_panel! {
@@ -483,21 +602,25 @@ pub(crate) fn tray_presentation(
     });
     let balance = active_route
         .and_then(|route| balance.filter(|candidate| candidate.route_id == route.route_id));
-    let route_name = active_route.map_or("无中转", |route| route.name.as_str());
+    let text = native_text(snapshot.language.effective_locale);
+    let route_name = active_route.map_or(text.no_route, |route| route.name.as_str());
     let amount = balance
         .and_then(|snapshot| snapshot.value.as_ref())
-        .map_or_else(|| "--".to_owned(), compact_balance_value);
+        .map_or_else(
+            || "--".to_owned(),
+            |value| compact_balance_value(value, text),
+        );
     let compact_name = compact_route_name(route_name);
     let title = with_qa_prefix(&format!("{compact_name}({amount})"), isolated);
     let visual_state = tray_visual_state(activity_phase);
-    let state_label = tray_status_label(snapshot, activity_phase);
+    let state_label = tray_status_label(snapshot, activity_phase, text);
     let tooltip = active_route.map_or_else(
-        || format!("{app_name} {state_label} · 无中转"),
+        || format!("{app_name} {state_label} · {}", text.no_route),
         |route| {
             format!(
                 "{app_name} {state_label} · {} · {}",
                 route.name,
-                balance_tooltip_detail(balance)
+                balance_tooltip_detail(balance, text)
             )
         },
     );
@@ -542,9 +665,9 @@ fn compact_route_name(name: &str) -> String {
     format!("{prefix}…{suffix}")
 }
 
-fn format_balance_value(value: &BalanceResult) -> String {
+fn format_balance_value(value: &BalanceResult, text: &NativeText) -> String {
     let Some(remaining) = value.remaining else {
-        return "余额可用".to_owned();
+        return text.balance_available.to_owned();
     };
     let unit = value.unit.as_deref().unwrap_or("");
     match unit {
@@ -555,8 +678,8 @@ fn format_balance_value(value: &BalanceResult) -> String {
     }
 }
 
-fn compact_balance_value(value: &BalanceResult) -> String {
-    let amount = format_balance_value(value);
+fn compact_balance_value(value: &BalanceResult, text: &NativeText) -> String {
+    let amount = format_balance_value(value, text);
     let graphemes = UnicodeSegmentation::graphemes(amount.as_str(), true).collect::<Vec<_>>();
     if graphemes.len() <= TRAY_BALANCE_GRAPHEMES {
         return amount;
@@ -564,29 +687,33 @@ fn compact_balance_value(value: &BalanceResult) -> String {
     format!("{}…", graphemes[..TRAY_BALANCE_GRAPHEMES - 1].concat())
 }
 
-fn balance_tooltip_detail(balance: Option<&BalanceDisplaySnapshot>) -> String {
+fn balance_tooltip_detail(balance: Option<&BalanceDisplaySnapshot>, text: &NativeText) -> String {
     let Some(balance) = balance else {
-        return "尚无余额".to_owned();
+        return text.balance_unavailable.to_owned();
     };
-    let amount = balance.value.as_ref().map(format_balance_value);
+    let amount = balance
+        .value
+        .as_ref()
+        .map(|value| format_balance_value(value, text));
     match balance.status {
-        BalanceDisplayStatus::Unavailable => "尚无余额".to_owned(),
+        BalanceDisplayStatus::Unavailable => text.balance_unavailable.to_owned(),
         BalanceDisplayStatus::Refreshing => amount.map_or_else(
-            || "正在刷新余额".to_owned(),
-            |amount| format!("余额 {amount}，正在刷新"),
+            || text.balance_refreshing.to_owned(),
+            |amount| (text.balance_refreshing_with_amount)(&amount),
         ),
-        BalanceDisplayStatus::Fresh => {
-            amount.map_or_else(|| "尚无余额".to_owned(), |amount| format!("余额 {amount}"))
-        }
+        BalanceDisplayStatus::Fresh => amount.map_or_else(
+            || text.balance_unavailable.to_owned(),
+            |amount| (text.balance_fresh_with_amount)(&amount),
+        ),
         BalanceDisplayStatus::Stale => amount.map_or_else(
-            || "尚无余额".to_owned(),
-            |amount| format!("余额 {amount}，已过期"),
+            || text.balance_unavailable.to_owned(),
+            |amount| (text.balance_stale_with_amount)(&amount),
         ),
         BalanceDisplayStatus::LastGood => amount.map_or_else(
-            || "尚无余额".to_owned(),
-            |amount| format!("上次余额 {amount}"),
+            || text.balance_unavailable.to_owned(),
+            |amount| (text.balance_last_good_with_amount)(&amount),
         ),
-        BalanceDisplayStatus::Failed => "余额查询失败".to_owned(),
+        BalanceDisplayStatus::Failed => text.balance_failed.to_owned(),
     }
 }
 
@@ -601,22 +728,23 @@ fn tray_visual_state(activity_phase: LogicalRequestActivityPhase) -> TrayVisualS
 fn tray_status_label(
     snapshot: &BootstrapSnapshotDto,
     activity_phase: LogicalRequestActivityPhase,
+    text: &NativeText,
 ) -> &'static str {
     match snapshot.proxy_status {
         ProxyRuntimeStatus::PortConflict
         | ProxyRuntimeStatus::Error
-        | ProxyRuntimeStatus::DatabaseError => "代理故障",
+        | ProxyRuntimeStatus::DatabaseError => text.status_proxy_failure,
         ProxyRuntimeStatus::Running if activity_phase == LogicalRequestActivityPhase::Live => {
-            "处理中"
+            text.status_working
         }
         ProxyRuntimeStatus::Running if activity_phase == LogicalRequestActivityPhase::Waiting => {
-            "等待工具继续"
+            text.status_waiting
         }
-        ProxyRuntimeStatus::Running if snapshot.active_route_id.is_some() => "正常",
+        ProxyRuntimeStatus::Running if snapshot.active_route_id.is_some() => text.status_ok,
         ProxyRuntimeStatus::Running
         | ProxyRuntimeStatus::Starting
         | ProxyRuntimeStatus::Stopped
-        | ProxyRuntimeStatus::ShuttingDown => "需要处理",
+        | ProxyRuntimeStatus::ShuttingDown => text.status_attention,
     }
 }
 
@@ -1290,6 +1418,7 @@ async fn show_menu_panel(
     controller: Arc<MenuPopoverController>,
     generation: u64,
 ) -> Result<bool, router_core::state::IpcErrorDto> {
+    reconcile_language_for_activation(app);
     let panel = app
         .get_webview_panel(MENU_LABEL)
         .map_err(|_| shell_error("menu_show_failed", "菜单无法显示。", true))?;
@@ -1322,6 +1451,7 @@ async fn show_menu_panel(
     controller: Arc<MenuPopoverController>,
     generation: u64,
 ) -> Result<bool, router_core::state::IpcErrorDto> {
+    reconcile_language_for_activation(app);
     if !controller.is_current_show(generation) {
         return Ok(false);
     }
@@ -1406,7 +1536,15 @@ mod tests {
             proxy_status,
             lifecycle: router_core::lifecycle::AppLifecycleSnapshot::default(),
             appearance_preference: router_core::domain::AppearancePreference::System,
+            language: router_core::state::LanguageSnapshotDto {
+                preference: router_core::domain::LanguagePreference::System,
+                effective_locale: router_core::domain::AppLocale::ZhCn,
+            },
         }
+    }
+
+    fn zh_text() -> &'static NativeText {
+        native_text(router_core::domain::AppLocale::ZhCn)
     }
 
     fn tray_balance(
@@ -2028,6 +2166,10 @@ mod tests {
             proxy_status,
             lifecycle: router_core::lifecycle::AppLifecycleSnapshot::default(),
             appearance_preference: router_core::domain::AppearancePreference::System,
+            language: router_core::state::LanguageSnapshotDto {
+                preference: router_core::domain::LanguagePreference::System,
+                effective_locale: router_core::domain::AppLocale::En,
+            },
         };
         for state in [
             snapshot(ProxyRuntimeStatus::Running, Some(RouteId::new())),
@@ -2047,7 +2189,7 @@ mod tests {
                 TrayVisualState::Waiting
             );
             assert_ne!(
-                tray_status_label(&state, LogicalRequestActivityPhase::Idle),
+                tray_status_label(&state, LogicalRequestActivityPhase::Idle, zh_text()),
                 "处理中"
             );
         }
@@ -2055,6 +2197,7 @@ mod tests {
             tray_status_label(
                 &snapshot(ProxyRuntimeStatus::Running, Some(RouteId::new())),
                 LogicalRequestActivityPhase::Live,
+                zh_text(),
             ),
             "处理中"
         );
@@ -2062,6 +2205,7 @@ mod tests {
             tray_status_label(
                 &snapshot(ProxyRuntimeStatus::Running, Some(RouteId::new())),
                 LogicalRequestActivityPhase::Waiting,
+                zh_text(),
             ),
             "等待工具继续"
         );
@@ -2069,6 +2213,7 @@ mod tests {
             tray_status_label(
                 &snapshot(ProxyRuntimeStatus::PortConflict, None),
                 LogicalRequestActivityPhase::Waiting,
+                zh_text(),
             ),
             "代理故障"
         );
@@ -2130,6 +2275,22 @@ mod tests {
                 .contains("等待工具继续 · INPUT · 余额 $24.80")
         );
         assert_eq!(waiting.visual_state, TrayVisualState::Waiting);
+
+        let mut english = snapshot.clone();
+        english.language.effective_locale = router_core::domain::AppLocale::En;
+        let english_waiting = tray_presentation(
+            "AI Router",
+            &english,
+            Some(&balance),
+            false,
+            LogicalRequestActivityPhase::Waiting,
+        );
+        assert_eq!(english_waiting.title, "INPUT($24.80)");
+        assert!(
+            english_waiting
+                .tooltip
+                .contains("Waiting for tool · INPUT · Balance $24.80")
+        );
     }
 
     #[test]
@@ -2291,13 +2452,16 @@ mod tests {
             ..normal.clone()
         };
 
-        assert_eq!(compact_balance_value(&normal), "$24.80");
+        assert_eq!(compact_balance_value(&normal, zh_text()), "$24.80");
         assert_eq!(
-            UnicodeSegmentation::graphemes(compact_balance_value(&oversized).as_str(), true)
-                .count(),
+            UnicodeSegmentation::graphemes(
+                compact_balance_value(&oversized, zh_text()).as_str(),
+                true
+            )
+            .count(),
             TRAY_BALANCE_GRAPHEMES
         );
-        assert!(compact_balance_value(&oversized).ends_with('…'));
+        assert!(compact_balance_value(&oversized, zh_text()).ends_with('…'));
 
         let route_id = RouteId::new();
         let snapshot = tray_snapshot(
@@ -2325,7 +2489,7 @@ mod tests {
         assert!(
             presentation
                 .tooltip
-                .contains(&format_balance_value(&oversized))
+                .contains(&format_balance_value(&oversized, zh_text()))
         );
     }
 

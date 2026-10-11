@@ -1,0 +1,21 @@
+[package]
+name = "platform-locale"
+version.workspace = true
+authors.workspace = true
+description = "Safe macOS preferred-language sampling for AI Router."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Deliberate, reviewed exception: this crate does not opt into
+# `[lints] workspace = true`, because the workspace sets
+# `unsafe_code = "forbid"` while `core-foundation` 0.9 provides no safe
+# wrapper for `CFLocaleCopyPreferredLanguages`. All `unsafe` in this crate
+# is confined to the reviewed FFI boundary in `src/lib.rs` (~10 lines with
+# documented Copy ownership, null handling, and RAII release). The backend
+# quality spec records this exception; do not add further unsafe code here.
+[dependencies]
+core-foundation = "0.9"

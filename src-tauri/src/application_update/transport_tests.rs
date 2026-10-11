@@ -286,3 +286,97 @@ async fn plugin_guards_loopback_metadata_and_cached_package_redirects() {
         1
     );
 }
+
+fn metadata_with_notes(signature: &str, download_url: &Url, notes: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "version": VERSION,
+        "notes": notes,
+        "platforms": {
+            "darwin-aarch64": {
+                "url": download_url,
+                "signature": signature
+            }
+        }
+    }))
+    .expect("metadata with notes")
+}
+
+/// Runs the real plugin check against one loopback metadata fixture whose
+/// `notes` field carries `notes`, then applies the app's own normalization.
+/// The QA archive URL is never contacted: normalization only classifies it.
+async fn normalized_loopback_release(
+    notes: &str,
+) -> Result<NormalizedRelease, ApplicationUpdateFailureDto> {
+    let (public_key, signature) = signing_fixture();
+    let transport = OutboundProxyTransport::default();
+    transport.set_system_settings(Ok(SystemProxySettings {
+        automatic_enabled: true,
+        ..SystemProxySettings::default()
+    }));
+    let slot = Arc::new(ArcSwap::from_pointee(transport.policy()));
+    let archive = Url::parse("http://127.0.0.1:4100/AI.Router.app.tar.gz").expect("QA archive URL");
+    let (endpoint, _metadata_requests) = server(vec![ok_response(&metadata_with_notes(
+        &signature, &archive, notes,
+    ))])
+    .await;
+    prepare_update_policy(&transport, &slot, std::slice::from_ref(&endpoint))
+        .expect("loopback metadata");
+    let (_app, updater) = updater(Arc::clone(&slot), endpoint, &public_key);
+    let update = updater
+        .check()
+        .await
+        .expect("loopback check")
+        .expect("available update");
+    normalize_release(&update, true)
+}
+
+#[tokio::test]
+async fn loopback_metadata_notes_project_typed_groups_and_fail_closed() {
+    let structured = normalized_loopback_release(
+        "# AI Router release v99.0.0\n\n## Highlights\n\n- One improvement\n- Another improvement\n\n## Fixes\n\n- One correction\n\n## Notices\n\n- No configuration migration",
+    )
+    .await
+    .expect("structured loopback notes");
+    let NormalizedRelease::Available(release) = structured else {
+        panic!("loopback version must classify as available");
+    };
+    assert_eq!(
+        release.notes,
+        Some(ApplicationUpdateNotesDto {
+            highlights: vec![
+                "One improvement".to_owned(),
+                "Another improvement".to_owned()
+            ],
+            fixes: vec!["One correction".to_owned()],
+            notices: vec!["No configuration migration".to_owned()],
+        })
+    );
+    assert!(release.legacy_notes.is_none());
+    assert_eq!(release.version, VERSION);
+    assert!(release.release_url.ends_with("/releases/tag/v99.0.0"));
+
+    // A recognized authoring discriminator with an unrunnable body must fail
+    // metadata validation instead of degrading to bounded text.
+    let malformed = normalized_loopback_release(
+        "# AI Router release v99.0.0\n\n## Highlights\n\nplain paragraph",
+    )
+    .await;
+    match malformed {
+        Err(failure) => assert_eq!(failure.code, "update_metadata_invalid"),
+        Ok(_) => panic!("recognized but malformed body must fail metadata validation"),
+    }
+
+    // Bounded upstream text without the authoring discriminator keeps the
+    // legacy path and never becomes typed groups.
+    let legacy = normalized_loopback_release("Synthetic upstream notes")
+        .await
+        .expect("legacy loopback notes");
+    let NormalizedRelease::Available(release) = legacy else {
+        panic!("loopback version must classify as available");
+    };
+    assert!(release.notes.is_none());
+    assert_eq!(
+        release.legacy_notes.as_deref(),
+        Some("Synthetic upstream notes")
+    );
+}
