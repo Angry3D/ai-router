@@ -2,8 +2,9 @@
 import type { AppLifecycleSnapshot } from "./AppLifecycleSnapshot";
 import type { AppearancePreference } from "./AppearancePreference";
 import type { FallbackStateDto } from "./FallbackStateDto";
+import type { LanguageSnapshotDto } from "./LanguageSnapshotDto";
 import type { ProxyRuntimeStatus } from "./ProxyRuntimeStatus";
 import type { RouteId } from "./RouteId";
 import type { RouteSummaryDto } from "./RouteSummaryDto";
 
-export type BootstrapSnapshotDto = { revision: number, routes: Array<RouteSummaryDto>, activeRouteId: RouteId | null, fallback: FallbackStateDto, proxyStatus: ProxyRuntimeStatus, lifecycle: AppLifecycleSnapshot, appearancePreference: AppearancePreference, };
+export type BootstrapSnapshotDto = { revision: number, routes: Array<RouteSummaryDto>, activeRouteId: RouteId | null, fallback: FallbackStateDto, proxyStatus: ProxyRuntimeStatus, lifecycle: AppLifecycleSnapshot, appearancePreference: AppearancePreference, language: LanguageSnapshotDto, };

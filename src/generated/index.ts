@@ -1,6 +1,7 @@
 export type { AppLifecycleIssue } from "./AppLifecycleIssue";
 export type { AppLifecyclePhase } from "./AppLifecyclePhase";
 export type { AppLifecycleSnapshot } from "./AppLifecycleSnapshot";
+export type { AppLocale } from "./AppLocale";
 export type { AppearancePreference } from "./AppearancePreference";
 export type { ApplicationUpdateFailureDto } from "./ApplicationUpdateFailureDto";
 export type { ApplicationUpdateNotesDto } from "./ApplicationUpdateNotesDto";
@@ -48,6 +49,8 @@ export type { InferenceOutcome } from "./InferenceOutcome";
 export type { InferenceStatus } from "./InferenceStatus";
 export type { InferenceStatusKind } from "./InferenceStatusKind";
 export type { IpcErrorDto } from "./IpcErrorDto";
+export type { LanguagePreference } from "./LanguagePreference";
+export type { LanguageSnapshotDto } from "./LanguageSnapshotDto";
 export type { McpImageCapacityDto } from "./McpImageCapacityDto";
 export type { MenuBarSettingsDto } from "./MenuBarSettingsDto";
 export type { MenuSnapshotDto } from "./MenuSnapshotDto";
