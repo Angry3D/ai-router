@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { appVariantForMode, appVersionLabel } from "./appVariant";
+import { appVariantForMode } from "./appVariant";
 
 describe("appVariantForMode", () => {
   it.each(["production", "test", "development"])(
@@ -20,10 +20,5 @@ describe("appVariantForMode", () => {
       displayName: "AI Router QA",
       badge: "QA",
     });
-  });
-
-  it("adds the QA designation to the shared version label", () => {
-    expect(appVersionLabel("0.1.1", appVariantForMode("production"))).toBe("版本 0.1.1");
-    expect(appVersionLabel("0.1.1", appVariantForMode("qa"))).toBe("版本 0.1.1 · QA");
   });
 });

@@ -1,5 +1,5 @@
 import { FolderOpen, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -15,14 +15,24 @@ import {
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
 import { useAppearance } from "../appearance/useAppearance";
-import type { AppearancePreference } from "../../generated";
+import {
+  ipcErrorMessage,
+  languageSyncIncompleteCode,
+  useLanguage,
+} from "../language/useLanguage";
+import type { SystemRecoveryMessages } from "../language/catalog/systemRecovery";
+import type {
+  AppearancePreference,
+  AppLocale,
+  IpcErrorDto,
+  LanguagePreference,
+} from "../../generated";
 import type {
   ApplicationUpdateSnapshotDto,
   BalanceQuerySettingsDto,
   MenuBarSettingsDto,
   OutboundProxySettingsDto,
   RecoveryHealthKind,
-  RecoveryIncidentAction,
   RecoveryIncidentDto,
   SettingsSnapshotDto,
 } from "../../generated";
@@ -43,34 +53,23 @@ import {
   type SettingsTone,
 } from "./SettingsPrimitives";
 
-const recoveryHealthPresentation: Record<
-  RecoveryHealthKind,
-  { label: string; tone: SettingsTone }
-> = {
-  protected: { label: "已保护", tone: "success" },
-  updating: { label: "正在更新", tone: "neutral" },
-  degraded: { label: "保护已降级", tone: "danger" },
-};
-
-const recoveryFlowIncident = (detectedAt: string) =>
-  `检测到数据库损坏，已于 ${detectedAt} 进入恢复流程`;
-
-const recoveryIncidentMessages: Record<
-  RecoveryIncidentAction,
-  (detectedAt: string) => string
-> = {
-  repaired: (detectedAt) => `检测到数据库索引损坏，已于 ${detectedAt} 自动修复`,
-  // `quarantined` belongs to the recovery flow that isolates the unusable
-  // primary; incidents written by older versions still carry it.
-  quarantined: recoveryFlowIncident,
-  recovery_required: recoveryFlowIncident,
-  start_over: (detectedAt) => `数据库已重新开始，时间 ${detectedAt}`,
-};
-
-function recoveryIncidentSummary(incident: RecoveryIncidentDto) {
-  return recoveryIncidentMessages[incident.action](
-    formatDateTime(incident.detectedAtMs),
-  );
+function recoveryIncidentSummary(
+  incident: RecoveryIncidentDto,
+  messages: SystemRecoveryMessages,
+  locale: AppLocale,
+) {
+  const detectedAt = formatDateTime(incident.detectedAtMs, locale);
+  switch (incident.action) {
+    case "repaired":
+      return messages.incidentRepaired(detectedAt);
+    // `quarantined` belongs to the recovery flow that isolates the unusable
+    // primary; incidents written by older versions still carry it.
+    case "quarantined":
+    case "recovery_required":
+      return messages.incidentRecoveryFlow(detectedAt);
+    case "start_over":
+      return messages.incidentStartedOver(detectedAt);
+  }
 }
 
 export function SystemSettings({
@@ -80,8 +79,12 @@ export function SystemSettings({
   snapshot: SettingsSnapshotDto;
   applicationUpdate?: ApplicationUpdateSnapshotDto | null;
 }) {
+  const { messages } = useLanguage();
   return (
-    <SettingsPage title="系统" titleId="system-title">
+    <SettingsPage
+      title={messages.systemRecovery.pageTitle}
+      titleId="system-title"
+    >
       <AppearanceSettings />
       <MenuBarSettings snapshot={snapshot} />
       <OutboundProxySettings settings={snapshot.outboundProxy} />
@@ -97,32 +100,36 @@ type OutboundProxyTestState = "idle" | "pending" | "success" | "failure";
 
 const OUTBOUND_PROXY_URL_MAX_LENGTH = 2048;
 
-function validateOutboundProxyDraft(raw: string): string | null {
+function validateOutboundProxyDraft(
+  raw: string,
+  messages: SystemRecoveryMessages,
+): string | null {
   const value = raw.trim();
-  if (!value) return "请输入代理地址。";
+  if (!value) return messages.outboundProxyUrlRequired;
   if (
     new TextEncoder().encode(value).byteLength > OUTBOUND_PROXY_URL_MAX_LENGTH
   )
-    return "代理地址过长。";
+    return messages.outboundProxyUrlTooLong;
   if (
     Array.from(value).some((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
       return codePoint <= 31 || (codePoint >= 127 && codePoint <= 159);
     })
   )
-    return "代理地址不能包含控制字符。";
+    return messages.outboundProxyUrlControlCharacter;
 
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    return "请输入有效的代理地址。";
+    return messages.outboundProxyUrlInvalid;
   }
   if (!["http:", "https:", "socks5:", "socks5h:"].includes(parsed.protocol))
-    return "支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H 代理。";
+    return messages.outboundProxyUrlUnsupportedScheme;
   if (parsed.username || parsed.password)
-    return "代理地址不能包含用户名或密码。";
-  if (parsed.search || parsed.hash) return "代理地址不能包含查询参数或片段。";
+    return messages.outboundProxyUrlCredentials;
+  if (parsed.search || parsed.hash)
+    return messages.outboundProxyUrlQueryOrFragment;
   return null;
 }
 
@@ -131,6 +138,8 @@ function OutboundProxySettings({
 }: {
   settings: OutboundProxySettingsDto;
 }) {
+  const { messages } = useLanguage();
+  const systemMessages = messages.systemRecovery;
   const queryClient = useQueryClient();
   const [confirmed, setConfirmed] = useState(settings);
   const [mode, setMode] = useState<OutboundProxyMode>(
@@ -141,11 +150,11 @@ function OutboundProxySettings({
     `${settings.enabled}:${settings.url ?? ""}`,
   );
   const [savePending, setSavePending] = useState(false);
-  const [fieldError, setFieldError] = useState<string | null>(null);
-  const [modeError, setModeError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<IpcErrorDto | null>(null);
+  const [modeError, setModeError] = useState<IpcErrorDto | null>(null);
   const [testState, setTestState] = useState<OutboundProxyTestState>("idle");
   const snapshotKey = `${settings.enabled}:${settings.url ?? ""}`;
-  const draftValidation = validateOutboundProxyDraft(draftUrl);
+  const draftValidation = validateOutboundProxyDraft(draftUrl, systemMessages);
   const pending = savePending || testState === "pending";
 
   if (!pending && syncedSnapshotKey !== snapshotKey) {
@@ -153,7 +162,7 @@ function OutboundProxySettings({
     setConfirmed(settings);
     setMode(settings.enabled ? "proxy" : "system");
     setDraftUrl(settings.url ?? "");
-    setFieldError(null);
+    setSaveError(null);
     setModeError(null);
     setTestState("idle");
   }
@@ -165,7 +174,7 @@ function OutboundProxySettings({
   async function selectMode(nextMode: OutboundProxyMode) {
     if (pending || nextMode === mode) return;
     setMode(nextMode);
-    setFieldError(null);
+    setSaveError(null);
     setModeError(null);
     setTestState("idle");
 
@@ -184,7 +193,7 @@ function OutboundProxySettings({
       await refreshSettings();
     } catch (reason) {
       setMode(confirmed.enabled ? "proxy" : "system");
-      setModeError(normalizeIpcError(reason).message);
+      setModeError(normalizeIpcError(reason));
     } finally {
       setSavePending(false);
     }
@@ -193,20 +202,19 @@ function OutboundProxySettings({
   async function saveDraft() {
     if (pending || mode !== "proxy") return;
     const value = draftUrl.trim();
-    const validation = validateOutboundProxyDraft(value);
-    if (validation) {
-      setFieldError(validation);
+    if (validateOutboundProxyDraft(value, systemMessages)) {
+      setSaveError(null);
       return;
     }
     if (confirmed.enabled && confirmed.url === value) {
       setDraftUrl(value);
-      setFieldError(null);
+      setSaveError(null);
       return;
     }
 
     const next: OutboundProxySettingsDto = { enabled: true, url: value };
     setSavePending(true);
-    setFieldError(null);
+    setSaveError(null);
     setModeError(null);
     setTestState("idle");
     try {
@@ -215,7 +223,7 @@ function OutboundProxySettings({
       setDraftUrl(value);
       await refreshSettings();
     } catch (reason) {
-      setFieldError(normalizeIpcError(reason).message);
+      setSaveError(normalizeIpcError(reason));
     } finally {
       setSavePending(false);
     }
@@ -224,12 +232,11 @@ function OutboundProxySettings({
   async function runConnectionTest() {
     if (pending) return;
     const value = draftUrl.trim();
-    const validation = validateOutboundProxyDraft(value);
-    if (validation) {
-      setFieldError(validation);
+    if (validateOutboundProxyDraft(value, systemMessages)) {
+      setSaveError(null);
       return;
     }
-    setFieldError(null);
+    setSaveError(null);
     setModeError(null);
     setTestState("pending");
     try {
@@ -241,18 +248,21 @@ function OutboundProxySettings({
   }
 
   return (
-    <SettingsSection title="全局出站代理">
-      <SettingsFieldRow label="模式">
+    <SettingsSection title={systemMessages.outboundProxySectionTitle}>
+      <SettingsFieldRow label={systemMessages.outboundProxyModeLabel}>
         <div
           className="settings-segments outbound-proxy-mode"
           role="radiogroup"
-          aria-label="全局出站代理模式"
+          aria-label={systemMessages.outboundProxyModeAriaLabel}
           aria-busy={savePending}
         >
           {(
             [
-              { value: "system", label: "跟随系统" },
-              { value: "proxy", label: "自定义代理" },
+              {
+                value: "system",
+                label: systemMessages.outboundProxyModeSystem,
+              },
+              { value: "proxy", label: systemMessages.outboundProxyModeCustom },
             ] as const
           ).map((option) => (
             <label className="settings-segment-option" key={option.value}>
@@ -272,7 +282,7 @@ function OutboundProxySettings({
       </SettingsFieldRow>
       {mode === "proxy" ? (
         <SettingsFieldRow
-          label="代理地址"
+          label={systemMessages.outboundProxyUrlLabel}
           htmlFor="outbound-proxy-url"
           required
           className="outbound-proxy-url-row"
@@ -289,15 +299,15 @@ function OutboundProxySettings({
               value={draftUrl}
               disabled={pending}
               aria-required="true"
-              aria-invalid={fieldError !== null || draftValidation !== null}
+              aria-invalid={saveError !== null || draftValidation !== null}
               aria-describedby={
-                fieldError || draftValidation
+                saveError || draftValidation
                   ? "outbound-proxy-url-error"
                   : "outbound-proxy-help"
               }
               onChange={(event) => {
                 setDraftUrl(event.currentTarget.value);
-                setFieldError(null);
+                setSaveError(null);
                 setModeError(null);
                 setTestState("idle");
               }}
@@ -325,7 +335,7 @@ function OutboundProxySettings({
               data-outbound-proxy-no-blur-save="true"
               onClick={() => void runConnectionTest()}
             >
-              测试连接
+              {systemMessages.outboundProxyTestButton}
             </SettingsButton>
             <div
               className="outbound-proxy-test-status"
@@ -335,23 +345,29 @@ function OutboundProxySettings({
               {testState === "pending" ? (
                 <SettingsStatus>
                   <LoaderCircle aria-hidden="true" className="spin" size={14} />
-                  正在测试
+                  {systemMessages.outboundProxyTesting}
                 </SettingsStatus>
               ) : null}
               {testState === "success" ? (
-                <SettingsStatus tone="success">连接正常</SettingsStatus>
+                <SettingsStatus tone="success">
+                  {systemMessages.outboundProxyTestSuccess}
+                </SettingsStatus>
               ) : null}
               {testState === "failure" ? (
-                <SettingsStatus tone="danger">连接失败</SettingsStatus>
+                <SettingsStatus tone="danger">
+                  {systemMessages.outboundProxyTestFailure}
+                </SettingsStatus>
               ) : null}
             </div>
-            {fieldError || draftValidation ? (
+            {saveError || draftValidation ? (
               <p
                 id="outbound-proxy-url-error"
                 className="parameter-field-error outbound-proxy-field-error"
                 role="alert"
               >
-                {fieldError ?? draftValidation}
+                {saveError
+                  ? ipcErrorMessage(saveError, messages)
+                  : draftValidation}
               </p>
             ) : null}
           </div>
@@ -359,21 +375,23 @@ function OutboundProxySettings({
       ) : null}
       <p id="outbound-proxy-help" className="outbound-proxy-help">
         {mode === "proxy"
-          ? "外部请求（含图片下载和应用更新）使用此代理，本地回环地址始终直连。价格同步和会话获取仍跟随系统。"
-          : "跟随 macOS 的 HTTP、HTTPS、SOCKS 手动代理和绕过规则，未配置代理时直连。不执行 PAC/WPAD；仅有自动代理可用时需改用自定义代理。本地回环地址始终直连。"}
+          ? systemMessages.outboundProxyHelpProxy
+          : systemMessages.outboundProxyHelpSystem}
       </p>
       <p
         className="outbound-proxy-mode-error"
         role={modeError ? "alert" : undefined}
         aria-live="polite"
       >
-        {modeError ?? "\u00a0"}
+        {modeError ? ipcErrorMessage(modeError, messages) : "\u00a0"}
       </p>
     </SettingsSection>
   );
 }
 
 function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
+  const { messages } = useLanguage();
+  const systemMessages = messages.systemRecovery;
   const queryClient = useQueryClient();
   const [confirmed, setConfirmed] = useState<MenuBarSettingsDto>(
     snapshot.menuBar,
@@ -382,7 +400,7 @@ function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
   const snapshotKey = `${snapshot.menuBar.statusTextEnabled}:${snapshot.menuBar.activityAnimationEnabled}`;
   const [syncedSnapshotKey, setSyncedSnapshotKey] = useState(snapshotKey);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
 
   if (!pending && syncedSnapshotKey !== snapshotKey) {
     setSyncedSnapshotKey(snapshotKey);
@@ -400,17 +418,17 @@ function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
     } catch (reason) {
       setDraft(confirmed);
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setPending(false);
     }
   }
 
   return (
-    <SettingsSection title="菜单栏">
+    <SettingsSection title={systemMessages.menuBarSectionTitle}>
       <div className="menu-bar-settings-list" aria-busy={pending}>
         <SettingsSwitch
-          label="菜单栏状态文字"
+          label={systemMessages.menuBarStatusTextLabel}
           checked={draft.statusTextEnabled}
           disabled={pending}
           onChange={(event) =>
@@ -421,7 +439,7 @@ function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
           }
         />
         <SettingsSwitch
-          label="菜单栏活动动画"
+          label={systemMessages.menuBarActivityAnimationLabel}
           checked={draft.activityAnimationEnabled}
           disabled={pending}
           onChange={(event) =>
@@ -437,33 +455,58 @@ function MenuBarSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
         role={error ? "alert" : undefined}
         aria-live="polite"
       >
-        {error ?? "\u00a0"}
+        {error ? ipcErrorMessage(error, messages) : "\u00a0"}
       </p>
     </SettingsSection>
   );
 }
 
-const appearanceOptions: Array<{ value: AppearancePreference; label: string }> =
-  [
-    { value: "system", label: "跟随系统" },
-    { value: "light", label: "浅色" },
-    { value: "dark", label: "深色" },
-  ];
-
 function AppearanceSettings() {
   const { preference, pending, error, setPreference } = useAppearance();
+  const {
+    messages,
+    preference: languagePreference,
+    pending: languagePending,
+    error: languageError,
+    setPreference: setLanguagePreference,
+  } = useLanguage();
+  const systemMessages = messages.systemRecovery;
+  const themeOptions: Array<{ value: AppearancePreference; label: string }> = [
+    { value: "system", label: systemMessages.themeSystem },
+    { value: "light", label: systemMessages.themeLight },
+    { value: "dark", label: systemMessages.themeDark },
+  ];
+  // Autonyms stay stable so a user can recover from an unfamiliar language.
+  const languageOptions: Array<{
+    value: LanguagePreference;
+    label: string;
+    lang?: string;
+  }> = [
+    { value: "system", label: systemMessages.languageSystem },
+    { value: "zh-CN", label: "简体中文", lang: "zh-CN" },
+    { value: "en", label: "English", lang: "en" },
+  ];
+  const originatingOptionRef = useRef<HTMLInputElement | null>(null);
+  const wasLanguagePendingRef = useRef(false);
+  useEffect(() => {
+    if (wasLanguagePendingRef.current && !languagePending) {
+      originatingOptionRef.current?.focus();
+    }
+    wasLanguagePendingRef.current = languagePending;
+  }, [languagePending]);
+
   return (
-    <SettingsSection title="外观">
-      <SettingsFieldRow label="主题">
+    <SettingsSection title={systemMessages.appearanceSectionTitle}>
+      <SettingsFieldRow label={systemMessages.themeLabel}>
         <div className="appearance-field">
           <div
             className="settings-segments settings-segments-three"
             role="radiogroup"
-            aria-label="外观主题"
+            aria-label={systemMessages.themeLabel}
             aria-describedby={error ? "appearance-preference-error" : undefined}
             aria-busy={pending}
           >
-            {appearanceOptions.map((option) => (
+            {themeOptions.map((option) => (
               <label className="settings-segment-option" key={option.value}>
                 <input
                   type="radio"
@@ -487,11 +530,55 @@ function AppearanceSettings() {
           </p>
         </div>
       </SettingsFieldRow>
+      <SettingsFieldRow label={systemMessages.languageLabel}>
+        <div className="appearance-field">
+          <div
+            className="settings-segments settings-segments-three"
+            role="radiogroup"
+            aria-label={systemMessages.languageLabel}
+            aria-describedby={
+              languageError ? "language-preference-error" : undefined
+            }
+            aria-busy={languagePending}
+          >
+            {languageOptions.map((option) => (
+              <label className="settings-segment-option" key={option.value}>
+                <input
+                  type="radio"
+                  name="language-preference"
+                  value={option.value}
+                  checked={languagePreference === option.value}
+                  disabled={languagePending}
+                  onChange={(event) => {
+                    originatingOptionRef.current = event.currentTarget;
+                    void setLanguagePreference(option.value);
+                  }}
+                />
+                <span lang={option.lang}>{option.label}</span>
+              </label>
+            ))}
+          </div>
+          <p
+            id="language-preference-error"
+            className="appearance-field-error"
+            role={languageError ? "alert" : undefined}
+            aria-live="polite"
+          >
+            {languageError
+              ? languageError.code === languageSyncIncompleteCode
+                ? systemMessages.languageSyncIncomplete
+                : systemMessages.languageSaveFailed
+              : "\u00a0"}
+          </p>
+        </div>
+      </SettingsFieldRow>
     </SettingsSection>
   );
 }
 
 function ParameterSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
+  const { messages } = useLanguage();
+  const systemMessages = messages.systemRecovery;
   const queryClient = useQueryClient();
   const [baseline, setBaseline] = useState<BalanceQuerySettingsDto>(
     snapshot.balanceQuery,
@@ -503,10 +590,10 @@ function ParameterSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
     String(snapshot.balanceQuery.automaticRefreshMinutes),
   );
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
   const [saved, setSaved] = useState(false);
-  const menu = boundedInteger(menuDebounce, 10, 600);
-  const automatic = boundedInteger(automaticRefresh, 5, 1_440);
+  const menu = boundedInteger(menuDebounce, 10, 600, systemMessages);
+  const automatic = boundedInteger(automaticRefresh, 5, 1_440, systemMessages);
   const input =
     menu.value === null || automatic.value === null
       ? null
@@ -532,15 +619,18 @@ function ParameterSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
       setSaved(true);
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <SettingsSection title="余额查询">
-      <SettingsFieldRow label="菜单查询防抖" htmlFor="menu-balance-debounce">
+    <SettingsSection title={systemMessages.balanceQuerySectionTitle}>
+      <SettingsFieldRow
+        label={systemMessages.balanceMenuDebounceLabel}
+        htmlFor="menu-balance-debounce"
+      >
         <div className="parameter-field">
           <div className="parameter-input-control">
             <SettingsTextInput
@@ -562,7 +652,7 @@ function ParameterSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
                 setSaved(false);
               }}
             />
-            <span>秒</span>
+            <span>{systemMessages.secondsUnit}</span>
           </div>
           {menu.error ? (
             <p
@@ -576,7 +666,7 @@ function ParameterSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
         </div>
       </SettingsFieldRow>
       <SettingsFieldRow
-        label="自动查询间隔"
+        label={systemMessages.balanceAutomaticRefreshLabel}
         htmlFor="automatic-balance-refresh"
       >
         <div className="parameter-field">
@@ -600,7 +690,7 @@ function ParameterSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
                 setSaved(false);
               }}
             />
-            <span>分钟</span>
+            <span>{systemMessages.minutesUnit}</span>
           </div>
           {automatic.error ? (
             <p
@@ -623,12 +713,16 @@ function ParameterSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
           {busy ? (
             <LoaderCircle aria-hidden="true" className="spin" size={15} />
           ) : null}
-          应用
+          {systemMessages.applyButton}
         </SettingsButton>
-        {saved ? <SettingsStatus tone="success">已保存</SettingsStatus> : null}
+        {saved ? (
+          <SettingsStatus tone="success">
+            {systemMessages.savedStatus}
+          </SettingsStatus>
+        ) : null}
         {error ? (
           <span className="settings-error" role="alert">
-            {error}
+            {ipcErrorMessage(error, messages)}
           </span>
         ) : null}
       </SettingsActionGroup>
@@ -637,11 +731,13 @@ function ParameterSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
 }
 
 function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
+  const { messages, effectiveLocale } = useLanguage();
+  const systemMessages = messages.systemRecovery;
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
+  const [recoveryError, setRecoveryError] = useState<IpcErrorDto | null>(null);
   const [confirmation, setConfirmation] = useState<SettingsConfirmation | null>(
     null,
   );
@@ -652,15 +748,15 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
       await operation();
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setBusy(false);
     }
   };
   const historyConfirmation: SettingsConfirmation = {
-    title: "清除全部请求记录？",
-    body: "请求记录将被永久删除，路由状态会重置为“未验证”。",
-    confirmLabel: "清除记录",
+    title: systemMessages.clearHistoryConfirmTitle,
+    body: systemMessages.clearHistoryConfirmBody,
+    confirmLabel: systemMessages.clearHistoryConfirmLabel,
     destructive: true,
     onConfirm: () => {
       setConfirmation(null);
@@ -668,9 +764,9 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
     },
   };
   const logConfirmation: SettingsConfirmation = {
-    title: "清除运行日志？",
-    body: "现有日志将被清除，不影响代理运行。",
-    confirmLabel: "清除日志",
+    title: systemMessages.clearLogsConfirmTitle,
+    body: systemMessages.clearLogsConfirmBody,
+    confirmLabel: systemMessages.clearLogsConfirmLabel,
     destructive: true,
     onConfirm: () => {
       setConfirmation(null);
@@ -680,6 +776,23 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
   const failures =
     snapshot.metadataFailure.droppedRecords +
     snapshot.metadataFailure.writeFailures;
+  const recoveryHealthPresentation: Record<
+    RecoveryHealthKind,
+    { label: string; tone: SettingsTone }
+  > = {
+    protected: {
+      label: systemMessages.recoveryHealthProtected,
+      tone: "success",
+    },
+    updating: {
+      label: systemMessages.recoveryHealthUpdating,
+      tone: "neutral",
+    },
+    degraded: {
+      label: systemMessages.recoveryHealthDegraded,
+      tone: "danger",
+    },
+  };
   const recoveryPresentation =
     recoveryHealthPresentation[snapshot.recovery.kind];
   const createPoint = async () => {
@@ -694,7 +807,7 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
       );
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings });
     } catch (reason) {
-      setRecoveryError(normalizeIpcError(reason).message);
+      setRecoveryError(normalizeIpcError(reason));
     } finally {
       setRecoveryBusy(false);
     }
@@ -702,31 +815,36 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
   return (
     <>
       <SettingsSection
-        title="数据库恢复"
+        title={systemMessages.databaseRecoverySectionTitle}
         titleAccessory={
-          <SettingsHelpTooltip label="数据库恢复说明">
-            <span>
-              主数据库无法安全启动时，应用会进入独立恢复流程；仅检测到可用恢复点时才允许恢复。
-            </span>
+          <SettingsHelpTooltip label={systemMessages.databaseRecoveryHelpLabel}>
+            <span>{systemMessages.databaseRecoveryHelpBody}</span>
           </SettingsHelpTooltip>
         }
       >
-        <SettingsReadonlyRow label="恢复状态">
+        <SettingsReadonlyRow label={systemMessages.recoveryStatusLabel}>
           <SettingsStatus tone={recoveryPresentation.tone}>
             {recoveryPresentation.label}
           </SettingsStatus>
         </SettingsReadonlyRow>
-        <SettingsReadonlyRow label="最近恢复点">
+        <SettingsReadonlyRow label={systemMessages.latestRecoveryPointLabel}>
           {snapshot.recovery.latestSuccessAtMs === null
-            ? "尚无恢复点"
-            : formatDateTime(snapshot.recovery.latestSuccessAtMs)}
+            ? systemMessages.noRecoveryPoint
+            : formatDateTime(
+                snapshot.recovery.latestSuccessAtMs,
+                effectiveLocale,
+              )}
         </SettingsReadonlyRow>
-        <SettingsReadonlyRow label="有效恢复点">
-          {snapshot.recovery.validPointCount} 个
+        <SettingsReadonlyRow label={systemMessages.validRecoveryPointLabel}>
+          {systemMessages.recoveryPointCount(snapshot.recovery.validPointCount)}
         </SettingsReadonlyRow>
         {snapshot.recovery.lastIncident ? (
-          <SettingsReadonlyRow label="最近自动修复">
-            {recoveryIncidentSummary(snapshot.recovery.lastIncident)}
+          <SettingsReadonlyRow label={systemMessages.latestIncidentLabel}>
+            {recoveryIncidentSummary(
+              snapshot.recovery.lastIncident,
+              systemMessages,
+              effectiveLocale,
+            )}
           </SettingsReadonlyRow>
         ) : null}
         <SettingsButton
@@ -747,30 +865,32 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
               }
             />
           )}
-          {recoveryBusy ? "正在创建" : "创建恢复点"}
+          {recoveryBusy
+            ? systemMessages.creatingStatus
+            : systemMessages.createRecoveryPointButton}
         </SettingsButton>
         {recoveryError ? (
           <p className="settings-error" role="alert">
-            {recoveryError}
+            {ipcErrorMessage(recoveryError, messages)}
           </p>
         ) : null}
       </SettingsSection>
-      <SettingsSection title="请求记录">
-        <SettingsReadonlyRow label="记录数">
-          {snapshot.history.requestCount.toLocaleString()}
+      <SettingsSection title={systemMessages.requestHistorySectionTitle}>
+        <SettingsReadonlyRow label={systemMessages.recordCountLabel}>
+          {snapshot.history.requestCount.toLocaleString(effectiveLocale)}
         </SettingsReadonlyRow>
-        <SettingsReadonlyRow label="覆盖日期">
-          {coverageLabel(snapshot)}
+        <SettingsReadonlyRow label={systemMessages.coverageDateLabel}>
+          {coverageLabel(snapshot, systemMessages, effectiveLocale)}
         </SettingsReadonlyRow>
-        <SettingsReadonlyRow label="数据库占用">
+        <SettingsReadonlyRow label={systemMessages.databaseUsageLabel}>
           {formatBytes(snapshot.history.databaseBytes)}
         </SettingsReadonlyRow>
-        <SettingsReadonlyRow label="保留期限">
-          {snapshot.history.retentionDays} 天
+        <SettingsReadonlyRow label={systemMessages.retentionLabel}>
+          {systemMessages.retentionDays(snapshot.history.retentionDays)}
         </SettingsReadonlyRow>
         {failures > 0 ? (
           <p className="inline-warning" role="status">
-            本次运行有 {failures} 条请求元数据未记录，推理结果不受影响。
+            {systemMessages.metadataFailureWarning(failures)}
           </p>
         ) : null}
         <SettingsButton
@@ -779,10 +899,10 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
           disabled={busy}
           onClick={() => setConfirmation(historyConfirmation)}
         >
-          清除全部请求记录
+          {systemMessages.clearHistoryButton}
         </SettingsButton>
       </SettingsSection>
-      <SettingsSection title="运行日志">
+      <SettingsSection title={systemMessages.runtimeLogSectionTitle}>
         <SettingsActionGroup>
           <SettingsButton
             type="button"
@@ -790,7 +910,7 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
             onClick={() => void run(openRuntimeLogDirectory)}
           >
             <FolderOpen aria-hidden="true" size={16} />
-            打开日志目录
+            {systemMessages.openLogDirectoryButton}
           </SettingsButton>
           <SettingsButton
             variant="danger"
@@ -798,13 +918,13 @@ function DataLogSettings({ snapshot }: { snapshot: SettingsSnapshotDto }) {
             disabled={busy}
             onClick={() => setConfirmation(logConfirmation)}
           >
-            清除日志
+            {systemMessages.clearLogsButton}
           </SettingsButton>
         </SettingsActionGroup>
       </SettingsSection>
       {error ? (
         <p className="settings-error" role="alert">
-          {error}
+          {ipcErrorMessage(error, messages)}
         </p>
       ) : null}
       {confirmation ? (
@@ -821,35 +941,43 @@ function boundedInteger(
   raw: string,
   minimum: number,
   maximum: number,
+  messages: SystemRecoveryMessages,
 ): { value: number | null; error: string | null } {
-  if (raw.trim() === "") return { value: null, error: "请输入数值。" };
+  if (raw.trim() === "") return { value: null, error: messages.numberRequired };
   const value = Number(raw);
   if (!Number.isSafeInteger(value))
-    return { value: null, error: "请输入整数。" };
+    return { value: null, error: messages.integerRequired };
   if (value < minimum || value > maximum) {
     return {
       value: null,
-      error: `请输入 ${minimum} 到 ${maximum} 之间的整数。`,
+      error: messages.integerRange(minimum, maximum),
     };
   }
   return { value, error: null };
 }
 
-function formatDateTime(value: number | null) {
+function formatDateTime(value: number | null, locale: AppLocale) {
   return value === null
     ? "-"
-    : new Intl.DateTimeFormat("zh-CN", {
+    : new Intl.DateTimeFormat(locale, {
         dateStyle: "medium",
         timeStyle: "short",
       }).format(value);
 }
 
-function coverageLabel(snapshot: SettingsSnapshotDto) {
+function coverageLabel(
+  snapshot: SettingsSnapshotDto,
+  messages: SystemRecoveryMessages,
+  locale: AppLocale,
+) {
   const { earliestStartedAtMs, latestStartedAtMs } = snapshot.history;
   if (earliestStartedAtMs === null || latestStartedAtMs === null)
-    return "暂无记录";
-  const format = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium" });
-  return `${format.format(earliestStartedAtMs)} 至 ${format.format(latestStartedAtMs)}`;
+    return messages.noRecords;
+  const format = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
+  return messages.coverageRange(
+    format.format(earliestStartedAtMs),
+    format.format(latestStartedAtMs),
+  );
 }
 
 function formatBytes(bytes: number) {

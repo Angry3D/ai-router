@@ -1,4 +1,5 @@
 import type { UsageHistoryPageDto } from "../../generated";
+import { useLanguage } from "../language/useLanguage";
 import { AppScrollArea } from "../shared/AppScrollArea";
 import { UsageRecordTable } from "../shared/UsageRecordTable";
 import { USAGE_PREVIEW_COLUMNS } from "../shared/usageRecordColumns";
@@ -21,16 +22,18 @@ export function MenuUsagePreview({
   onPointerEnter: () => void;
   onPointerLeave: () => void;
 }) {
+  const { messages } = useLanguage();
+  const menuMessages = messages.menu;
   return (
     <aside
       className={`menu-usage-preview menu-usage-preview-${phase}`}
-      aria-label={`${routeName} 用量速览`}
+      aria-label={menuMessages.usagePreview.label(routeName)}
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
     >
       <header className="menu-usage-preview-heading">
         <strong title={routeName}>{routeName}</strong>
-        <span>最近 10 条</span>
+        <span>{menuMessages.usagePreview.recentCount}</span>
       </header>
       <div className="menu-usage-preview-body">
         <AppScrollArea
@@ -46,7 +49,7 @@ export function MenuUsagePreview({
                 <div
                   className="menu-usage-preview-skeleton"
                   role="status"
-                  aria-label="正在读取请求记录"
+                  aria-label={menuMessages.usagePreview.loading}
                 >
                   {Array.from({ length: 10 }, (_, index) => (
                     <span key={index} />
@@ -54,11 +57,11 @@ export function MenuUsagePreview({
                 </div>
               ) : error ? (
                 <div className="menu-usage-preview-message" role="alert">
-                  请求记录读取失败
+                  {menuMessages.usagePreview.loadFailed}
                 </div>
               ) : (
                 <div className="menu-usage-preview-message" role="status">
-                  暂无请求记录
+                  {menuMessages.usagePreview.empty}
                 </div>
               )
             }

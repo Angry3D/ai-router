@@ -20,12 +20,15 @@ import {
   useUsageStatistics,
 } from "../../api/query";
 import type {
+  AppLocale,
   CompletionState,
   FallbackStopReasonDto,
   UsageCostDto,
   UsageHistoryCursorDto,
   UsageHistoryQueryDto,
+  UsageRequestDetailDto,
   RoutingDecisionDto,
+  UsageStatisticsAttributionDimensionDto,
   UsageStatisticsAttributionMetricDto,
   UsageStatisticsDto,
   UsageStatisticsQueryDto,
@@ -43,6 +46,8 @@ import {
   SettingsTextInput,
 } from "./SettingsPrimitives";
 import { AppScrollArea } from "../shared/AppScrollArea";
+import { useLanguage } from "../language/useLanguage";
+import type { UsageMessages } from "../language/catalog/usage";
 import {
   UsageSourceChart,
   UsageTimeChart,
@@ -80,6 +85,12 @@ const RANGE_MS: Record<RollingTimeRange, number> = {
   "30d": 30 * 24 * 60 * 60 * 1_000,
 };
 
+/**
+ * Attribution dimension of the statistics query; the source chart resolves a
+ * missing identity to the matching unknown-label text.
+ */
+const ATTRIBUTION_DIMENSION: UsageStatisticsAttributionDimensionDto = "model";
+
 function timeRangeBounds(range: TimeRange, anchorMs: number) {
   if (range === "all") {
     return { afterMs: null, beforeMs: anchorMs };
@@ -102,28 +113,39 @@ function timeRangeBounds(range: TimeRange, anchorMs: number) {
   return { afterMs: anchorMs - RANGE_MS[range], beforeMs: anchorMs };
 }
 
-const completionLabels: Record<CompletionState, string> = {
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-  no_upstream: "无上游",
-};
+function completionLabels(
+  messages: UsageMessages,
+): Record<CompletionState, string> {
+  return {
+    completed: messages.completionCompleted,
+    failed: messages.completionFailed,
+    cancelled: messages.completionCancelled,
+    no_upstream: messages.completionNoUpstream,
+  };
+}
 
 function attemptStatusLabel(
   httpStatus: number | null,
   errorCategory: string | null,
+  messages: UsageMessages,
 ) {
   const parts: string[] = [];
   if (httpStatus !== null) parts.push(`HTTP ${httpStatus}`);
   if (errorCategory !== null) {
     parts.push(
-      errorCategory === "upstream_access_denied" ? "访问拒绝" : errorCategory,
+      errorCategory === "upstream_access_denied"
+        ? messages.accessDenied
+        : errorCategory,
     );
   }
   return parts.length > 0 ? parts.join(" · ") : "-";
 }
 
 export function UsageSettings() {
+  const {
+    messages: { usage: usageMessages },
+    effectiveLocale,
+  } = useLanguage();
   const [draftFilters, setDraftFilters] =
     useState<UsageFilters>(DEFAULT_FILTERS);
   const [appliedFilters, setAppliedFilters] =
@@ -184,7 +206,7 @@ export function UsageSettings() {
       routeId: appliedFilters.routeId === "" ? null : appliedFilters.routeId,
       modelContains: appliedFilters.model === "" ? null : appliedFilters.model,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-      attributionDimension: "model",
+      attributionDimension: ATTRIBUTION_DIMENSION,
       attributionMetric,
     }),
     [appliedFilters, attributionMetric, rangeBounds],
@@ -212,10 +234,14 @@ export function UsageSettings() {
       : statistics.isFetching && visibleStatistics !== undefined;
 
   return (
-    <SettingsPage title="用量" titleId="usage-title" className="usage-page">
+    <SettingsPage
+      title={usageMessages.pageTitle}
+      titleId="usage-title"
+      className="usage-page"
+    >
       <form
         className="usage-filters"
-        aria-label="用量筛选"
+        aria-label={usageMessages.filtersAriaLabel}
         onSubmit={(event) => {
           event.preventDefault();
           applyFilters(draftFilters);
@@ -223,9 +249,9 @@ export function UsageSettings() {
       >
         <div className="usage-filter-grid">
           <label>
-            <span>时间</span>
+            <span>{usageMessages.rangeLabel}</span>
             <select
-              aria-label="时间范围"
+              aria-label={usageMessages.rangeAriaLabel}
               value={draftFilters.range}
               onChange={(event) => {
                 const range = event.currentTarget.value as TimeRange;
@@ -235,18 +261,18 @@ export function UsageSettings() {
                 }));
               }}
             >
-              <option value="today">今天</option>
-              <option value="yesterday">昨天</option>
-              <option value="24h">最近 24 小时</option>
-              <option value="7d">最近 7 天</option>
-              <option value="30d">最近 30 天</option>
-              <option value="all">全部记录</option>
+              <option value="today">{usageMessages.rangeToday}</option>
+              <option value="yesterday">{usageMessages.rangeYesterday}</option>
+              <option value="24h">{usageMessages.range24h}</option>
+              <option value="7d">{usageMessages.range7d}</option>
+              <option value="30d">{usageMessages.range30d}</option>
+              <option value="all">{usageMessages.rangeAll}</option>
             </select>
           </label>
           <label>
-            <span>状态</span>
+            <span>{usageMessages.statusLabel}</span>
             <select
-              aria-label="完成状态"
+              aria-label={usageMessages.statusAriaLabel}
               value={draftFilters.status}
               onChange={(event) => {
                 const status = event.currentTarget.value as
@@ -257,18 +283,20 @@ export function UsageSettings() {
                 }));
               }}
             >
-              <option value="all">全部状态</option>
-              {Object.entries(completionLabels).map(([value, label]) => (
-                <option value={value} key={value}>
-                  {label}
-                </option>
-              ))}
+              <option value="all">{usageMessages.statusAll}</option>
+              {Object.entries(completionLabels(usageMessages)).map(
+                ([value, label]) => (
+                  <option value={value} key={value}>
+                    {label}
+                  </option>
+                ),
+              )}
             </select>
           </label>
           <label>
-            <span>路由</span>
+            <span>{usageMessages.routeLabel}</span>
             <select
-              aria-label="路由"
+              aria-label={usageMessages.routeLabel}
               value={draftFilters.routeId}
               disabled={routeOptions.isPending || routeOptions.isError}
               onChange={(event) => {
@@ -280,29 +308,31 @@ export function UsageSettings() {
               }}
             >
               {routeOptions.isPending ? (
-                <option value="">正在读取路由...</option>
+                <option value="">{usageMessages.routesLoading}</option>
               ) : null}
               {routeOptions.isError ? (
-                <option value="">路由读取失败</option>
+                <option value="">{usageMessages.routesLoadFailedOption}</option>
               ) : null}
               {!routeOptions.isPending && !routeOptions.isError ? (
-                <option value="">全部路由</option>
+                <option value="">{usageMessages.routesAll}</option>
               ) : null}
               {(routeOptions.data ?? []).map((route) => (
                 <option value={route.routeId} key={route.routeId}>
-                  {route.name}
-                  {route.retained ? "（已删除）" : ""}
+                  {route.name ?? usageMessages.deletedRouteLabel}
+                  {route.retained && route.name !== null
+                    ? usageMessages.routeRetainedSuffix
+                    : ""}
                 </option>
               ))}
             </select>
           </label>
           <label>
-            <span>模型</span>
+            <span>{usageMessages.modelLabel}</span>
             <SettingsTextInput
-              aria-label="模型包含"
+              aria-label={usageMessages.modelContainsAriaLabel}
               maxLength={256}
               value={draftFilters.model}
-              placeholder="模型 ID 片段"
+              placeholder={usageMessages.modelPlaceholder}
               onChange={(event) => {
                 const model = event.currentTarget.value;
                 setDraftFilters((filters) => ({
@@ -315,14 +345,18 @@ export function UsageSettings() {
         </div>
         {routeOptions.isError ? (
           <span className="usage-route-error" role="alert">
-            路由选项读取失败。
+            {usageMessages.routeOptionsLoadFailed}
             <button type="button" onClick={() => void routeOptions.refetch()}>
-              重试
+              {usageMessages.retry}
             </button>
           </span>
         ) : null}
         <div className="usage-filter-toolbar">
-          <div className="usage-tabs" role="tablist" aria-label="用量视图">
+          <div
+            className="usage-tabs"
+            role="tablist"
+            aria-label={usageMessages.tabsAriaLabel}
+          >
             <button
               id="usage-records-tab"
               type="button"
@@ -344,7 +378,7 @@ export function UsageSettings() {
                 document.getElementById("usage-statistics-tab")?.focus();
               }}
             >
-              请求记录
+              {usageMessages.recordsTab}
             </button>
             <button
               id="usage-statistics-tab"
@@ -367,7 +401,7 @@ export function UsageSettings() {
                 document.getElementById("usage-records-tab")?.focus();
               }}
             >
-              用量统计
+              {usageMessages.statisticsTab}
             </button>
           </div>
           <div className="usage-filter-actions">
@@ -376,7 +410,7 @@ export function UsageSettings() {
               onClick={() => applyFilters(DEFAULT_FILTERS)}
             >
               <RotateCcw aria-hidden="true" size={14} />
-              重置
+              {usageMessages.reset}
             </SettingsButton>
             <SettingsButton
               type="submit"
@@ -388,10 +422,10 @@ export function UsageSettings() {
                 className={activeViewIsRefreshing ? "spin" : undefined}
                 size={14}
               />
-              刷新
+              {usageMessages.refresh}
             </SettingsButton>
             <span className="sr-only" role="status" aria-live="polite">
-              {activeViewIsRefreshing ? "正在更新..." : ""}
+              {activeViewIsRefreshing ? usageMessages.refreshing : ""}
             </span>
           </div>
         </div>
@@ -409,18 +443,20 @@ export function UsageSettings() {
               <div className="usage-detail-toolbar">
                 <SettingsIconButton
                   type="button"
-                  label="返回请求列表"
+                  label={usageMessages.backToList}
                   onClick={() => setSelectedRequestId(null)}
                 >
                   <ArrowLeft aria-hidden="true" size={17} />
                 </SettingsIconButton>
-                <strong>请求详情</strong>
+                <strong>{usageMessages.requestDetailTitle}</strong>
               </div>
               {detail.isPending ? (
-                <UsageMessage>正在读取请求详情...</UsageMessage>
+                <UsageMessage>{usageMessages.detailLoading}</UsageMessage>
               ) : null}
               {detail.isError ? (
-                <UsageMessage tone="danger">请求详情读取失败。</UsageMessage>
+                <UsageMessage tone="danger">
+                  {usageMessages.detailLoadFailed}
+                </UsageMessage>
               ) : null}
               {detail.data ? <UsageDetail detail={detail.data} /> : null}
             </>
@@ -428,22 +464,22 @@ export function UsageSettings() {
           {selectedRequestId === null ? (
             <>
               {history.isPending ? (
-                <UsageMessage>正在读取请求记录...</UsageMessage>
+                <UsageMessage>{usageMessages.recordsLoading}</UsageMessage>
               ) : null}
               {history.isError ? (
                 <UsageMessage tone="danger">
-                  <span>请求记录读取失败。</span>
+                  <span>{usageMessages.recordsLoadFailed}</span>
                   <SettingsButton
                     type="button"
                     onClick={() => void history.refetch()}
                   >
                     <RefreshCw aria-hidden="true" size={15} />
-                    重试
+                    {usageMessages.retry}
                   </SettingsButton>
                 </UsageMessage>
               ) : null}
               {history.data?.rows.length === 0 ? (
-                <UsageMessage>当前筛选条件下没有请求记录。</UsageMessage>
+                <UsageMessage>{usageMessages.noRecords}</UsageMessage>
               ) : null}
               {history.data && history.data.rows.length > 0 ? (
                 <AppScrollArea
@@ -459,7 +495,10 @@ export function UsageSettings() {
                 </AppScrollArea>
               ) : null}
 
-              <nav className="usage-pagination" aria-label="请求记录分页">
+              <nav
+                className="usage-pagination"
+                aria-label={usageMessages.paginationAriaLabel}
+              >
                 <SettingsButton
                   type="button"
                   disabled={previous.length === 0 || history.isFetching}
@@ -470,11 +509,14 @@ export function UsageSettings() {
                   }}
                 >
                   <ChevronLeft aria-hidden="true" size={15} />
-                  上一页
+                  {usageMessages.previousPage}
                 </SettingsButton>
                 <span className="usage-page-position" aria-live="polite">
-                  第 {currentPage} / {totalPages} 页，共{" "}
-                  {totalRows.toLocaleString()} 条
+                  {usageMessages.pagePosition(
+                    currentPage,
+                    totalPages,
+                    totalRows.toLocaleString(effectiveLocale),
+                  )}
                 </span>
                 <SettingsButton
                   type="button"
@@ -487,7 +529,7 @@ export function UsageSettings() {
                     setCursor(history.data.nextCursor);
                   }}
                 >
-                  下一页
+                  {usageMessages.nextPage}
                   <ChevronRight aria-hidden="true" size={15} />
                 </SettingsButton>
               </nav>
@@ -517,6 +559,7 @@ export function UsageSettings() {
               trendMetric={trendMetric}
               onMetricChange={changeAttributionMetric}
               onTrendMetricChange={setTrendMetric}
+              dimension={ATTRIBUTION_DIMENSION}
             />
           </AppScrollArea>
         </div>
@@ -535,6 +578,7 @@ function UsageStatisticsView({
   trendMetric,
   onMetricChange,
   onTrendMetricChange,
+  dimension,
 }: {
   data: UsageStatisticsDto | undefined;
   isPending: boolean;
@@ -545,63 +589,74 @@ function UsageStatisticsView({
   trendMetric: UsageStatisticsAttributionMetricDto;
   onMetricChange: (value: UsageStatisticsAttributionMetricDto) => void;
   onTrendMetricChange: (value: UsageStatisticsAttributionMetricDto) => void;
+  dimension: UsageStatisticsAttributionDimensionDto;
 }) {
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
   if (disabled) {
-    return <UsageMessage>用量统计只统计已完成请求。</UsageMessage>;
+    return (
+      <UsageMessage>{usageMessages.statisticsCompletedOnly}</UsageMessage>
+    );
   }
-  if (isPending) return <UsageMessage>正在读取用量统计...</UsageMessage>;
+  if (isPending) {
+    return <UsageMessage>{usageMessages.statisticsLoading}</UsageMessage>;
+  }
   if (isError) {
     return (
       <UsageMessage tone="danger">
-        <span>用量统计读取失败。</span>
+        <span>{usageMessages.statisticsLoadFailed}</span>
         <SettingsButton type="button" onClick={onRetry}>
           <RefreshCw aria-hidden="true" size={15} />
-          重试
+          {usageMessages.retry}
         </SettingsButton>
       </UsageMessage>
     );
   }
   if (!data) return null;
   return (
-    <section className="usage-statistics" aria-label="用量统计">
+    <section
+      className="usage-statistics"
+      aria-label={usageMessages.statisticsTab}
+    >
       <div className="usage-statistics-summary">
         <div>
-          <span>成功请求</span>
+          <span>{usageMessages.successfulRequests}</span>
           <strong>
             {formatDecimalInteger(String(data.matchedRequestCount))}
           </strong>
-          <small>匹配当前筛选条件</small>
+          <small>{usageMessages.matchedFilterHint}</small>
         </div>
         <div>
-          <span>Token</span>
+          <span>{usageMessages.tokenLabel}</span>
           <strong>{formatStatisticsTokens(data.tokens.total)}</strong>
           <dl className="usage-statistics-token-breakdown">
             <div className="is-input">
-              <dt>未缓存输入</dt>
+              <dt>{usageMessages.uncachedInput}</dt>
               <dd>{formatStatisticsTokens(data.tokens.uncachedInput)}</dd>
             </div>
             <div className="is-cache">
-              <dt>缓存输入</dt>
+              <dt>{usageMessages.cachedInput}</dt>
               <dd>{formatStatisticsTokens(data.tokens.cachedInput)}</dd>
             </div>
             <div className="is-write">
-              <dt>写入缓存</dt>
+              <dt>{usageMessages.cacheWriteInput}</dt>
               <dd>{formatStatisticsTokens(data.tokens.cacheWriteInput)}</dd>
             </div>
             <div className="is-output">
-              <dt>输出</dt>
+              <dt>{usageMessages.output}</dt>
               <dd>{formatStatisticsTokens(data.tokens.output)}</dd>
             </div>
           </dl>
         </div>
         <div>
-          <span>费用</span>
+          <span>{usageMessages.cost}</span>
           <strong>{formatStatisticsUsd(data.costPicoUsd)}</strong>
-          <small>已记录的上游费用</small>
+          <small>{usageMessages.recordedUpstreamCost}</small>
         </div>
       </div>
       {data.trend.length === 0 ? (
-        <UsageMessage>当前筛选条件下没有已完成请求。</UsageMessage>
+        <UsageMessage>{usageMessages.noCompletedRequests}</UsageMessage>
       ) : (
         <div className="usage-statistics-analysis">
           <section
@@ -609,9 +664,9 @@ function UsageStatisticsView({
             aria-labelledby="usage-trend-title"
           >
             <div className="usage-statistics-section-heading">
-              <h3 id="usage-trend-title">按时间</h3>
+              <h3 id="usage-trend-title">{usageMessages.byTime}</h3>
               <StatisticsSegmentedControl
-                label="趋势指标"
+                label={usageMessages.trendMetricLabel}
                 name="usage-trend-metric"
                 values={["requests", "tokens", "cost"]}
                 selected={trendMetric}
@@ -619,7 +674,12 @@ function UsageStatisticsView({
                 onChange={onTrendMetricChange}
               />
             </div>
-            <UsageTimeChart trend={data.trend} metric={trendMetric} />
+            <UsageTimeChart
+              trend={data.trend}
+              metric={trendMetric}
+              granularity={data.granularity}
+              timeZone={data.timeZone}
+            />
           </section>
 
           <div className="usage-statistics-lower-grid">
@@ -628,9 +688,9 @@ function UsageStatisticsView({
               aria-labelledby="usage-attribution-title"
             >
               <div className="usage-statistics-section-heading">
-                <h3 id="usage-attribution-title">按来源</h3>
+                <h3 id="usage-attribution-title">{usageMessages.bySource}</h3>
                 <StatisticsSegmentedControl
-                  label="来源指标"
+                  label={usageMessages.sourceMetricLabel}
                   name="usage-attribution-metric"
                   values={["requests", "tokens", "cost"]}
                   selected={metric}
@@ -639,11 +699,12 @@ function UsageStatisticsView({
                 />
               </div>
               {data.attribution.length === 0 ? (
-                <UsageMessage>当前筛选条件下没有来源数据。</UsageMessage>
+                <UsageMessage>{usageMessages.noSourceData}</UsageMessage>
               ) : (
                 <UsageSourceChart
                   attribution={data.attribution}
                   metric={metric}
+                  dimension={dimension}
                 />
               )}
             </section>
@@ -653,7 +714,9 @@ function UsageStatisticsView({
               aria-labelledby="usage-token-composition-title"
             >
               <div className="usage-statistics-section-heading">
-                <h3 id="usage-token-composition-title">Token 构成</h3>
+                <h3 id="usage-token-composition-title">
+                  {usageMessages.tokenComposition}
+                </h3>
               </div>
               <UsageTokenCompositionChart tokens={data.tokens} />
             </section>
@@ -676,9 +739,12 @@ function StatisticsSegmentedControl<T extends string>({
   name: string;
   values: readonly T[];
   selected: T;
-  labelFor: (value: T) => string;
+  labelFor: (value: T, messages: UsageMessages) => string;
   onChange: (value: T) => void;
 }) {
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
   return (
     <fieldset className="usage-segmented">
       <legend className="sr-only">{label}</legend>
@@ -691,22 +757,29 @@ function StatisticsSegmentedControl<T extends string>({
             checked={selected === value}
             onChange={() => onChange(value)}
           />
-          <span>{labelFor(value)}</span>
+          <span>{labelFor(value, usageMessages)}</span>
         </label>
       ))}
     </fieldset>
   );
 }
 
-function metricLabel(value: UsageStatisticsAttributionMetricDto) {
-  return value === "requests" ? "请求" : value === "tokens" ? "Token" : "费用";
+function metricLabel(
+  value: UsageStatisticsAttributionMetricDto,
+  messages: UsageMessages,
+) {
+  return value === "requests"
+    ? messages.metricRequests
+    : value === "tokens"
+      ? messages.metricTokens
+      : messages.metricCost;
 }
 
-function UsageDetail({
-  detail,
-}: {
-  detail: import("../../generated").UsageRequestDetailDto;
-}) {
+function UsageDetail({ detail }: { detail: UsageRequestDetailDto }) {
+  const {
+    messages: { usage: usageMessages },
+    effectiveLocale,
+  } = useLanguage();
   const request = detail.request;
   return (
     <AppScrollArea
@@ -715,69 +788,77 @@ function UsageDetail({
     >
       <dl className="usage-detail-summary">
         <div>
-          <dt>开始时间</dt>
-          <dd>{formatUsageDateTime(request.startedAtMs)}</dd>
+          <dt>{usageMessages.startedAt}</dt>
+          <dd>{formatUsageDateTime(request.startedAtMs, effectiveLocale)}</dd>
         </div>
         <div>
-          <dt>完成时间</dt>
-          <dd>{formatUsageDateTime(request.finishedAtMs)}</dd>
+          <dt>{usageMessages.finishedAt}</dt>
+          <dd>{formatUsageDateTime(request.finishedAtMs, effectiveLocale)}</dd>
         </div>
         <div>
-          <dt>路由</dt>
+          <dt>{usageMessages.routeLabel}</dt>
           <dd>{request.routeName ?? "-"}</dd>
         </div>
         <div>
-          <dt>模型</dt>
+          <dt>{usageMessages.modelLabel}</dt>
           <dd>
-            {formatModelWithActual(request.requestedModel, request.actualModel)}
+            {formatModelWithActual(
+              request.requestedModel,
+              request.actualModel,
+              usageMessages.modelPair,
+            )}
           </dd>
         </div>
         <div>
-          <dt>推理强度</dt>
+          <dt>{usageMessages.reasoningEffort}</dt>
           <dd>{request.reasoningEffort ?? "-"}</dd>
         </div>
         <div>
-          <dt>类型</dt>
-          <dd>{request.streaming ? "流式" : "同步"}</dd>
+          <dt>{usageMessages.requestKind}</dt>
+          <dd>
+            {request.streaming
+              ? usageMessages.streaming
+              : usageMessages.synchronous}
+          </dd>
         </div>
         <div>
-          <dt>请求服务层级</dt>
-          <dd>{detail.requestedServiceTier ?? "未指定"}</dd>
+          <dt>{usageMessages.requestedServiceTier}</dt>
+          <dd>{detail.requestedServiceTier ?? usageMessages.notSpecified}</dd>
         </div>
         <div>
-          <dt>实际服务层级</dt>
-          <dd>{detail.actualServiceTier ?? "未报告"}</dd>
+          <dt>{usageMessages.actualServiceTier}</dt>
+          <dd>{detail.actualServiceTier ?? usageMessages.notReported}</dd>
         </div>
         <div>
-          <dt>最终 Tokens</dt>
-          <dd>{tokenSummary(detail.tokens)}</dd>
+          <dt>{usageMessages.finalTokens}</dt>
+          <dd>{tokenSummary(detail.tokens, usageMessages, effectiveLocale)}</dd>
         </div>
         <div>
-          <dt>首字延迟</dt>
+          <dt>{usageMessages.firstOutputLatency}</dt>
           <dd>{formatLatency(request.firstOutputLatencyMs)}</dd>
         </div>
         <div>
-          <dt>总耗时</dt>
+          <dt>{usageMessages.totalLatency}</dt>
           <dd>{formatLatency(request.totalLatencyMs)}</dd>
         </div>
         <div>
-          <dt>上游总费用</dt>
-          <dd>{costLabel(request.cost)}</dd>
+          <dt>{usageMessages.upstreamTotalCost}</dt>
+          <dd>{costLabel(request.cost, usageMessages)}</dd>
         </div>
         <div>
-          <dt>计价目录</dt>
+          <dt>{usageMessages.pricingCatalog}</dt>
           <dd>{request.cost.catalogVersion ?? "-"}</dd>
         </div>
       </dl>
-      <h3>上游尝试</h3>
+      <h3>{usageMessages.upstreamAttempts}</h3>
       <ol className="usage-attempts">
         {detail.attempts.map((attempt) => (
           <li key={`${attempt.attemptIndex}-${attempt.routeId}`}>
             <header>
               <strong>
                 {attempt.attemptRole === "recovery_probe"
-                  ? "恢复验证"
-                  : `尝试 ${attempt.attemptIndex + 1}`}
+                  ? usageMessages.recoveryProbe
+                  : usageMessages.attemptNumbered(attempt.attemptIndex + 1)}
                 {" · "}
                 {attempt.routeName}
               </strong>
@@ -786,38 +867,47 @@ function UsageDetail({
                   attempt.deliveryState === "completed" ? "success" : "warning"
                 }
               >
-                {attempt.deliveryState === "completed" ? "已交付" : "未完成"}
+                {attempt.deliveryState === "completed"
+                  ? usageMessages.delivered
+                  : usageMessages.incomplete}
               </SettingsStatus>
             </header>
             <dl>
               <div>
-                <dt>模型</dt>
-                <dd>{attempt.actualModel ?? "未报告"}</dd>
+                <dt>{usageMessages.modelLabel}</dt>
+                <dd>{attempt.actualModel ?? usageMessages.notReported}</dd>
               </div>
               <div>
-                <dt>发送服务层级</dt>
-                <dd>{attempt.forwardedServiceTier ?? "未发送"}</dd>
+                <dt>{usageMessages.forwardedServiceTier}</dt>
+                <dd>{attempt.forwardedServiceTier ?? usageMessages.notSent}</dd>
               </div>
               <div>
-                <dt>实际服务层级</dt>
-                <dd>{attempt.actualServiceTier ?? "未报告"}</dd>
+                <dt>{usageMessages.actualServiceTier}</dt>
+                <dd>{attempt.actualServiceTier ?? usageMessages.notReported}</dd>
               </div>
               <div>
-                <dt>状态</dt>
+                <dt>{usageMessages.statusLabel}</dt>
                 <dd>
                   {attemptStatusLabel(
                     attempt.httpStatus,
                     attempt.errorCategory,
+                    usageMessages,
                   )}
                 </dd>
               </div>
               <div>
-                <dt>Tokens</dt>
-                <dd>{tokenSummary(attempt.tokens)}</dd>
+                <dt>{usageMessages.tokensLabel}</dt>
+                <dd>
+                  {tokenSummary(
+                    attempt.tokens,
+                    usageMessages,
+                    effectiveLocale,
+                  )}
+                </dd>
               </div>
               <div>
-                <dt>费用</dt>
-                <dd>{costLabel(attempt.cost)}</dd>
+                <dt>{usageMessages.cost}</dt>
+                <dd>{costLabel(attempt.cost, usageMessages)}</dd>
               </div>
             </dl>
             {attempt.routingDecision ? (
@@ -831,12 +921,18 @@ function UsageDetail({
 }
 
 function RoutingDecisionBand({ decision }: { decision: RoutingDecisionDto }) {
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
   if (decision.kind === "retry_current") {
     return (
       <div className="usage-routing-decision usage-routing-decision-accent">
         <RotateCw aria-hidden="true" />
         <span>
-          重试当前路由（第 {decision.attemptNumber}/{decision.maxAttempts} 次）
+          {usageMessages.retryCurrentRoute(
+            decision.attemptNumber,
+            decision.maxAttempts,
+          )}
         </span>
       </div>
     );
@@ -846,10 +942,12 @@ function RoutingDecisionBand({ decision }: { decision: RoutingDecisionDto }) {
       <div className="usage-routing-decision usage-routing-decision-accent">
         <ArrowRight aria-hidden="true" />
         <div className="usage-routing-decision-copy">
-          <span>已自动切换至 {decision.targetRouteName}</span>
+          <span>
+            {usageMessages.switchedToRoute(decision.targetRouteName)}
+          </span>
           {(decision.skippedRoutes ?? []).map((route) => (
             <small key={route.routeId}>
-              已跳过 {route.routeName} · 该模型在此路由不参与 Fallback
+              {usageMessages.skippedRouteFallbackExcluded(route.routeName)}
             </small>
           ))}
         </div>
@@ -860,7 +958,11 @@ function RoutingDecisionBand({ decision }: { decision: RoutingDecisionDto }) {
     return (
       <div className="usage-routing-decision usage-routing-decision-neutral">
         <RotateCcw aria-hidden="true" />
-        <span>恢复验证未通过 · 继续使用 {decision.targetRouteName}</span>
+        <span>
+          {usageMessages.recoveryProbeFailedContinue(
+            decision.targetRouteName,
+          )}
+        </span>
       </div>
     );
   }
@@ -868,7 +970,9 @@ function RoutingDecisionBand({ decision }: { decision: RoutingDecisionDto }) {
     return (
       <div className="usage-routing-decision usage-routing-decision-accent">
         <ArrowLeft aria-hidden="true" />
-        <span>恢复验证完成 · 已恢复至 {decision.targetRouteName}</span>
+        <span>
+          {usageMessages.recoveryProbeCompleted(decision.targetRouteName)}
+        </span>
       </div>
     );
   }
@@ -877,57 +981,59 @@ function RoutingDecisionBand({ decision }: { decision: RoutingDecisionDto }) {
     fallback_disabled: {
       icon: CircleStop,
       tone: "neutral",
-      copy: "未切换 · Fallback 已关闭",
+      copy: usageMessages.stopFallbackDisabled,
     },
     failure_not_eligible: {
       icon: CircleStop,
       tone: "neutral",
-      copy: "未切换 · 当前错误不符合切换条件",
+      copy: usageMessages.stopFailureNotEligible,
     },
     response_committed: {
       icon: LockKeyhole,
       tone: "neutral",
-      copy: "未切换 · 响应已经开始交付",
+      copy: usageMessages.stopResponseCommitted,
     },
     all_participants_attempted: {
       icon: CircleStop,
       tone: "warning",
-      copy: "未切换 · 已到最后一条参与路由",
+      copy: usageMessages.stopAllParticipantsAttempted,
     },
     stale_policy: {
       icon: RefreshCwOff,
       tone: "warning",
-      copy: "未切换 · 路由配置已经变化",
+      copy: usageMessages.stopStalePolicy,
     },
     activation_failed: {
       icon: DatabaseZap,
       tone: "danger",
-      copy: `切换至 ${decision.targetRouteName ?? "目标路由"} 失败 · 状态未保存`,
+      copy: usageMessages.stopActivationFailed(
+        decision.targetRouteName ?? usageMessages.unknownTargetRoute,
+      ),
     },
     attempt_index_exhausted: {
       icon: CircleStop,
       tone: "warning",
-      copy: "未切换 · 请求尝试次数已达系统上限",
+      copy: usageMessages.stopAttemptIndexExhausted,
     },
     failure_threshold_not_reached: {
       icon: CircleStop,
       tone: "neutral",
-      copy: "未切换 · 当前路由可归因失败尚未达到 5 次",
+      copy: usageMessages.stopFailureThresholdNotReached,
     },
     failure_threshold_reached_pending: {
       icon: CircleStop,
       tone: "warning",
-      copy: "未继续切换 · 已达到失败阈值，等待下一次可执行机会",
+      copy: usageMessages.stopFailureThresholdReachedPending,
     },
     recovery_confirmation_pending: {
       icon: CircleStop,
       tone: "neutral",
-      copy: "未切换 · 恢复验证成功 1/2",
+      copy: usageMessages.stopRecoveryConfirmationPending,
     },
     model_fallback_excluded: {
       icon: CircleStop,
       tone: "neutral",
-      copy: "已停止 Fallback · 该模型在此路由不参与 Fallback",
+      copy: usageMessages.stopModelFallbackExcluded,
     },
   } as const satisfies Record<
     FallbackStopReasonDto,
@@ -966,31 +1072,41 @@ function UsageMessage({
   );
 }
 
-function costLabel(cost: UsageCostDto) {
+function costLabel(cost: UsageCostDto, messages: UsageMessages) {
   switch (cost.state) {
     case "pre_v0_3a":
-      return "未计价（V0.3A 前）";
+      return messages.costNotPricedPreV03A;
     case "unavailable":
-      return "不可用";
+      return messages.costUnavailable;
     case "not_applicable":
-      return "不适用";
+      return messages.costNotApplicable;
     case "exact":
-      return formatUsd(cost.amountPicoUsd);
+      return formatUsd(cost.amountPicoUsd, messages.costUnavailable);
     case "partial":
-      return `至少 ${formatUsd(cost.amountPicoUsd)}`;
+      return messages.costAtLeast(
+        formatUsd(cost.amountPicoUsd, messages.costUnavailable),
+      );
   }
 }
 
-function tokenSummary(tokens: UsageTokensDto) {
-  if (tokens.total === null) return "未知";
-  const details = [`总计 ${tokens.total.toLocaleString()}`];
+function tokenSummary(
+  tokens: UsageTokensDto,
+  messages: UsageMessages,
+  locale: AppLocale,
+) {
+  if (tokens.total === null) return messages.tokenUnknown;
+  const details = [messages.tokenTotal(tokens.total.toLocaleString(locale))];
   if (tokens.input !== null)
-    details.push(`输入 ${tokens.input.toLocaleString()}`);
+    details.push(messages.tokenInput(tokens.input.toLocaleString(locale)));
   if (tokens.output !== null)
-    details.push(`输出 ${tokens.output.toLocaleString()}`);
+    details.push(messages.tokenOutput(tokens.output.toLocaleString(locale)));
   if (tokens.cachedInput !== null)
-    details.push(`缓存 ${tokens.cachedInput.toLocaleString()}`);
+    details.push(
+      messages.tokenCached(tokens.cachedInput.toLocaleString(locale)),
+    );
   if (tokens.cacheWriteInput !== null)
-    details.push(`写入 ${tokens.cacheWriteInput.toLocaleString()}`);
+    details.push(
+      messages.tokenCacheWrite(tokens.cacheWriteInput.toLocaleString(locale)),
+    );
   return details.join(" · ");
 }

@@ -22,7 +22,7 @@ const ipc = vi.hoisted(() => ({
 
 vi.mock("../../api/ipc", () => ({
   normalizeIpcError: () => ({
-    code: "test",
+    code: "route_order_invalid",
     message: "测试失败",
     retryable: false,
     field: null,
@@ -455,7 +455,7 @@ describe("RoutesSettings unified dragging", () => {
     rejectMutation?.(new Error("private detail"));
     await waitFor(() =>
       expect(
-        screen.getByRole("alert", { name: "路由设置失败：测试失败" }),
+        screen.getByRole("alert", { name: "路由设置失败：路由顺序无效。" }),
       ).toBeInTheDocument(),
     );
     expect(screen.queryByText("Fallback 4")).not.toBeInTheDocument();

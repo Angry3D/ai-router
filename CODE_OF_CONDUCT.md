@@ -1,28 +1,40 @@
-# 行为准则
+# Code of conduct
 
-AI Router 希望公共协作保持专业、具体和安全。参与 Issue、PR、评审或其他项目空间即表示同意以下
-约定。
+AI Router wants public collaboration to stay professional, specific, and safe.
+Participating in issues, PRs, reviews, or other project spaces means agreeing to the
+following conventions.
 
-## 我们期待的行为
+## Expected behavior
 
-- 围绕可观察事实、代码和复现讨论问题，对观点提出质疑时不攻击个人。
-- 给出足够上下文，承认不确定性，并在新证据出现后及时修正判断。
-- 尊重不同经验、背景、语言、身份和可用时间，不以嘲讽、骚扰或施压代替技术讨论。
-- 保护自己和他人的隐私；发现凭据或个人信息时停止传播并立即私下报告。
-- 接受维护者为控制范围、风险和维护成本作出的决定。
+- Discuss problems around observable facts, code, and reproductions; challenge ideas
+  without attacking people.
+- Give enough context, acknowledge uncertainty, and revise your judgment promptly when
+  new evidence appears.
+- Respect differences in experience, background, language, identity, and available time;
+  do not replace technical discussion with mockery, harassment, or pressure.
+- Protect your own and others' privacy; when you find credentials or personal
+  information, stop spreading it and report it privately right away.
+- Accept the decisions maintainers make to control scope, risk, and maintenance cost.
 
-## 不可接受的行为
+## Unacceptable behavior
 
-- 侮辱、威胁、歧视、性化表达、跟踪、持续骚扰或泄露他人身份信息；
-- 在对方明确停止后继续进行非项目联系；
-- 发布凭据、数据库、完整配置、原始日志或其他未经许可的数据；
-- 操纵复现、隐瞒利益关系，或故意干扰项目基础设施和他人工作。
+- Insults, threats, discrimination, sexualized expression, stalking, sustained
+  harassment, or disclosure of others' identifying information;
+- Continuing non-project contact after the other party has clearly asked you to stop;
+- Publishing credentials, databases, complete configuration, raw logs, or other data
+  without permission;
+- Manipulating reproductions, concealing conflicts of interest, or deliberately
+  disrupting project infrastructure and others' work.
 
-## 执行
+## Enforcement
 
-普通协作问题可以在对应线程中冷静指出；涉及骚扰、隐私或安全风险时，请按
-[安全政策](./SECURITY.md) 私下联系维护者。维护者可编辑或删除内容、锁定线程、拒绝贡献，或暂停/永久
-限制参与。处理时会尽量减少敏感信息传播，但无法保证对所有外部平台保密。
+Ordinary collaboration problems can be raised calmly in the relevant thread; for
+harassment, privacy, or security risks, contact the maintainers privately per the
+[security policy](./SECURITY.md). Maintainers may edit or delete content, lock threads,
+reject contributions, or suspend/permanently restrict participation. Handling will
+minimize the spread of sensitive information, but confidentiality cannot be guaranteed
+for all external platforms.
 
-本准则适用于项目维护者管理的仓库和相关协作空间。对执行决定有异议时，可以通过同一私下渠道提供
-具体事实申请复核。
+This code applies to repositories and related collaboration spaces managed by the project
+maintainers. If you disagree with an enforcement decision, you can request a review
+through the same private channel by providing specific facts.

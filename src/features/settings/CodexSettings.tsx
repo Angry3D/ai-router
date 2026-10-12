@@ -18,9 +18,11 @@ import {
 import { queryKeys } from "../../api/query";
 import type {
   CodexConfigStatus,
+  IpcErrorDto,
   PricingTableDto,
   SettingsSnapshotDto,
 } from "../../generated";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
 import { PricingTableSettings } from "./PricingTableSettings";
 import { CodexAuthSettingsSection } from "./CodexAuthSettingsSection";
 import { ImageGenerationSettingsSection } from "./ImageGenerationSettingsSection";
@@ -38,18 +40,6 @@ import {
   type SettingsConfirmation,
 } from "./SettingsPrimitives";
 
-const codexLabels: Record<CodexConfigStatus, string> = {
-  checking: "检查中",
-  connected: "已连接",
-  not_connected: "未连接",
-  changed: "待重新连接",
-  images_mcp_name_conflict: "图片 MCP 名称冲突",
-  images_mcp_projection_conflict: "图片 MCP 配置已修改",
-  invalid: "配置无效",
-  unreadable: "配置不可读",
-  symlink_unsupported: "不支持符号链接",
-};
-
 export function CodexSettings({
   snapshot,
   proxyStatus,
@@ -63,6 +53,19 @@ export function CodexSettings({
   focusImageGeneration?: boolean;
   onImageGenerationFocused?: () => void;
 }) {
+  const { messages, effectiveLocale } = useLanguage();
+  const codex = messages.codex;
+  const codexLabels: Record<CodexConfigStatus, string> = {
+    checking: codex.statusChecking,
+    connected: codex.statusConnected,
+    not_connected: codex.statusNotConnected,
+    changed: codex.statusChanged,
+    images_mcp_name_conflict: codex.statusImagesMcpNameConflict,
+    images_mcp_projection_conflict: codex.statusImagesMcpProjectionConflict,
+    invalid: codex.statusInvalid,
+    unreadable: codex.statusUnreadable,
+    symlink_unsupported: codex.statusSymlinkUnsupported,
+  };
   const queryClient = useQueryClient();
   const [port, setPort] = useState(String(snapshot.proxyPort));
   const [busyOperation, setBusyOperation] = useState<
@@ -74,8 +77,8 @@ export function CodexSettings({
     | "recovery_reset"
     | null
   >(null);
-  const [error, setError] = useState<string | null>(null);
-  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
+  const [recoveryError, setRecoveryError] = useState<IpcErrorDto | null>(null);
   const [confirmation, setConfirmation] = useState<SettingsConfirmation | null>(
     null,
   );
@@ -97,9 +100,9 @@ export function CodexSettings({
       await operation();
       await refresh();
     } catch (reason) {
-      const message = normalizeIpcError(reason).message;
-      if (operationKind.startsWith("recovery_")) setRecoveryError(message);
-      else setError(message);
+      const failure = normalizeIpcError(reason);
+      if (operationKind.startsWith("recovery_")) setRecoveryError(failure);
+      else setError(failure);
     } finally {
       setBusyOperation(null);
     }
@@ -107,9 +110,9 @@ export function CodexSettings({
   const connect = () => {
     if (!snapshot.activeRouteId) {
       setConfirmation({
-        title: "当前没有活动路由",
-        body: "连接后，新请求会失败，直到你添加或选择路由。",
-        confirmLabel: "继续连接 Codex",
+        title: codex.connectNoRouteTitle,
+        body: codex.connectNoRouteBody,
+        confirmLabel: codex.connectNoRouteConfirm,
         onConfirm: () => {
           setConfirmation(null);
           void run(() => connectCodex(true));
@@ -125,9 +128,9 @@ export function CodexSettings({
     try {
       const preview = await previewCodexImagesMcpRepair();
       setConfirmation({
-        title: "替换 ai_router_images 配置？",
-        body: "只会替换图片工具配置，其他 Codex 配置不会改动。",
-        confirmLabel: "替换并重新连接",
+        title: codex.imagesRepairConfirmTitle,
+        body: codex.imagesRepairConfirmBody,
+        confirmLabel: codex.imagesRepairConfirmLabel,
         destructive: true,
         onConfirm: () => {
           setConfirmation(null);
@@ -138,7 +141,7 @@ export function CodexSettings({
         },
       });
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setBusyOperation(null);
     }
@@ -150,28 +153,34 @@ export function CodexSettings({
     try {
       const preview = await previewUpdateCodexRecovery();
       setConfirmation({
-        title: "更新断开恢复配置？",
-        body: "当前 config.toml 将成为以后断开连接时的恢复目标。更新后 Codex 仍保持断开。",
+        title: codex.recoveryUpdateConfirmTitle,
+        body: codex.recoveryUpdateConfirmBody,
         details: (
           <SnapshotSummary
             rows={[
-              ["当前文件", preview.currentExists ? "存在" : "不存在"],
               [
-                "与现有恢复配置相比",
-                preview.bytesChanged ? "内容已更改" : "内容未更改",
+                codex.detailCurrentFile,
+                preview.currentExists ? codex.valueExists : codex.valueNotExists,
               ],
-              ["文件权限", formatUnixMode(preview.currentUnixMode)],
               [
-                "现有恢复目标",
+                codex.detailComparedToRecovery,
+                preview.bytesChanged ? codex.valueChanged : codex.valueUnchanged,
+              ],
+              [codex.detailFileMode, formatUnixMode(preview.currentUnixMode)],
+              [
+                codex.detailExistingRecoveryTarget,
                 preview.recoveryTargetExists
-                  ? "config.toml 存在"
-                  : "断开后删除 config.toml",
+                  ? codex.recoveryTargetExists
+                  : codex.recoveryTargetDelete,
               ],
-              ["恢复配置更新时间", formatDateTime(preview.recoveryUpdatedAtMs)],
+              [
+                codex.detailRecoveryUpdatedAt,
+                formatDateTime(preview.recoveryUpdatedAtMs, effectiveLocale),
+              ],
             ]}
           />
         ),
-        confirmLabel: "更新恢复配置",
+        confirmLabel: codex.recoveryUpdateConfirmLabel,
         onConfirm: () => {
           setConfirmation(null);
           void run(
@@ -181,7 +190,7 @@ export function CodexSettings({
         },
       });
     } catch (reason) {
-      setRecoveryError(normalizeIpcError(reason).message);
+      setRecoveryError(normalizeIpcError(reason));
     } finally {
       setBusyOperation(null);
     }
@@ -193,23 +202,31 @@ export function CodexSettings({
     try {
       const preview = await previewResetCodexRecoveryToBaseline();
       setConfirmation({
-        title: "恢复首次连接前状态？",
-        body: "当前 config.toml 和断开恢复配置都会被原始备份替换，断开后的手动修改将丢失。",
+        title: codex.recoveryResetConfirmTitle,
+        body: codex.recoveryResetConfirmBody,
         details: (
           <SnapshotSummary
             rows={[
-              ["当前文件", preview.currentExists ? "存在" : "不存在"],
-              ["原始配置文件", preview.originalExists ? "存在" : "不存在"],
               [
-                "当前恢复目标",
+                codex.detailCurrentFile,
+                preview.currentExists ? codex.valueExists : codex.valueNotExists,
+              ],
+              [
+                codex.detailOriginalFile,
+                preview.originalExists
+                  ? codex.valueExists
+                  : codex.valueNotExists,
+              ],
+              [
+                codex.detailRecoveryTarget,
                 preview.recoveryTargetExists
-                  ? "config.toml 存在"
-                  : "断开后删除 config.toml",
+                  ? codex.recoveryTargetExists
+                  : codex.recoveryTargetDelete,
               ],
             ]}
           />
         ),
-        confirmLabel: "恢复原始备份",
+        confirmLabel: codex.recoveryResetConfirmLabel,
         destructive: true,
         onConfirm: () => {
           setConfirmation(null);
@@ -220,7 +237,7 @@ export function CodexSettings({
         },
       });
     } catch (reason) {
-      setRecoveryError(normalizeIpcError(reason).message);
+      setRecoveryError(normalizeIpcError(reason));
     } finally {
       setBusyOperation(null);
     }
@@ -234,31 +251,31 @@ export function CodexSettings({
   const hasOriginalBackup = snapshot.originalBackup.exists;
   const hasRecoveryConfig = snapshot.recoveryConfig.exists;
   const recoveryStatus = !hasOriginalBackup
-    ? { label: "不可用", tone: "warning" as const }
+    ? { label: codex.recoveryStatusUnavailable, tone: "warning" as const }
     : hasRecoveryConfig
-      ? { label: "可用", tone: "success" as const }
-      : { label: "尚未创建", tone: "warning" as const };
+      ? { label: codex.recoveryStatusAvailable, tone: "success" as const }
+      : { label: codex.recoveryNotCreated, tone: "warning" as const };
   return (
     <SettingsPage title="Codex" titleId="codex-title">
       <SettingsSection
-        title="本地代理"
+        title={codex.proxySectionTitle}
         status={
           <SettingsStatus
             tone={proxyStatus === "running" ? "success" : "danger"}
           >
             {proxyStatus === "running"
-              ? "运行中"
+              ? codex.proxyStatusRunning
               : proxyStatus === "port_conflict"
-                ? "端口冲突"
-                : "不可用"}
+                ? codex.proxyStatusPortConflict
+                : codex.proxyStatusUnavailable}
           </SettingsStatus>
         }
       >
-        <SettingsReadonlyRow label="地址">
+        <SettingsReadonlyRow label={codex.proxyAddressLabel}>
           127.0.0.1:{snapshot.proxyPort}
         </SettingsReadonlyRow>
         <SettingsFieldRow
-          label="端口"
+          label={codex.proxyPortLabel}
           htmlFor="proxy-port"
           className="settings-field-row-with-action"
         >
@@ -275,7 +292,7 @@ export function CodexSettings({
             disabled={busy || Number(port) === snapshot.proxyPort}
             onClick={() => void run(() => applyProxyPort(Number(port)))}
           >
-            应用端口
+            {codex.proxyPortApply}
           </SettingsButton>
         </SettingsFieldRow>
       </SettingsSection>
@@ -286,7 +303,7 @@ export function CodexSettings({
         onFocusConsumed={onImageGenerationFocused}
       />
       <SettingsSection
-        title="Codex 配置"
+        title={codex.configSectionTitle}
         status={
           <SettingsStatus
             tone={
@@ -301,7 +318,7 @@ export function CodexSettings({
           </SettingsStatus>
         }
       >
-        <SettingsReadonlyRow label="配置文件">
+        <SettingsReadonlyRow label={codex.configFileLabel}>
           ~/.codex/config.toml
         </SettingsReadonlyRow>
         <SettingsActionGroup>
@@ -315,7 +332,7 @@ export function CodexSettings({
               {busyOperation === "images_mcp_repair" ? (
                 <LoaderCircle aria-hidden="true" className="spin" size={15} />
               ) : null}
-              修复图片配置
+              {codex.imagesRepairAction}
             </SettingsButton>
           ) : null}
           {snapshot.codexStatus === "not_connected" ? (
@@ -325,7 +342,7 @@ export function CodexSettings({
               disabled={busy}
               onClick={connect}
             >
-              一键连接 Codex
+              {codex.connectAction}
             </SettingsButton>
           ) : null}
           {snapshot.codexStatus === "changed" ? (
@@ -335,7 +352,7 @@ export function CodexSettings({
               disabled={busy}
               onClick={() => void run(reconnectCodex)}
             >
-              重新连接 Codex
+              {codex.reconnectAction}
             </SettingsButton>
           ) : null}
           <SettingsButton
@@ -344,39 +361,42 @@ export function CodexSettings({
             onClick={() => void run(openCodexConfig)}
           >
             <FolderOpen aria-hidden="true" size={16} />
-            打开 config.toml
+            {codex.openConfigAction}
           </SettingsButton>
         </SettingsActionGroup>
         {imageMcpProjectionConflict ? (
           <p className="settings-error codex-config-conflict-message">
-            图片工具配置已被修改，自动重连无法继续。
+            {codex.imagesProjectionConflictMessage}
           </p>
         ) : null}
         {imageMcpNameConflict ? (
           <p className="settings-error codex-config-conflict-message">
-            首次连接前已存在同名配置，请先重命名或移除。
+            {codex.imagesNameConflictMessage}
           </p>
         ) : null}
       </SettingsSection>
       <CodexAuthSettingsSection snapshot={snapshot} />
       <SettingsSection
-        title="断开恢复配置"
+        title={codex.recoverySectionTitle}
         status={
           <SettingsStatus tone={recoveryStatus.tone}>
             {recoveryStatus.label}
           </SettingsStatus>
         }
       >
-        <SettingsReadonlyRow label="恢复目标">
+        <SettingsReadonlyRow label={codex.recoveryTargetLabel}>
           {!hasRecoveryConfig
-            ? "尚未创建"
+            ? codex.recoveryNotCreated
             : snapshot.recoveryConfig.originalExists
-              ? "config.toml 存在"
-              : "断开后删除 config.toml"}
+              ? codex.recoveryTargetExists
+              : codex.recoveryTargetDelete}
         </SettingsReadonlyRow>
-        <SettingsReadonlyRow label="更新时间">
+        <SettingsReadonlyRow label={codex.recoveryUpdatedAtLabel}>
           {hasRecoveryConfig
-            ? formatDateTime(snapshot.recoveryConfig.updatedAtMs)
+            ? formatDateTime(
+                snapshot.recoveryConfig.updatedAtMs,
+                effectiveLocale,
+              )
             : "-"}
         </SettingsReadonlyRow>
         <SettingsActionGroup className="codex-recovery-actions">
@@ -390,23 +410,28 @@ export function CodexSettings({
             busyOperation === "recovery_update" ? (
               <LoaderCircle aria-hidden="true" className="spin" size={15} />
             ) : null}
-            更新恢复配置
+            {codex.recoveryUpdateAction}
           </SettingsButton>
         </SettingsActionGroup>
         <p className="muted-text codex-recovery-hint">
           {!hasOriginalBackup
-            ? "首次连接前没有可用的原始备份。"
+            ? codex.recoveryHintNoBackup
             : !disconnected
-              ? "断开 Codex 后才能从当前 config.toml 更新。"
-              : "断开连接时，将完整恢复这份配置。更新后仍保持断开。"}
+              ? codex.recoveryHintNotDisconnected
+              : codex.recoveryHintReady}
         </p>
         <div className="codex-recovery-advanced">
           <div>
-            <strong>原始备份</strong>
+            <strong>{codex.originalBackupTitle}</strong>
             <span>
               {hasOriginalBackup
-                ? `首次连接前 · ${formatDateTime(snapshot.originalBackup.capturedAtMs)} · 永久保留`
-                : "首次连接前没有可用备份"}
+                ? codex.originalBackupSummary(
+                    formatDateTime(
+                      snapshot.originalBackup.capturedAtMs,
+                      effectiveLocale,
+                    ),
+                  )
+                : codex.originalBackupMissing}
             </span>
           </div>
           <SettingsButton
@@ -415,19 +440,19 @@ export function CodexSettings({
             disabled={busy || !disconnected || !hasOriginalBackup}
             onClick={restore}
           >
-            恢复首次连接前状态
+            {codex.recoveryResetAction}
           </SettingsButton>
         </div>
         {recoveryError ? (
           <p className="settings-error codex-recovery-error" role="alert">
-            {recoveryError}
+            {ipcErrorMessage(recoveryError, messages)}
           </p>
         ) : null}
       </SettingsSection>
       <PricingTableSettings snapshot={pricingTable} />
       {error ? (
         <p className="settings-error" role="alert">
-          {error}
+          {ipcErrorMessage(error, messages)}
         </p>
       ) : null}
       {confirmation ? (

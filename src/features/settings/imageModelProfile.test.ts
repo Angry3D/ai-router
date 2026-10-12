@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import fixtures from "../../../fixtures/image-model-profile-contract.json";
+import { languageMessages } from "../language/languageMessages";
 import {
   IMAGE_MODEL_PRESETS,
   imageModelProfileLines,
@@ -8,6 +9,9 @@ import {
   isImageModelPreset,
   profileForModel,
 } from "./imageModelProfile";
+
+const profileMessages =
+  languageMessages["zh-CN"].imagesPricing.imageGeneration.modelProfile;
 
 describe("profileForModel", () => {
   it.each(fixtures)("matches the Rust contract for $model", (fixture) => {
@@ -51,7 +55,7 @@ describe("imageModelTooltipLines", () => {
     "超过 3,686,400 像素属于实验性范围。常用尺寸：1024x1024、1536x1024、1024x1536、2048x1152、3840x2160。";
 
   it("describes the flexible-extended profile with the extra quality levels", () => {
-    expect(imageModelTooltipLines("gpt-image-2.5-flare")).toEqual([
+    expect(imageModelTooltipLines("gpt-image-2.5-flare", profileMessages)).toEqual([
       "模型：gpt-image-2.5-flare",
       "每次生成一张 PNG。",
       flexibleSizeLine,
@@ -61,7 +65,7 @@ describe("imageModelTooltipLines", () => {
   });
 
   it("describes the flexible profile with the base quality levels", () => {
-    expect(imageModelTooltipLines("gpt-image-2")).toEqual([
+    expect(imageModelTooltipLines("gpt-image-2", profileMessages)).toEqual([
       "模型：gpt-image-2",
       "每次生成一张 PNG。",
       flexibleSizeLine,
@@ -71,23 +75,25 @@ describe("imageModelTooltipLines", () => {
   });
 
   it("describes the standard profile with the fixed size list", () => {
-    expect(imageModelTooltipLines("gpt-image-1.5")).toEqual([
+    expect(imageModelTooltipLines("gpt-image-1.5", profileMessages)).toEqual([
       "模型：gpt-image-1.5",
       "每次生成一张 PNG。",
       "尺寸仅支持 auto、1024x1024、1536x1024、1024x1536。",
       "质量：low、medium、high、auto。",
     ]);
-    expect(imageModelProfileLines("standard")).not.toContain(
+    expect(imageModelProfileLines("standard", profileMessages)).not.toContain(
       flexibleExperimentalLine,
     );
   });
 
   it("trims the model line and falls back to a placeholder when empty", () => {
-    expect(imageModelTooltipLines("  relay-image-2.5  ")[0]).toBe(
+    expect(imageModelTooltipLines("  relay-image-2.5  ", profileMessages)[0]).toBe(
       "模型：relay-image-2.5",
     );
-    const [modelLine, ...rules] = imageModelTooltipLines("   ");
+    const [modelLine, ...rules] = imageModelTooltipLines("   ", profileMessages);
     expect(modelLine).toBe("模型：—");
-    expect(rules).toEqual(imageModelProfileLines("flexible_extended"));
+    expect(rules).toEqual(
+      imageModelProfileLines("flexible_extended", profileMessages),
+    );
   });
 });

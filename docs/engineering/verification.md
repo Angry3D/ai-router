@@ -1,25 +1,26 @@
-# 风险对应的验证策略
+# Verification strategy by risk
 
-验证目标是证明本次改动改变的行为，而不是无条件运行所有命令。先列出变更文件、可观察结果、跨层
-契约和还缺少的证据，再选择能关闭证据缺口的最小命令。
+The goal of verification is to prove the behavior this change alters, not to run every command
+unconditionally. First list the changed files, observable results, cross-layer contracts, and evidence
+still missing, then choose the smallest command that closes the evidence gap.
 
-| 改动范围                                            | 最小充分证据                                                          |
-| --------------------------------------------------- | --------------------------------------------------------------------- |
-| 文档、Issue/PR 模板                                 | `pnpm docs:check`、`git diff --check`                                 |
-| 单个 React 组件/工具                                | 对应 Vitest、`pnpm typecheck`、`pnpm lint`                            |
-| 单个 Rust 模块                                      | 对应 `cargo test` filter、`cargo fmt --check`、受影响 crate 的 Clippy |
-| Rust/TypeScript DTO                                 | producer/consumer 测试、`pnpm generate:types`、前后端静态检查         |
-| Codex 凭证（Cookie 解密与 `auth.json` 写入）        | 对应 Rust 模块测试、前端设置测试、`pnpm generate:types`、前后端静态检查；真实 Chrome 与钥匙串授权属于人工 QA |
-| Web 入口或 bundler                                  | 前端全测、`pnpm build`                                                |
-| schema、恢复、路由并发、SSE、native lifecycle、发布 | 对应领域完整测试和 workspace 检查；必要时 QA `.app`                   |
+| Change scope                                                                  | Minimum sufficient evidence                                                                                                                              |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Docs, issue/PR templates                                                      | `pnpm docs:check`, `git diff --check`                                                                                                                    |
+| A single React component/utility                                              | The matching Vitest, `pnpm typecheck`, `pnpm lint`                                                                                                       |
+| A single Rust module                                                          | The matching `cargo test` filter, `cargo fmt --check`, Clippy for the affected crate                                                                     |
+| Rust/TypeScript DTO                                                           | producer/consumer tests, `pnpm generate:types`, frontend and backend static checks                                                                       |
+| Codex credentials (cookie decryption and `auth.json` writing)                 | Matching Rust module tests, frontend settings tests, `pnpm generate:types`, frontend and backend static checks; real Chrome and keychain authorization belong to manual QA |
+| Web entry or bundler                                                          | Full frontend test suite, `pnpm build`                                                                                                                   |
+| schema, recovery, routing concurrency, SSE, native lifecycle, release         | Full domain tests and workspace checks for the affected area; the QA `.app` when necessary                                                               |
 
-聚焦前端测试直接运行：
+Run a focused frontend test directly:
 
 ```sh
 pnpm exec vitest run <test-file>
 ```
 
-Rust 聚焦示例：
+Focused Rust examples:
 
 ```sh
 cargo test -p router-core <test-filter>
@@ -27,7 +28,7 @@ cargo clippy -p router-core --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-跨层或高风险基线：
+Cross-layer or high-risk baseline:
 
 ```sh
 pnpm lint
@@ -39,49 +40,73 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-## 领域证据
+## Domain evidence
 
-- 数据库/schema：迁移、完整性、外键、权限、symlink/unsafe path、事务回滚和旧数据兼容。
-- 恢复：sanitized round trip、敏感/非关键表边界、保留策略、损坏主库、发布/回滚失败。
-- 路由/回退：不可变快照、响应提交边界、重试分类、尝试上限、并发 generation、持久激活。
-- SSE：首输出、token、终止状态、终止前/后断流和有界错误。
-- 出站代理：合成系统配置下的 HTTP/HTTPS/SOCKS、原生绕过规则、Custom 优先、环境隔离、失败不直连、
-  回环重定向防逃逸，以及更新/下载间的策略切换和在途快照。原生读取/通知只在隔离 QA 中验收，不修改
-  工作站代理配置；updater 使用临时签名密钥与本地元数据/归档，验证有效签名及错误签名拒绝，不安装。
-- 图片 MCP：Base64/URL 来源优先级、系统/自定义代理资产 GET、凭据隔离、逐跳路由与重定向/下载预算、
-  完整 PNG 校验、取消期间共享许可、六字段错误状态来源，以及成功八字段兼容和 HTTP 字节透传。
-  网络测试只使用合成响应与 loopback 服务；不恢复已移除的 URL/DNS/公网地址/远端 peer 准入限制。
-- Codex 配置：基线不可变、provider identity、无关字段保留、symlink、fingerprint 竞态和精确恢复。
-- Codex 凭证：用测试密钥构造的合成 Cookie 数据库做 `v10` 解密往返（PBKDF2-SHA1/AES-128-CBC 与
-  host 哈希前缀校验）、未知前缀拒绝、浏览器/配置发现的三类失败关闭、`auth.json` 结构校验（字段
-  集合、三段 `id_token`、`account_id`/`expires` 映射）、`cli_auth_credentials_store` 与托管锁拒绝、
-  备份与还原字节相等、最近 5 份保留、symlink 拒绝、写入前 fingerprint 漂移和外部修改检测，以及
-  过期状态；会话端点覆盖的 QA loopback 覆写限定本机回环。测试只使用临时 `CODEX_HOME` 与合成数据，
-  不访问真实 Chrome、钥匙串、`chatgpt.com` 或真实 `~/.codex`。真实站点可达性、钥匙串授权弹窗、
-  Codex TUI 登录门和秘密扫描属于人工 QA。2026-09-30 的人工 QA（dev/QA 隔离 profile + 真实 Chrome
-  会话）：导出只落在隔离 `codex-home`（登录/凭据目标路径与生产 `~/.codex` 相互独立），
-  `codex login status` 在 `codex-cli` 0.157.1 与当前 stable 0.159.2 均报 ChatGPT 登录，pty 捕获的
-  交互式 TUI 无登录屏；日志、恢复点与 `codex-auth-meta.json` 秘密扫描无令牌材料，`pnpm security:check`
-  通过。钥匙串拒绝与"Chrome 未登录"两项未在真机重放（等价错误分类由自动化覆盖）。同次 QA 中，
-  `cli_auth_credentials_store = "keyring"` 时导出被拒绝且 `auth.json`/元数据字节与 mtime 完全未变
-  （拒绝发生在读取钥匙串与任何网络请求之前），随后「还原原凭证」写回的字节与所选备份逐字节相等，
-  导出事实被清空并回到未导出状态。
-- 价格同步：档位匹配器矩阵（`data-value` 稳定标识优先于可见文案，2026-09-29 的 `Fast mode`
-  形态仍能命中）、脚本契约在 jsdom 中对刷新后的复刻页抽取并与重新生成的负载 fixture 逐字节
-  比对、解析负例（缺列/坏数字/重复/阈值冲突/超限）、loopback fixture 的端到端替换与
-  `StateArea::PricingTable` 发布、单飞等待者回归，以及隐藏窗口/导航取消的隔离断言；失败分类与
-  快照不变量由不访问真实站点的单测证明（`CaptureError` 全变体 → 类别与 reason、仅 `error` 暴露
-  `failure`、成功后清除、页面未加载的脚本失败归 `Transport`、页面加载完成后的预算超时归 `Page`
-  且 reason 为 `capture-no-report`）。自动化不访问真实官网。真实站点的
-  可达性与 DOM 兼容属于人工 QA：用 QA bundle（隔离身份与数据）对真站手动同步一次，并各核对一次
-  Page 与 Transport 两类失败文案，在 `920 x 640` 与 `760 x 560`、明/暗两套主题下确认状态行不折行
-  推动布局且无横向溢出。任何页面结构变化必须失败关闭并保留旧表。
-- 原生生命周期：只使用 QA identity，验证隐藏/重开、主线程 generation、菜单聚焦和生产连续性。
-- 发布：锁定工具链、稳定 tag/ref/version/commit、ad-hoc bundle 身份、arm64/minimum OS、updater
-  签名、DMG 内容、`latest.json`、checksums、draft 回读、provenance、secret/path scan 和公开原子性。
+- Database/schema: migrations, integrity, foreign keys, permissions, symlink/unsafe paths, transaction
+  rollback, and legacy data compatibility.
+- Recovery: sanitized round trip, sensitive/non-critical table boundaries, retention policy, a corrupt
+  main database, publication/rollback failure.
+- Routing/fallback: immutable snapshots, the response-commit boundary, retry classification, the
+  attempt cap, concurrent generations, persisted activation.
+- SSE: first output, tokens, terminal state, a disconnect before/after termination, and bounded errors.
+- Outbound proxy: HTTP/HTTPS/SOCKS under a synthetic system configuration, native bypass rules,
+  custom-over-system precedence, environment isolation, no direct connection on failure,
+  loopback-redirect escape prevention, and policy switching/in-flight snapshots across update and
+  download. Native reads/notifications are accepted only in isolated QA and do not modify workstation
+  proxy configuration; the updater uses a temporary signing key with local metadata/archives to verify
+  a valid signature and the rejection of a bad signature, without installing.
+- Images MCP: base64/URL source precedence, system/custom-proxy asset GET, credential isolation,
+  per-hop routing and the redirect/download budget, full PNG validation, the shared permit during
+  cancellation, the six-field error status source, and the eight-field success compatibility and HTTP
+  byte passthrough. Network tests use only synthetic responses and loopback services; do not restore
+  the removed URL/DNS/public-address/remote-peer admission restrictions.
+- Codex configuration: immutable baseline, provider identity, preservation of unrelated fields,
+  symlinks, fingerprint races, and exact restoration.
+- Codex credentials: a `v10` decryption round trip using a synthetic cookie database built with test
+  keys (PBKDF2-SHA1/AES-128-CBC and the host-hash prefix check), rejection of unknown prefixes, the
+  three kinds of fail-closed browser/config discovery, `auth.json` structure validation (field set,
+  the three-part `id_token`, the `account_id`/`expires` mapping), rejection of
+  `cli_auth_credentials_store` and managed locks, byte-equal backup and restore, the 5-most-recent
+  retention, symlink rejection, fingerprint drift before writing and external-modification detection,
+  and expiry status; the session-endpoint QA loopback override is limited to local loopback. Tests use
+  only a temporary `CODEX_HOME` and synthetic data and do not access real Chrome, the keychain,
+  `chatgpt.com`, or a real `~/.codex`. Real-site reachability, the keychain authorization prompt, the
+  Codex TUI login gate, and secret scanning belong to manual QA. Manual QA on 2026-09-30 (dev/QA
+  isolated profile + a real Chrome session): the export landed only in the isolated `codex-home` (the
+  login/credential target paths are independent of the production `~/.codex`), `codex login status`
+  reported a ChatGPT login on both `codex-cli` 0.157.1 and the current stable 0.159.2, and the
+  interactive TUI captured over a pty had no login screen; secret scanning of the logs, recovery
+  points, and `codex-auth-meta.json` found no token material, and `pnpm security:check` passed. The
+  two items of keychain rejection and "Chrome not logged in" were not replayed on real hardware
+  (equivalent error classifications are covered by automation). In the same QA, with
+  `cli_auth_credentials_store = "keyring"` the export was rejected and the bytes and mtime of
+  `auth.json`/metadata were completely unchanged (the rejection happened before reading the keychain
+  and before any network request), and "restore original credentials" then wrote back bytes that were
+  byte-equal to the selected backup, clearing the exported state and returning to not-exported.
+- Pricing sync: the tier-matcher matrix (a stable `data-value` identifier takes precedence over
+  visible copy, and the `Fast mode` shape from 2026-09-29 still matches), the script contract
+  extracting from a refreshed replica page in jsdom and comparing byte-for-byte against a regenerated
+  payload fixture, parse negatives (missing column/bad number/duplicate/threshold conflict/over-limit),
+  end-to-end replacement of the loopback fixture and `StateArea::PricingTable` publication,
+  single-flight waiter regression, and isolation assertions for the hidden window/navigation
+  cancellation; failure classification and snapshot invariants are proven by unit tests that do not
+  access the real site (all `CaptureError` variants → category and reason, only `error` exposes
+  `failure`, cleared after success, a script failure before page load classified as `Transport`, and a
+  budget timeout after page load classified as `Page` with reason `capture-no-report`). Automation does
+  not access the real official site. Real-site reachability and DOM compatibility belong to manual QA:
+  sync once against the real site with the QA bundle (isolated identity and data) and check one Page
+  and one Transport failure message, confirming at `920 x 640` and `760 x 560` under both light and
+  dark themes that the status line does not wrap and push the layout and that there is no horizontal
+  overflow. Any page-structure change must fail closed and keep the old table.
+- Native lifecycle: use only the QA identity and verify hidden/reopen, main-thread generation, menu
+  focus, and production continuity.
+- Release: pinned toolchain, stable tag/ref/version/commit, ad-hoc bundle identity, arm64/minimum OS,
+  updater signature, DMG content, `latest.json`, checksums, draft read-back, provenance, secret/path
+  scan, and publication atomicity.
 
-GitHub required checks、native source build 和仓库安全功能的稳定名称与配置见
-[GitHub CI 与安全设置](./github-security-settings.md)。修改 workflow、Dependabot 或供应链策略时运行：
+The stable names and configuration of GitHub required checks, the native source build, and repository
+security features are in [GitHub CI and security settings](./github-security-settings.md). When
+changing workflows, Dependabot, or supply-chain policy, run:
 
 ```sh
 pnpm ci:policy
@@ -91,34 +116,46 @@ pnpm contracts:check
 pnpm check:codex-retries
 ```
 
-公开 GitHub checkout 使用 `security:public:check` 和 `license:public:check`，因此任何私有 workflow 路径、
-禁止的模板标记、未声明视觉资产或敏感文本都会令 required check 失败。私有维护仓库使用
-`security:check` 扫描其公开投影，并使用 `license:check` 审计元数据、来源和依赖；两者都不会把刻意保留的
-Trellis 根误报为待发布文件。提交后的公开 export 仍必须运行两个 `public` 命令。
+A public GitHub checkout uses `security:public:check` and `license:public:check`, so any private
+workflow path, forbidden template marker, undeclared visual asset, or sensitive text fails the
+required check. The private maintenance repository uses `security:check` to scan its public projection
+and `license:check` to audit metadata, provenance, and dependencies; neither misreports the
+intentionally retained Trellis root as a file to publish. A public export made after committing must
+still run both `public` commands.
 
-CI 原生源码验证使用 `pnpm tauri:source:build` 显式关闭签名；本地生产构建仍使用
-`pnpm tauri:prod:build`。两个命令都只生成工作区内的 bundle，不安装或启动应用。
+CI native source verification uses `pnpm tauri:source:build` to disable signing explicitly; local
+production builds still use `pnpm tauri:prod:build`. Both commands produce only a bundle inside the
+workspace and neither installs nor launches the app.
 
-正式发布只在 protected `release` environment 中运行 `release:validate`、`release:draft`、
-`release:build`、`release:prepare` 与 `release:publish`。本地只运行合成 fixture 的 release 脚本测试；
-不得为了验证流程读取真实 updater secret、创建 tag 或操作 GitHub Release。
+Official releases run `release:validate`, `release:draft`, `release:build`, `release:prepare`, and
+`release:publish` only in the protected `release` environment. Locally, run only the synthetic-fixture
+release script tests; do not read real updater secrets, create tags, or operate GitHub Releases just to
+verify the flow.
 
-最后一个命令只启动临时 loopback fixture，使用 lockfile 固定的 `codex-cli 0.160.0` 和临时
-`CODEX_HOME`，不读取用户 Codex 配置或真实上游。
+The last command starts only a temporary loopback fixture, using the lockfile-pinned
+`codex-cli 0.160.0` and a temporary `CODEX_HOME`, and does not read the user's Codex configuration or a
+real upstream.
 
-## 避免重复
+## Avoiding duplication
 
-相关文件没有再变化时，可以复用已经通过的检查。一次局部测试通过后，只有完整 suite 能证明另一个
-明确风险时才继续扩大。文档变更不触发 Rust workspace、前端 build 或原生 bundle；任务状态更新也
-不要求重跑产品测试。
+A check that already passed may be reused when the related files have not changed again. After a
+focused test passes, expand further only when the full suite can prove another specific risk. A
+documentation change does not trigger the Rust workspace, the frontend build, or a native bundle; a
+task status update also does not require rerunning product tests.
 
-状态同步测试应挂载真实 QueryClient 与查询消费者，验证事件、漏事件和订阅注册失败后界面数据的变化，
-不要仅断言 `invalidateQueries` 的调用参数。设置窗口重新聚焦必须补偿价格表等独立快照；菜单快照另由
-原生准备展示事件重新获取。延迟注册在卸载后完成时必须释放监听，失效回调不得再修改缓存。
+State-synchronization tests should mount the real QueryClient and query consumers and verify how the
+UI data changes after an event, a missed event, and a failed subscription registration, rather than
+only asserting the call arguments of `invalidateQueries`. Refocusing the Settings window must
+compensate for independent snapshots such as the price table; the menu snapshot is instead re-fetched
+by the native prepare-reveal event. A late registration that completes after unmount must release its
+listener, and an invalidation callback must no longer modify the cache.
 
-样式源码包含某条 CSS 声明不能证明实际布局正确。布局变化使用合成数据在真实浏览器检查尺寸、溢出、
-滚动和键盘焦点，并明确与 macOS 原生窗口验证的区别；不通过重新固定 CSS 字符串维护测试。
-入口 HTML 的 CSP nonce 占位元素属于安全结构契约，应保留 DOM 结构校验，而不是依赖标签的精确写法。
+A stylesheet containing a given CSS declaration does not prove the actual layout is correct. Check
+layout changes with synthetic data in a real browser for size, overflow, scrolling, and keyboard focus,
+and state clearly the difference from macOS native window verification; do not maintain tests by
+re-pinning CSS strings. The CSP nonce placeholder element in the entry HTML is part of the security
+structure contract, so keep the DOM structure assertion instead of relying on the exact tag spelling.
 
-人工 QA 只覆盖自动化无法可靠判断的视觉层级、文字、焦点、真实 OS 集成和外部环境。不要让人工重复
-数据库迁移、校验、竞态或恢复状态转换等已经自动证明的行为。
+Manual QA covers only the visual hierarchy, copy, focus, real OS integration, and external environment
+that automation cannot reliably judge. Do not make people repeat behaviors already proven
+automatically, such as database migrations, validation, races, or recovery state transitions.

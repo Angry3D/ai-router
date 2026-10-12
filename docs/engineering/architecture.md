@@ -1,9 +1,10 @@
-# 架构与代码边界
+# Architecture and code boundaries
 
-AI Router 是一个单进程 Tauri 菜单栏应用。Rust 拥有持久化和运行时状态，React WebView 通过类型化
-IPC 展示快照并发起命令。代理和界面共享同一 Rust 运行时，不存在独立云服务。
+AI Router is a single-process Tauri menu bar app. Rust owns persistence and runtime state; the React
+WebView renders snapshots and issues commands over typed IPC. The proxy and the UI share one Rust
+runtime; there is no separate cloud service.
 
-## 代码层次
+## Code layers
 
 ```text
 Codex CLI / Codex App
@@ -20,49 +21,66 @@ React menu + Settings WebViews
 user-configured upstream Responses APIs
 ```
 
-`crates/router-core/` 是领域权威：
+`crates/router-core/` is the domain authority:
 
-- `domain.rs` 校验 route ID、Base URL、API Key、设置值和共享枚举；
-- `storage.rs` 保留专用 SQLite executor、公开记录类型和路由/配置事务；`storage/schema.rs` 负责
-  连接初始化、迁移与完整性校验，`storage/history.rs` 在同一 executor 上实现历史记录、用量查询和统计；
-- `proxy.rs` 与 `proxy/` 负责 loopback ingress、Responses 流式转发、历史和回退；
-- `codex_config.rs` 与 `codex_catalog.rs` 管理受保护的 Codex 投影和派生模型目录；
-- `pricing.rs`、`pricing_local.rs` 与 `pricing_capture.rs` 管理内嵌/本地价格目录、定价计算与
-  抓取负载的解析校验（金额语法、分档无缝、模型 id 过滤、失败关闭）；
-- `recovery.rs` 负责关键配置恢复点；`runtime_log.rs` 负责有界日志维护；
-- `app_api.rs`、`state.rs` 和其他带 `TS` 导出的 Rust 类型构成 IPC 契约。
+- `domain.rs` validates route IDs, base URLs, API keys, settings values, and shared enums;
+- `storage.rs` keeps the dedicated SQLite executor, public record types, and route/config
+  transactions; `storage/schema.rs` owns connection initialization, migrations, and integrity
+  checks, while `storage/history.rs` implements history records, usage queries, and statistics on
+  the same executor;
+- `proxy.rs` and `proxy/` own the loopback ingress, Responses streaming forwarding, history, and
+  fallback;
+- `codex_config.rs` and `codex_catalog.rs` manage the protected Codex projection and the derived
+  model catalog;
+- `pricing.rs`, `pricing_local.rs`, and `pricing_capture.rs` manage the embedded/local pricing
+  catalog, price computation, and parsing/validation of capture payloads (amount syntax, contiguous
+  tiers, model id filtering, fail closed);
+- `recovery.rs` owns critical-configuration recovery points; `runtime_log.rs` owns bounded log
+  maintenance;
+- `app_api.rs`, `state.rs`, and other Rust types with `TS` exports form the IPC contract.
 
-`src-tauri/` 是桌面组合边界。它可以创建服务、映射安全错误、发布状态事件、管理托盘/窗口并调用
-macOS API，但不应拥有 SQL 或复制核心路由规则。`application_update.rs` 是 Tauri updater 的唯一
-应用边界：它拥有远端元数据校验、pending update、单操作 gate、进度、安装与 graceful restart 意图。
-`pricing_sync.rs` 拥有手动「同步官网」的隐藏 WebView 生命周期：窗口只从 Rust 创建、不加入任何
-capability、只允许官方定价页与 capture scheme 的导航，并把抓取负载交给 `router-core` 校验后才落盘。
-`runtime.rs` 保留桌面服务、路由与恢复协调；`runtime/logging.rs` 归拢日志插件、控制器和日志命令，
-`runtime/errors.rs` 集中纯错误分类与安全 IPC 映射。模块拆分不创建新数据库线程或锁，也不改变
-持久化、内存投影和事件发布的顺序。
+`src-tauri/` is the desktop composition boundary. It may create services, map safe errors, publish
+state events, manage the tray/windows, and call macOS APIs, but it must not own SQL or duplicate core
+routing rules. `application_update.rs` is the sole application boundary for the Tauri updater: it
+owns remote metadata validation, the pending update, the single-operation gate, progress,
+installation, and the graceful-restart intent. `pricing_sync.rs` owns the lifecycle of the hidden
+WebView behind the manual "sync official site": the window is created only from Rust, is added to no
+capability, is allowed to navigate only to the official pricing page and the capture scheme, and
+hands the captured payload to `router-core` for validation before anything is written to disk.
+`runtime.rs` keeps desktop services, routing, and recovery coordination; `runtime/logging.rs`
+consolidates the log plugin, controller, and log commands, and `runtime/errors.rs` centralizes pure
+error classification and safe IPC mapping. Splitting modules creates no new database thread or lock
+and does not change the order of persistence, in-memory projection, and event publication.
 
-`src/` 按功能组织菜单、设置和共享展示组件。`src/api/ipc.ts` 集中命令调用，`src/api/query.ts`
-管理 React Query 快照和状态失效。`src/generated/` 来自 Rust，不能手工修改。
+`src/` organizes the menu, settings, and shared presentational components by feature. `src/api/ipc.ts`
+centralizes command calls, and `src/api/query.ts` manages React Query snapshots and state
+invalidation. `src/generated/` comes from Rust and must not be edited by hand.
 
-Codex 设置按操作所有权拆分：`CodexSettings.tsx` 组合页面并保留端口、连接、配置修复与恢复操作的
-共享互斥；`CodexAuthSettingsSection.tsx` 独立管理凭证导出/还原及失败重试；
-`ImageGenerationSettingsSection.tsx` 管理图片生成草稿和独立的容量管理操作。
-图片组件的重建 key 仍由父组件根据生成配置和路由列表生成，容量使用刷新不得重建组件或清空草稿。
-`codexSettingsFormatting.ts` 只共享该页面的日期显示，不承载业务规则。
+Codex settings are split by operation ownership: `CodexSettings.tsx` composes the page and holds the
+shared mutex for port, connection, config repair, and recovery operations;
+`CodexAuthSettingsSection.tsx` independently manages credential export/restore and failure retries;
+`ImageGenerationSettingsSection.tsx` manages the image generation draft and independent
+capacity-management operations. The image component's remount key is still generated by the parent
+from the generation configuration and the route list, and refreshing capacity usage must not remount
+the component or clear the draft. `codexSettingsFormatting.ts` shares only that page's date
+formatting and carries no business rules.
 
-## 状态流
+## State flow
 
-写操作先通过 Rust 校验并在需要时原子持久化，再更新内存路由快照，最后发布带 revision 的状态区域
-事件。React 收到事件后只失效相关查询。界面本地状态可以保存输入草稿和交互状态，但不能成为路由、
-恢复、连接或应用更新状态的持久权威。高频更新下载进度只走 typed channel；稳定状态边界才发布
-`StateArea::ApplicationUpdate`，并只失效更新 snapshot。
+Write operations are first validated by Rust and, when needed, atomically persisted, then update the
+in-memory routing snapshot, and finally publish a state-area event with a revision. On receiving the
+event, React invalidates only the affected queries. UI-local state may hold input drafts and
+interaction state but must not become the persistent authority for routing, recovery, connection, or
+app update state. High-frequency download progress travels only over the typed channel; only stable
+state boundaries publish `StateArea::ApplicationUpdate`, and only the update snapshot is invalidated.
 
-错误在 core 中保持具体分类，到 `src-tauri` 才映射成稳定 `code`、安全中文消息、可重试标记和可选
-字段名。IPC 不返回 SQL、文件绝对路径、TOML、原始上游 body 或凭据。
+Errors stay concretely classified in core and are mapped to a stable `code`, a safe Chinese message,
+a retryable flag, and an optional field name only in `src-tauri`. IPC never returns SQL, absolute file
+paths, TOML, raw upstream bodies, or credentials.
 
-## 生成链
+## Generation chain
 
-修改导出的 Rust DTO 后运行：
+After changing an exported Rust DTO, run:
 
 ```sh
 pnpm generate:types
@@ -70,5 +88,6 @@ pnpm typecheck
 pnpm lint
 ```
 
-提交应同时包含 Rust 来源和经过审查的 `src/generated/` 结果。若生成 diff 出现无关文件，先定位
-注册或序列化漂移，不要手工修补输出。
+A commit should contain both the Rust source and the reviewed `src/generated/` result. If the
+generated diff includes unrelated files, first locate the registration or serialization drift
+instead of patching the output by hand.

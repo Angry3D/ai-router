@@ -1,4 +1,5 @@
 import type { RouteHealthDto } from "../../generated";
+import type { RoutesHealthMessages } from "../language/catalog/routes";
 
 export interface RouteHealthPresentation {
   marker: string | null;
@@ -13,11 +14,12 @@ function remainingSeconds(seconds: number, elapsedSeconds: number) {
 export function routeHealthPresentation(
   health: RouteHealthDto | null,
   active: boolean,
+  messages: RoutesHealthMessages,
   elapsedSeconds = 0,
 ): RouteHealthPresentation {
   if (!health) {
     return {
-      marker: active ? "当前" : null,
+      marker: active ? messages.current : null,
       detail: null,
       tone: "accent",
     };
@@ -27,15 +29,15 @@ export function routeHealthPresentation(
     case "striking":
       return {
         marker: active
-          ? `当前 · ${health.failureCount}/5`
-          : `失败 ${health.failureCount}/5`,
-        detail: `已累计失败 ${health.failureCount}/5 · 仍使用当前路由，不切换`,
+          ? messages.strikingCurrent(health.failureCount)
+          : messages.striking(health.failureCount),
+        detail: messages.strikingDetail(health.failureCount),
         tone: "warning",
       };
     case "switching":
       return {
-        marker: active ? "当前 · 切换中" : "切换中",
-        detail: "已达到 5/5 · 正在切换到可用的后续路由",
+        marker: active ? messages.switchingCurrent : messages.switching,
+        detail: messages.switchingDetail,
         tone: "warning",
       };
     case "switch_pending": {
@@ -44,11 +46,11 @@ export function routeHealthPresentation(
           ? null
           : remainingSeconds(health.retryAfterSeconds, elapsedSeconds);
       return {
-        marker: active ? "当前 · 待切换" : "待切换",
+        marker: active ? messages.switchPendingCurrent : messages.switchPending,
         detail:
           remaining !== null && remaining > 0
-            ? `已达到 5/5 · ${remaining} 秒后重试切换，仍使用当前路由`
-            : "已达到 5/5 · 等待可用的后续路由",
+            ? messages.switchPendingDetail(remaining)
+            : messages.switchPendingWaiting,
         tone: "warning",
       };
     }
@@ -59,37 +61,39 @@ export function routeHealthPresentation(
       );
       if (health.recoverySuccesses > 0) {
         return {
-          marker: "恢复 1/2",
+          marker: messages.recovering,
           detail:
             remaining > 0
-              ? `已通过 1/2 次恢复验证 · ${remaining} 秒后再次验证`
-              : "已通过 1/2 次恢复验证 · 等待下一个兼容请求",
+              ? messages.recoveringDetailRemaining(remaining)
+              : messages.recoveringDetailWaiting,
           tone: "warning",
         };
       }
       if (remaining > 0) {
         return health.origin === "model_bypassed"
           ? {
-              marker: `待验证 · ${remaining}s`,
-              detail: `曾因模型不兼容被跳过 · ${remaining} 秒后等待兼容请求验证`,
+              marker: messages.bypassedMarker(remaining),
+              detail: messages.bypassedDetail(remaining),
               tone: "warning",
             }
           : {
-              marker: `暂停 · ${remaining}s`,
-              detail: `暂停使用 · ${remaining} 秒后可恢复验证`,
+              marker: messages.pausedMarker(remaining),
+              detail: messages.pausedDetail(remaining),
               tone: "warning",
             };
       }
       return {
-        marker: "待验证",
-        detail: "已可恢复验证 · 等待下一个兼容请求",
+        marker: messages.pendingMarker,
+        detail: messages.pendingDetail,
         tone: "warning",
       };
     }
     case "probing":
       return {
-        marker: "验证中",
-        detail: `正在进行第 ${health.recoverySuccesses > 0 ? 2 : 1}/2 次恢复验证`,
+        marker: messages.probingMarker,
+        detail: messages.probingDetail(
+          health.recoverySuccesses > 0 ? 2 : 1,
+        ),
         tone: "accent",
       };
   }

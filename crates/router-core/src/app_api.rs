@@ -203,7 +203,7 @@ pub struct UsageStatisticsBucketDto {
     pub started_at_ms: i64,
     #[ts(type = "number")]
     pub finished_at_ms: i64,
-    pub label: String,
+    pub include_utc_offset: bool,
     #[ts(type = "number")]
     pub request_count: u64,
     pub tokens: UsageStatisticsTokensDto,
@@ -215,7 +215,7 @@ pub struct UsageStatisticsBucketDto {
 #[ts(rename_all = "camelCase")]
 pub struct UsageStatisticsAttributionDto {
     pub key: String,
-    pub label: String,
+    pub label: Option<String>,
     pub is_other: bool,
     pub value: String,
     pub share_percent: String,
@@ -236,6 +236,7 @@ pub struct UsageStatisticsDto {
     pub redirected_request_count: u64,
     pub redirected_total_tokens: String,
     pub granularity: UsageStatisticsGranularityDto,
+    pub time_zone: String,
     pub trend: Vec<UsageStatisticsBucketDto>,
     pub attribution: Vec<UsageStatisticsAttributionDto>,
 }
@@ -245,7 +246,7 @@ pub struct UsageStatisticsDto {
 #[ts(rename_all = "camelCase")]
 pub struct UsageRouteOptionDto {
     pub route_id: RouteId,
-    pub name: String,
+    pub name: Option<String>,
     pub retained: bool,
 }
 
@@ -431,13 +432,14 @@ impl From<UsageStatistics> for UsageStatisticsDto {
                 UsageStatisticsGranularity::Day => UsageStatisticsGranularityDto::Day,
                 UsageStatisticsGranularity::Month => UsageStatisticsGranularityDto::Month,
             },
+            time_zone: value.time_zone,
             trend: value
                 .trend
                 .into_iter()
                 .map(|bucket| UsageStatisticsBucketDto {
                     started_at_ms: bucket.started_at_ms,
                     finished_at_ms: bucket.finished_at_ms,
-                    label: bucket.label,
+                    include_utc_offset: bucket.include_utc_offset,
                     request_count: bucket.request_count,
                     tokens: usage_statistics_tokens(&bucket.tokens),
                     cost_pico_usd: bucket.cost_pico_usd.to_string(),
@@ -1527,17 +1529,18 @@ mod tests {
             redirected_request_count: 1,
             redirected_total_tokens: u64::MAX - 7,
             granularity: UsageStatisticsGranularity::Hour,
+            time_zone: "UTC".to_owned(),
             trend: vec![UsageStatisticsBucket {
                 started_at_ms: 1,
                 finished_at_ms: 2,
-                label: "01/01 00:00".to_owned(),
+                include_utc_offset: false,
                 request_count: 2,
                 tokens,
                 cost_pico_usd: u64::MAX - 5,
             }],
             attribution: vec![UsageStatisticsAttribution {
                 key: "route:test".to_owned(),
-                label: "Test".to_owned(),
+                label: Some("Test".to_owned()),
                 is_other: false,
                 value: u64::MAX - 6,
                 share_percent: "100.0".to_owned(),

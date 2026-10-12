@@ -10,6 +10,7 @@ import {
 import { isTauriRuntime } from "./api/ipc";
 import { queryKeys } from "./api/query";
 import { AppearanceProvider } from "./features/appearance/AppearanceProvider";
+import { LanguageProvider } from "./features/language/LanguageProvider";
 
 function DevelopmentPreviewData({
   queryClient,
@@ -40,10 +41,31 @@ function DevelopmentPreviewData({
           : isFatalIssue(fatalIssue)
             ? fixtures.previewFatalDatabaseBootstraps[fatalIssue]
             : fixtures.previewMenuSnapshot.bootstrap;
-      const bootstrap =
-        theme === "light" || theme === "dark"
+      const localeParam = parameters.get("locale");
+      const preferenceParam = parameters.get("preference");
+      const previewPreference =
+        preferenceParam === "system" ||
+        preferenceParam === "zh-CN" ||
+        preferenceParam === "en"
+          ? preferenceParam
+          : "system";
+      // In system mode the locale parameter is the synthetic platform result;
+      // an explicit preference overrides it. Invalid values stay deterministic.
+      const previewLocale =
+        previewPreference === "system"
+          ? localeParam === "zh-CN" || localeParam === "en"
+            ? localeParam
+            : "en"
+          : previewPreference;
+      const bootstrap = {
+        ...(theme === "light" || theme === "dark"
           ? { ...baseBootstrap, appearancePreference: theme }
-          : baseBootstrap;
+          : baseBootstrap),
+        language: {
+          preference: previewPreference,
+          effectiveLocale: previewLocale,
+        },
+      };
       const baseSettings = fallbackUiPreview
         ? fixtures.previewFallbackUiSettingsSnapshot
         : mode === null && imagesMode === "missing"
@@ -105,9 +127,11 @@ function RuntimeBindings({ view }: { view: AppView }) {
   useBootstrapSnapshot();
   useRouterStateSync(view);
   return (
-    <AppearanceProvider>
-      <App view={view} />
-    </AppearanceProvider>
+    <LanguageProvider view={view}>
+      <AppearanceProvider>
+        <App view={view} />
+      </AppearanceProvider>
+    </LanguageProvider>
   );
 }
 

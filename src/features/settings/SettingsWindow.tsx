@@ -11,6 +11,7 @@ import {
   hideSettingsWindow,
   listenSettingsCloseRequested,
   listenSettingsNavigation,
+  normalizeIpcError,
   openProjectRepository,
 } from "../../api/ipc";
 import {
@@ -23,6 +24,7 @@ import {
 } from "../../api/query";
 import { appVariant } from "../../appVariant";
 import type { RouteId } from "../../generated";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
 import { CodexSettings } from "./CodexSettings";
 import {
   DatabaseStartupErrorPage,
@@ -39,6 +41,8 @@ import { SystemSettings } from "./SystemSettings";
 import { UsageSettings } from "./UsageSettings";
 
 export function SettingsWindow() {
+  const { messages } = useLanguage();
+  const shell = messages.shell;
   const bootstrap = useBootstrapSnapshot();
   const databaseBlocked = isDatabaseSnapshotBlocked(
     bootstrap.data?.lifecycle.phase,
@@ -203,7 +207,7 @@ export function SettingsWindow() {
   return (
     <main
       className="settings-shell"
-      aria-label={`${appVariant.displayName} 设置`}
+      aria-label={shell.shellLabel(appVariant.displayName)}
     >
       <SettingsSidebar
         activeSection={section}
@@ -214,40 +218,40 @@ export function SettingsWindow() {
         items={[
           {
             id: "routes",
-            label: "路由",
+            label: shell.sectionRoutes,
             icon: <Route aria-hidden="true" size={17} />,
           },
           {
             id: "usage",
-            label: "用量",
+            label: shell.sectionUsage,
             icon: <ChartNoAxesColumn aria-hidden="true" size={17} />,
           },
           {
             id: "codex",
-            label: "Codex",
+            label: shell.sectionCodex,
             icon: <Box aria-hidden="true" size={17} />,
             indicatorLabel: settings.data?.mcpImageCapacity.overThreshold
-              ? "生成图片已达到容量提醒阈值"
+              ? shell.indicatorImageCapacity
               : undefined,
           },
           {
             id: "system",
-            label: "系统",
+            label: shell.sectionSystem,
             icon: <SettingsIcon aria-hidden="true" size={17} />,
             indicatorLabel:
               applicationUpdate.data?.available != null
-                ? "有可用更新"
+                ? shell.indicatorUpdateAvailable
                 : undefined,
           },
         ]}
       />
 
       {!databaseBlocked && settings.isPending ? (
-        <div className="settings-loading">正在读取设置...</div>
+        <div className="settings-loading">{shell.loadingSettings}</div>
       ) : null}
       {!databaseBlocked && settings.isError ? (
         <div className="settings-loading settings-error">
-          数据库设置读取失败。
+          {ipcErrorMessage(normalizeIpcError(settings.error), messages)}
         </div>
       ) : null}
 
@@ -297,7 +301,7 @@ export function SettingsWindow() {
         ) : recovery.isError ? (
           <RecoveryLoadErrorPage onRetry={() => recovery.refetch()} />
         ) : (
-          <div className="settings-loading">正在读取恢复点...</div>
+          <div className="settings-loading">{shell.loadingRecoveryPoint}</div>
         )
       ) : null}
 
@@ -312,10 +316,10 @@ export function SettingsWindow() {
       {!databaseBlocked && pendingAction ? (
         <SettingsConfirmDialog
           confirmation={{
-            title: "放弃未保存的修改？",
-            body: "当前设置的修改尚未保存。",
-            confirmLabel: "放弃修改",
-            cancelLabel: "继续编辑",
+            title: shell.unsavedConfirmTitle,
+            body: shell.unsavedConfirmBody,
+            confirmLabel: shell.unsavedConfirmDiscard,
+            cancelLabel: shell.unsavedConfirmContinue,
             destructive: true,
             onConfirm: () => {
               const action = pendingAction;

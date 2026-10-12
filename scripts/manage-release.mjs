@@ -38,10 +38,22 @@ const MAX_RELEASE_NOTE_ITEMS = 20;
 const MAX_RELEASE_NOTE_LINES = 80;
 const MAX_RELEASE_NOTE_CHARS = 4_000;
 const RELEASE_NOTE_SECTIONS = new Map([
+  ["Highlights", "highlights"],
+  ["Fixes", "fixes"],
+  ["Notices", "notices"],
+]);
+// The Chinese counterpart is a separately reviewed projection of the same
+// release, not an authoring alias and not a machine translation of the English
+// file. Both use the published Chinese discriminator so that an installed
+// reader keeps parsing `notes` exactly as it already does.
+const CHINESE_RELEASE_NOTE_SECTIONS = new Map([
   ["重点更新", "highlights"],
   ["问题修复", "fixes"],
   ["注意事项", "notices"],
 ]);
+const CHINESE_RELEASE_NOTE_HEADING_PREFIX = "# AI Router v";
+const CHINESE_RELEASE_NOTE_NAME_SUFFIX = ".zh-CN.md";
+const RELEASE_NOTE_LANGUAGE_LINE = "中文 | [English](#english)";
 
 export class ReleaseError extends Error {}
 
@@ -168,16 +180,65 @@ export function releaseNotes(version, document) {
   return releaseNotesFromDocument(version, document);
 }
 
+const CHINESE_INSTALL_FOOTER = [
+  "首次安装请下载 DMG。该应用使用 ad-hoc 签名，未经 Apple Developer ID 验证或公证。",
+  "已安装支持应用内更新的版本可在“设置 -> 系统 -> 应用更新”中检查并确认安装。",
+];
+const ENGLISH_INSTALL_FOOTER = [
+  "For a first-time install, download the DMG. The app uses an ad-hoc signature and is not verified or notarized with an Apple Developer ID.",
+  "Installed versions that support in-app updates can check for and confirm the install under Settings -> System -> Application updates.",
+];
+
 function releaseNotesFromDocument(version, document) {
-  const authored = parseReleaseNotes(document?.markdown, version).markdown;
+  const pair = resolveNoteProjections(version, document);
+  // Layout is fixed by the task design: the Chinese projection and its install
+  // footer, then one language line, then the English projection and its own
+  // footer, then the version link. Each block is separated by a blank line so
+  // Markdown does not merge the Chinese and English sentences into one
+  // paragraph.
+  const englishContent = pair.english.markdown
+    .split("\n")
+    .slice(2)
+    .map((line) => (line.startsWith("## ") ? `### ${line.slice(3)}` : line))
+    .join("\n")
+    .trim();
   return [
-    authored,
+    pair.chinese.markdown,
     "",
-    "首次安装请下载 DMG。该应用使用 ad-hoc 签名，未经 Apple Developer ID 验证或公证。",
-    "已安装支持应用内更新的版本可在“设置 -> 系统 -> 应用更新”中检查并确认安装。",
+    ...CHINESE_INSTALL_FOOTER,
     "",
-    `版本详情：https://github.com/${REPOSITORY}/releases/tag/v${version}`,
+    RELEASE_NOTE_LANGUAGE_LINE,
+    "",
+    "## English",
+    ...(englishContent ? ["", englishContent] : []),
+    "",
+    ...ENGLISH_INSTALL_FOOTER,
+    "",
+    `版本详情 | Version details: https://github.com/${REPOSITORY}/releases/tag/v${version}`,
   ].join("\n");
+}
+
+/**
+ * A caller may pass the raw English source or an already parsed bilingual pair.
+ * Both routes produce the same reviewed projections; a single-English document is
+ * never rendered, because that would silently drop the Chinese release content
+ * an installed reader already receives today.
+ */
+function resolveNoteProjections(version, document) {
+  if (typeof document?.chinese?.markdown !== "string") {
+    boundedReleaseError(
+      "the release document must carry both reviewed language projections.",
+    );
+  }
+  // The pair assertion is enforced here, at the public entry point, rather than
+  // only inside `loadReleaseNotes`. These renderers are exported and also called
+  // directly, so a mismatched pair must not be publishable just because the
+  // caller happened to skip the loader.
+  return assertReleaseNoteProjectionsMatch(
+    parseReleaseNotes(document.english?.markdown, version),
+    parseChineseReleaseNotes(document.chinese.markdown, version),
+    version,
+  );
 }
 
 function boundedReleaseError(message) {
@@ -208,6 +269,60 @@ function normalizeNoteItem(value) {
 }
 
 export function parseReleaseNotes(markdown, version) {
+  return parseStructuredNotes(
+    markdown,
+    version,
+    RELEASE_NOTE_SECTIONS,
+    `# AI Router release v${version}`,
+  );
+}
+
+/**
+ * Parses the reviewed Chinese projection of the same release. It reuses every
+ * bound and content rule of the English parser and only differs in the
+ * discriminator and the section headings, because this projection is what an
+ * already installed reader consumes from `notes`.
+ */
+export function parseChineseReleaseNotes(markdown, version) {
+  return parseStructuredNotes(
+    markdown,
+    version,
+    CHINESE_RELEASE_NOTE_SECTIONS,
+    `${CHINESE_RELEASE_NOTE_HEADING_PREFIX}${version}`,
+  );
+}
+
+/**
+ * Both projections must describe the same release: identical section set in the
+ * same order and identical item counts. Divergence means one file was updated
+ * without the other, so it is rejected before anything is generated.
+ */
+export function assertReleaseNoteProjectionsMatch(english, chinese, version) {
+  const order = ["highlights", "fixes", "notices"];
+  for (const section of order) {
+    const englishItems = english[section] ?? [];
+    const chineseItems = chinese[section] ?? [];
+    if (englishItems.length !== chineseItems.length) {
+      boundedReleaseError(
+        `the Chinese projection of v${version} has ${chineseItems.length} ${section} items but the English source has ${englishItems.length}.`,
+      );
+    }
+  }
+  const englishSections = order.filter(
+    (section) => (english[section] ?? []).length > 0,
+  );
+  const chineseSections = order.filter(
+    (section) => (chinese[section] ?? []).length > 0,
+  );
+  if (englishSections.join(",") !== chineseSections.join(",")) {
+    boundedReleaseError(
+      `the Chinese projection of v${version} does not cover the same sections as the English source.`,
+    );
+  }
+  return { english, chinese };
+}
+
+function parseStructuredNotes(markdown, version, headingMap, expectedHeading) {
   if (typeof markdown !== "string" || markdown.length === 0) {
     boundedReleaseError("the version file is missing or empty.");
   }
@@ -219,7 +334,7 @@ export function parseReleaseNotes(markdown, version) {
     boundedReleaseError("the document exceeds its size limit.");
   }
   const lines = normalized.split("\n");
-  if (lines.shift() !== `# AI Router v${version}`) {
+  if (lines.shift() !== expectedHeading) {
     boundedReleaseError("the version heading does not match the release.");
   }
   const sections = { highlights: [], fixes: [], notices: [] };
@@ -230,10 +345,10 @@ export function parseReleaseNotes(markdown, version) {
     if (line === "") continue;
     if (line.startsWith("## ")) {
       const heading = line.slice(3);
-      current = RELEASE_NOTE_SECTIONS.get(heading);
+      current = headingMap.get(heading);
       if (!current)
         boundedReleaseError("only supported section headings are allowed.");
-      const sectionIndex = [...RELEASE_NOTE_SECTIONS.keys()].indexOf(heading);
+      const sectionIndex = [...headingMap.keys()].indexOf(heading);
       if (seenSections.has(current) || sectionIndex <= lastSectionIndex) {
         boundedReleaseError(
           "sections must be unique and in the documented order.",
@@ -249,7 +364,7 @@ export function parseReleaseNotes(markdown, version) {
     sections[current].push(normalizeNoteItem(line.slice(2)));
   }
   if (sections.highlights.length < 1 || sections.highlights.length > 3) {
-    boundedReleaseError("重点更新 must contain one to three items.");
+    boundedReleaseError("Highlights must contain one to three items.");
   }
   const items = [
     ...sections.highlights,
@@ -287,30 +402,32 @@ export function parseReleaseNotes(markdown, version) {
   ) {
     boundedReleaseError("secret-like or local-path content is not allowed.");
   }
+  // Both language projections are checked here, because the same parsed items
+  // can be Chinese or English. A sample of Chinese installer boilerplate must
+  // not slip through just because the English alternatives do not match it.
   const genericOnly = items.every((item) =>
-    /^(?:AI Router v\d+\.\d+\.\d+ (?:已发布|released)|首次安装.*DMG|.*updater.*签名|.*更新.*签名)/iu.test(
+    /^(?:AI Router release v\d+\.\d+\.\d+ released|AI Router v\d+\.\d+\.\d+ (?:已发布|released)|for a first-time install.*DMG|首次安装.*DMG|.*updater.*(?:签名|signature)|.*(?:更新|update).*(?:签名|signature))/iu.test(
       item,
     ),
   );
   if (genericOnly) {
     boundedReleaseError("generic placeholder content is not sufficient.");
   }
-  const renderSection = (heading, values) =>
-    values.length > 0
-      ? [`## ${heading}`, ...values.map((item) => `- ${item}`)]
-      : [];
+  const headings = [...headingMap.keys()];
   const canonical = [
-    `# AI Router v${version}`,
+    expectedHeading,
     "",
-    ...renderSection("重点更新", sections.highlights),
-    ...(sections.fixes.length
-      ? ["", ...renderSection("问题修复", sections.fixes)]
-      : []),
-    ...(sections.notices.length
-      ? ["", ...renderSection("注意事项", sections.notices)]
-      : []),
+    ...headings.flatMap((heading, index) => {
+      const items = sections[headingMap.get(heading)];
+      if (items.length === 0) return [];
+      return [
+        ...(index > 0 ? [""] : []),
+        `## ${heading}`,
+        ...items.map((item) => `- ${item}`),
+      ];
+    }),
   ].join("\n");
-  return { ...sections, markdown: canonical };
+  return { ...sections, markdown: canonical, version };
 }
 
 export async function loadReleaseNotes(root, version) {
@@ -325,18 +442,33 @@ export async function loadReleaseNotes(root, version) {
       "the requested version is not a canonical stable SemVer.",
     );
   }
-  const path = resolve(root, "release-notes", `v${version}.md`);
+  const directory = resolve(root, "release-notes");
   let markdown;
   try {
-    markdown = await readFile(path, "utf8");
+    markdown = await readFile(resolve(directory, `v${version}.md`), "utf8");
   } catch {
     boundedReleaseError(`missing reviewed file for v${version}.`);
   }
-  return parseReleaseNotes(markdown, version);
+  let chineseMarkdown;
+  try {
+    chineseMarkdown = await readFile(
+      resolve(directory, `v${version}${CHINESE_RELEASE_NOTE_NAME_SUFFIX}`),
+      "utf8",
+    );
+  } catch {
+    boundedReleaseError(
+      `missing reviewed Chinese file for v${version}.`,
+    );
+  }
+  return assertReleaseNoteProjectionsMatch(
+    parseReleaseNotes(markdown, version),
+    parseChineseReleaseNotes(chineseMarkdown, version),
+    version,
+  );
 }
 
 export function createLatestManifest(version, publicDate, signature, document) {
-  const authoredNotes = parseReleaseNotes(document?.markdown, version).markdown;
+  const projections = resolveNoteProjections(version, document);
   let normalizedPublicDate;
   try {
     normalizedPublicDate = new Date(publicDate).toISOString();
@@ -357,7 +489,14 @@ export function createLatestManifest(version, publicDate, signature, document) {
   strictBase64(signature, "The updater archive signature");
   return {
     version,
-    notes: authoredNotes,
+    // `notes` stays exactly the Chinese projection that today's published
+    // manifests already carry, so an installed reader parses this field
+    // unchanged and simply ignores the sibling locale map.
+    notes: projections.chinese.markdown,
+    notes_i18n: {
+      "zh-CN": projections.chinese.markdown,
+      en: projections.english.markdown,
+    },
     pub_date: publicDate,
     platforms: {
       "darwin-aarch64": {
@@ -512,9 +651,10 @@ export async function verifyReleaseDirectory(
   }
   exactKeys(
     manifest,
-    ["version", "notes", "pub_date", "platforms"],
+    ["version", "notes", "notes_i18n", "pub_date", "platforms"],
     "latest.json",
   );
+  exactKeys(manifest.notes_i18n, ["zh-CN", "en"], "latest.json notes_i18n");
   exactKeys(manifest.platforms, ["darwin-aarch64"], "latest.json platforms");
   const platform = manifest.platforms["darwin-aarch64"];
   exactKeys(platform, ["signature", "url"], "latest.json platform entry");
@@ -523,6 +663,38 @@ export async function verifyReleaseDirectory(
     normalizedPublicDate = new Date(manifest.pub_date).toISOString();
   } catch {
     fail("latest.json does not contain a canonical release timestamp.");
+  }
+  // `notes_i18n` is an additive locale map. An installed reader ignores it and
+  // still parses `notes`, so it is bounded and matched against the same
+  // reviewed projections, but it never replaces or restricts `notes`.
+  for (const locale of ["zh-CN", "en"]) {
+    if (
+      typeof manifest.notes_i18n[locale] !== "string" ||
+      manifest.notes_i18n[locale].length === 0 ||
+      manifest.notes_i18n[locale].length > 4_000
+    ) {
+      fail("latest.json notes_i18n contains an invalid locale projection.");
+    }
+  }
+  // Each locale is parsed with the grammar it must actually satisfy, so a
+  // mislabelled or arbitrary string cannot pass as a release projection just
+  // because it is short enough. Re-parsing also proves the shipped bytes are
+  // the canonical rendering of the reviewed source.
+  for (const [locale, projection] of [
+    ["zh-CN", parseChineseReleaseNotes],
+    ["en", parseReleaseNotes],
+  ]) {
+    try {
+      if (projection(manifest.notes_i18n[locale], version).markdown !== manifest.notes_i18n[locale]) {
+        fail(`latest.json notes_i18n ${locale} is not a canonical release projection.`);
+      }
+    } catch (error) {
+      if (error instanceof ReleaseError) throw error;
+      fail(`latest.json notes_i18n ${locale} is not a valid release projection.`);
+    }
+  }
+  if (manifest.notes_i18n["zh-CN"] !== manifest.notes) {
+    fail("latest.json notes_i18n must keep the Chinese projection in notes.");
   }
   if (
     manifest.version !== version ||
@@ -535,7 +707,11 @@ export async function verifyReleaseDirectory(
   ) {
     fail("latest.json does not match the canonical release assets.");
   }
-  if (expectedDocument && manifest.notes !== expectedDocument.markdown) {
+  if (
+    expectedDocument &&
+    (manifest.notes !== expectedDocument.chinese.markdown ||
+      manifest.notes_i18n.en !== expectedDocument.english.markdown)
+  ) {
     fail("latest.json release notes do not match the reviewed source.");
   }
 

@@ -21,12 +21,14 @@ import {
   type EChartsType,
 } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
-import { useCallback, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import type {
+  UsageStatisticsAttributionDimensionDto,
   UsageStatisticsAttributionDto,
   UsageStatisticsAttributionMetricDto,
   UsageStatisticsBucketDto,
+  UsageStatisticsGranularityDto,
   UsageStatisticsTokensDto,
 } from "../../generated";
 import {
@@ -36,7 +38,10 @@ import {
   formatStatisticsTokens,
   formatStatisticsUsd,
 } from "./usageFormatting";
+import { formatUsageBucketLabel } from "../shared/usageRecordFormatting";
 import { useAppearance } from "../appearance/useAppearance";
+import { useLanguage } from "../language/useLanguage";
+import type { UsageMessages } from "../language/catalog/usage";
 
 registerEChartsModules([
   BarChart,
@@ -225,18 +230,41 @@ function resolveUsageChartColors(element: HTMLElement): UsageChartColors {
   };
 }
 
-function metricLabel(metric: UsageStatisticsAttributionMetricDto) {
+function metricLabel(
+  metric: UsageStatisticsAttributionMetricDto,
+  messages: UsageMessages,
+) {
   return metric === "requests"
-    ? "请求"
+    ? messages.metricRequests
     : metric === "tokens"
-      ? "Token"
-      : "费用";
+      ? messages.metricTokens
+      : messages.metricCost;
 }
 
-function timeChartLabel(metric: UsageStatisticsAttributionMetricDto) {
+/**
+ * Resolves one attribution item's display name. A present raw name is always
+ * verbatim; otherwise the bucket's own role (top-five `other`, or a missing
+ * route/model identity) selects the localized text.
+ */
+function attributionItemLabel(
+  item: UsageStatisticsAttributionDto,
+  dimension: UsageStatisticsAttributionDimensionDto,
+  messages: UsageMessages,
+): string {
+  if (item.label !== null) return item.label;
+  if (item.isOther) return messages.otherLabel;
+  return dimension === "route"
+    ? messages.unknownRouteLabel
+    : messages.unknownModelLabel;
+}
+
+function timeChartLabel(
+  metric: UsageStatisticsAttributionMetricDto,
+  messages: UsageMessages,
+) {
   return metric === "requests"
-    ? "成功请求数量时间柱状图"
-    : `成功请求${metricLabel(metric)}时间柱状图`;
+    ? messages.timeChartCountAriaLabel
+    : messages.timeChartMetricAriaLabel(metricLabel(metric, messages));
 }
 
 // Pure builders are exported for focused precision and option-contract tests.
@@ -268,6 +296,8 @@ export function buildUsageTimeChartOption(
   trend: UsageStatisticsBucketDto[],
   metric: UsageStatisticsAttributionMetricDto,
   colors: UsageChartColors,
+  messages: UsageMessages,
+  labelFor: (bucket: UsageStatisticsBucketDto) => string,
 ): UsageChartOption {
   const values = trend.map((bucket) => trendValue(bucket, metric));
   const ratios = boundedBigIntRatios(values);
@@ -291,13 +321,13 @@ export function buildUsageTimeChartOption(
         const bucket = trend[index];
         const value = values[index];
         return bucket && value !== undefined
-          ? `${bucket.label}\n${metricLabel(metric)} ${formatStatisticsMetric(value, metric)}`
+          ? `${labelFor(bucket)}\n${metricLabel(metric, messages)} ${formatStatisticsMetric(value, metric)}`
           : "";
       },
     },
     xAxis: {
       type: "category",
-      data: trend.map((bucket) => bucket.label),
+      data: trend.map(labelFor),
       axisTick: { show: false },
       axisLine: { lineStyle: { color: colors.axis } },
       axisLabel: {
@@ -331,7 +361,7 @@ export function buildUsageTimeChartOption(
     series: [
       {
         type: "bar",
-        name: metricLabel(metric),
+        name: metricLabel(metric, messages),
         data: ratios,
         barMaxWidth: 24,
         barMinHeight: 3,
@@ -358,10 +388,11 @@ function boundedSharePercent(value: string) {
 function attributionSummary(
   item: UsageStatisticsAttributionDto,
   metric: UsageStatisticsAttributionMetricDto,
+  messages: UsageMessages,
 ): string {
   const summary = `${formatStatisticsMetric(item.value, metric)} · ${item.sharePercent}%`;
   return item.redirectedRequestCount > 0
-    ? `${summary} · 转发 ${item.redirectedRequestCount} 次`
+    ? `${summary} · ${messages.redirectedCount(item.redirectedRequestCount)}`
     : summary;
 }
 
@@ -370,6 +401,8 @@ export function buildUsageSourceChartOption(
   attribution: UsageStatisticsAttributionDto[],
   metric: UsageStatisticsAttributionMetricDto,
   colors: UsageChartColors,
+  messages: UsageMessages,
+  labelFor: (item: UsageStatisticsAttributionDto) => string,
 ): UsageChartOption {
   const legendNames = attribution.map((item, index) => `${index}:${item.key}`);
   const shares = attribution.map((item) =>
@@ -387,7 +420,10 @@ export function buildUsageSourceChartOption(
         const first = Array.isArray(params) ? params[0] : params;
         const item = attribution[first?.dataIndex ?? -1];
         return item
-          ? formatDonutTooltip(item.label, attributionSummary(item, metric))
+          ? formatDonutTooltip(
+              labelFor(item),
+              attributionSummary(item, metric, messages),
+            )
           : "";
       },
     },
@@ -399,14 +435,14 @@ export function buildUsageSourceChartOption(
         const index = legendNames.indexOf(name);
         const item = attribution[index];
         return item
-          ? `${item.label}\n${attributionSummary(item, metric)}`
+          ? `${labelFor(item)}\n${attributionSummary(item, metric, messages)}`
           : name;
       },
     },
     series: [
       {
         type: "pie",
-        name: `模型${metricLabel(metric)}`,
+        name: messages.sourceSeriesName(metricLabel(metric, messages)),
         ...donutSeriesGeometry(
           colors,
           shares.some((value) => value > 0),
@@ -421,41 +457,59 @@ export function buildUsageSourceChartOption(
 }
 
 const TOKEN_PARTS = [
-  ["uncachedInput", "未缓存输入", "input"],
-  ["cachedInput", "缓存输入", "cachedInput"],
-  ["cacheWriteInput", "写入缓存", "cacheWrite"],
-  ["output", "输出", "output"],
+  ["uncachedInput", "input"],
+  ["cachedInput", "cachedInput"],
+  ["cacheWriteInput", "cacheWrite"],
+  ["output", "output"],
 ] as const;
+
+type TokenPartKey = (typeof TOKEN_PARTS)[number][0];
+
+function tokenPartLabels(
+  messages: UsageMessages,
+): Record<TokenPartKey, string> {
+  return {
+    uncachedInput: messages.uncachedInput,
+    cachedInput: messages.cachedInput,
+    cacheWriteInput: messages.cacheWriteInput,
+    output: messages.output,
+  };
+}
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function buildUsageTokenCompositionChartOption(
   tokens: UsageStatisticsTokensDto,
   colors: UsageChartColors,
+  messages: UsageMessages,
 ): UsageChartOption {
+  const labels = tokenPartLabels(messages);
+  const parts = TOKEN_PARTS.map(
+    ([key, colorKey]) => [key, labels[key], colorKey] as const,
+  );
   const values = TOKEN_PARTS.map(([key]) => tokens[key]);
   const shares = boundedBigIntShares(values);
   return {
     animationDuration: 180,
     aria: { enabled: false },
-    color: TOKEN_PARTS.map(([, , colorKey]) => colors[colorKey]),
+    color: TOKEN_PARTS.map(([, colorKey]) => colors[colorKey]),
     tooltip: {
       trigger: "item",
       renderMode: "richText",
       confine: true,
       formatter: (params) => {
         const first = Array.isArray(params) ? params[0] : params;
-        const part = TOKEN_PARTS[first?.dataIndex ?? -1];
+        const part = parts[first?.dataIndex ?? -1];
         return part
           ? formatDonutTooltip(part[1], formatStatisticsTokens(tokens[part[0]]))
           : "";
       },
     },
     legend: {
-      data: TOKEN_PARTS.map(([, label]) => label),
+      data: parts.map(([, label]) => label),
       ...DONUT_LEGEND_GEOMETRY,
       textStyle: donutLegendTextStyle(colors),
       formatter: (name) => {
-        const part = TOKEN_PARTS.find(([, label]) => label === name);
+        const part = parts.find(([, label]) => label === name);
         return part
           ? `${part[1]}\n${formatStatisticsTokens(tokens[part[0]])}`
           : name;
@@ -464,12 +518,12 @@ export function buildUsageTokenCompositionChartOption(
     series: [
       {
         type: "pie",
-        name: "Token 构成",
+        name: messages.tokenComposition,
         ...donutSeriesGeometry(
           colors,
           shares.some((value) => value > 0),
         ),
-        data: TOKEN_PARTS.map(([, label, colorKey], index) => ({
+        data: parts.map(([, label, colorKey], index) => ({
           name: label,
           value: shares[index],
           itemStyle: { color: colors[colorKey] },
@@ -526,28 +580,47 @@ function EChartsHost({
 export function UsageTimeChart({
   trend,
   metric,
+  granularity,
+  timeZone,
 }: {
   trend: UsageStatisticsBucketDto[];
   metric: UsageStatisticsAttributionMetricDto;
+  granularity: UsageStatisticsGranularityDto;
+  timeZone: string;
 }) {
-  const buildOption = useCallback(
-    (colors: UsageChartColors) =>
-      buildUsageTimeChartOption(trend, metric, colors),
-    [metric, trend],
-  );
+  const {
+    messages: { usage: usageMessages },
+    effectiveLocale,
+  } = useLanguage();
+  const bucketLabel = (bucket: UsageStatisticsBucketDto) =>
+    formatUsageBucketLabel(
+      bucket.startedAtMs,
+      granularity,
+      timeZone,
+      bucket.includeUtcOffset,
+      effectiveLocale,
+    );
+  const buildOption = (colors: UsageChartColors) =>
+    buildUsageTimeChartOption(
+      trend,
+      metric,
+      colors,
+      usageMessages,
+      bucketLabel,
+    );
   return (
     <div className="usage-chart-wrap">
       <EChartsHost
         className="usage-chart usage-time-chart"
-        label={timeChartLabel(metric)}
+        label={timeChartLabel(metric, usageMessages)}
         buildOption={buildOption}
       />
-      <ul className="sr-only" aria-label="时间图表数据">
+      <ul className="sr-only" aria-label={usageMessages.timeChartDataAriaLabel}>
         {trend.map((bucket) => {
           const value = trendValue(bucket, metric);
           return (
             <li key={`${bucket.startedAtMs}-${bucket.finishedAtMs}`}>
-              {bucket.label}: {formatStatisticsMetric(value, metric)}
+              {bucketLabel(bucket)}: {formatStatisticsMetric(value, metric)}
             </li>
           );
         })}
@@ -559,29 +632,45 @@ export function UsageTimeChart({
 export function UsageSourceChart({
   attribution,
   metric,
+  dimension,
 }: {
   attribution: UsageStatisticsAttributionDto[];
   metric: UsageStatisticsAttributionMetricDto;
+  dimension: UsageStatisticsAttributionDimensionDto;
 }) {
-  const buildOption = useCallback(
-    (colors: UsageChartColors) =>
-      buildUsageSourceChartOption(attribution, metric, colors),
-    [attribution, metric],
-  );
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
+  const metricLabelText = metricLabel(metric, usageMessages);
+  const itemLabel = (item: UsageStatisticsAttributionDto) =>
+    attributionItemLabel(item, dimension, usageMessages);
+  const buildOption = (colors: UsageChartColors) =>
+    buildUsageSourceChartOption(
+      attribution,
+      metric,
+      colors,
+      usageMessages,
+      itemLabel,
+    );
   return (
     <div className="usage-chart-wrap">
       <EChartsHost
         className="usage-chart usage-donut-chart usage-source-chart"
-        label={`模型${metricLabel(metric)}占比环形图`}
+        label={usageMessages.sourceChartAriaLabel(metricLabelText)}
         buildOption={buildOption}
       />
-      <ul className="sr-only" aria-label="来源图表数据">
+      <ul
+        className="sr-only"
+        aria-label={usageMessages.sourceChartDataAriaLabel}
+      >
         {attribution.map((item) => (
           <li key={item.key}>
-            {item.label}: {formatStatisticsMetric(item.value, metric)}，占比{" "}
-            {item.sharePercent}%
+            {itemLabel(item)}: {formatStatisticsMetric(item.value, metric)}
+            {usageMessages.sharePercentInline(item.sharePercent)}
             {item.redirectedRequestCount > 0
-              ? `，转发 ${item.redirectedRequestCount} 次`
+              ? usageMessages.redirectedCountInline(
+                  item.redirectedRequestCount,
+                )
               : ""}
           </li>
         ))}
@@ -595,22 +684,26 @@ export function UsageTokenCompositionChart({
 }: {
   tokens: UsageStatisticsTokensDto;
 }) {
-  const buildOption = useCallback(
-    (colors: UsageChartColors) =>
-      buildUsageTokenCompositionChartOption(tokens, colors),
-    [tokens],
-  );
+  const {
+    messages: { usage: usageMessages },
+  } = useLanguage();
+  const labels = tokenPartLabels(usageMessages);
+  const buildOption = (colors: UsageChartColors) =>
+    buildUsageTokenCompositionChartOption(tokens, colors, usageMessages);
   return (
     <div className="usage-chart-wrap">
       <EChartsHost
         className="usage-chart usage-donut-chart usage-token-composition-chart"
-        label="成功请求 Token 构成环形图"
+        label={usageMessages.tokenCompositionAriaLabel}
         buildOption={buildOption}
       />
-      <ul className="sr-only" aria-label="Token 构成图表数据">
-        {TOKEN_PARTS.map(([key, label]) => (
+      <ul
+        className="sr-only"
+        aria-label={usageMessages.tokenCompositionDataAriaLabel}
+      >
+        {TOKEN_PARTS.map(([key]) => (
           <li key={key}>
-            {label}: {formatStatisticsTokens(tokens[key])}
+            {labels[key]}: {formatStatisticsTokens(tokens[key])}
           </li>
         ))}
       </ul>

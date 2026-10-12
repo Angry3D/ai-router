@@ -1,27 +1,27 @@
-## 变更
+## Change
 
-说明解决的问题、可观察行为和范围外内容。
+Explain the problem solved, the observable behavior, and anything out of scope.
 
-## 交付状态
+## Delivery status
 
-- 入口：Trellis 任务 / 直接修改
-- 当前状态：开发中 / 已提交 / 已推送 / PR 已创建 / 待合并
-- 后续版本：纳入 / 延期 / 待确认
+- Entry: Trellis task / direct edit
+- Current state: in development / committed / pushed / PR created / awaiting merge
+- Follow-up release: included / deferred / to be confirmed
 
-## 风险
+## Risks
 
-说明数据、路由、并发、恢复、Codex 配置、原生生命周期或发布边界影响；没有时写“无”。
+Describe the impact on data, routing, concurrency, recovery, Codex configuration, native lifecycle, or release boundaries; write "none" when there is no impact.
 
-## 验证
+## Verification
 
-列出实际运行的命令和结果，并说明未运行检查的理由。
+List the commands actually run and their results, and explain why any checks were not run.
 
-## 检查清单
+## Checklist
 
-- [ ] 变更聚焦，没有覆盖无关工作区修改。
-- [ ] 已添加或更新与行为风险相称的测试/文档。
-- [ ] 已检查生成文件、锁文件、版本和第三方来源是否需要同步。
-- [ ] 没有提交真实 API Key、Authorization header、完整配置（包括 Codex 配置）、SQLite 数据库、原始请求/响应、原始日志、恢复点或用户绝对路径。
-- [ ] 原生自动化只针对 `AI Router QA.app` / `com.relax.airouter.qa`，没有控制生产应用。
-- [ ] PR 不读取 release environment 或 updater 私钥，也不创建、发布或修改 GitHub Release。
-- [ ] 用户可见或支持边界变化已同步 README、SUPPORT 或工程文档。
+- [ ] The change is focused and does not overwrite unrelated workspace modifications.
+- [ ] Tests/documentation have been added or updated in proportion to the behavioral risk.
+- [ ] Generated files, lockfiles, versions, and third-party sources have been checked for required synchronization.
+- [ ] No real API keys, Authorization headers, complete configuration (including Codex configuration), SQLite databases, raw requests/responses, raw logs, recovery points, or user absolute paths are submitted.
+- [ ] Native automation targets only `AI Router QA.app` / `com.relax.airouter.qa` and does not control the production app.
+- [ ] The PR does not read the release environment or updater private keys, and neither creates, publishes, nor modifies GitHub Releases.
+- [ ] User-visible or support-boundary changes are reflected in the README, SUPPORT, or engineering documentation.

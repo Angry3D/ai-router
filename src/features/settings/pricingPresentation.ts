@@ -1,4 +1,5 @@
 import type { PricingTableDto, PricingTableFailureDto } from "../../generated";
+import type { PricingMessages } from "../language/catalog/imagesPricing";
 import type { SettingsTone } from "./SettingsPrimitives";
 
 /** Longest page diagnostic the status line shows; the log keeps it in full. */
@@ -19,41 +20,50 @@ function formatSyncedAt(value: number | null): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function syncedSectionLabel(snapshot: PricingTableDto): string {
-  if (snapshot.localState !== "loaded") return "未同步";
+function syncedSectionLabel(
+  snapshot: PricingTableDto,
+  messages: PricingMessages,
+): string {
+  if (snapshot.localState !== "loaded") return messages.statusUnsynced;
   const syncedAt = formatSyncedAt(snapshot.syncedAtMs);
-  return syncedAt ? `已同步 · ${syncedAt}` : "已同步";
+  return syncedAt ? messages.statusSyncedAt(syncedAt) : messages.statusSynced;
 }
 
 /** Copy for a failed run; the page diagnostic is bounded for the status line. */
-function failureActionText(failure: PricingTableFailureDto | null): string {
+function failureActionText(
+  failure: PricingTableFailureDto | null,
+  messages: PricingMessages,
+): string {
   if (failure?.kind === "store") {
-    return "同步失败：本地价格表写入失败，已保留上次数据。";
+    return messages.failureStore;
   }
   if (!failure || failure.kind !== "page") {
-    return "同步失败：官网暂时无法访问，已保留上次数据。";
+    return messages.failureTransport;
   }
   const reason = failure.reason?.trim() ?? "";
-  if (!reason) return "同步失败：官网页面结构变化，已保留上次数据。";
+  if (!reason) return messages.failurePageStructure;
   // Clamping by character keeps a surrogate pair from being split.
   const characters = Array.from(reason);
   const shown =
     characters.length > MAX_FAILURE_REASON_CHARS
       ? `${characters.slice(0, MAX_FAILURE_REASON_CHARS - 1).join("")}…`
       : reason;
-  return `同步失败：官网页面结构变化（${shown}），已保留上次数据。`;
+  return messages.failurePageStructureWithReason(shown);
 }
 
 export function pricingPresentation(
   snapshot: PricingTableDto | null,
+  messages: PricingMessages,
   syncing: boolean = snapshot?.status === "syncing",
 ): PricingPresentation {
-  const sectionLabel = snapshot ? syncedSectionLabel(snapshot) : "未同步";
+  const sectionLabel = snapshot
+    ? syncedSectionLabel(snapshot, messages)
+    : messages.statusUnsynced;
   if (syncing) {
     return {
       sectionLabel,
       sectionTone: "neutral",
-      actionText: "正在访问官网…",
+      actionText: messages.actionSyncing,
       actionTone: "neutral",
     };
   }
@@ -61,7 +71,7 @@ export function pricingPresentation(
     return {
       sectionLabel,
       sectionTone: "neutral",
-      actionText: "尚未同步，当前使用内置价格。",
+      actionText: messages.actionNotSynced,
       actionTone: "neutral",
     };
   }
@@ -69,7 +79,7 @@ export function pricingPresentation(
     return {
       sectionLabel,
       sectionTone: "neutral",
-      actionText: failureActionText(snapshot.failure),
+      actionText: failureActionText(snapshot.failure, messages),
       actionTone: "danger",
     };
   }
@@ -85,14 +95,14 @@ export function pricingPresentation(
     return {
       sectionLabel,
       sectionTone: "neutral",
-      actionText: "本地价格表不可用，已回退内置",
+      actionText: messages.actionCorrupt,
       actionTone: "neutral",
     };
   }
   return {
     sectionLabel,
     sectionTone: "neutral",
-    actionText: "尚未同步，当前使用内置价格。",
+    actionText: messages.actionNotSynced,
     actionTone: "neutral",
   };
 }

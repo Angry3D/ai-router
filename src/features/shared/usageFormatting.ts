@@ -1,3 +1,5 @@
+import type { AppLocale } from "../../generated";
+
 const PICO_USD_PER_USD = 1_000_000_000_000n;
 const COMPACT_FIXED_DECIMAL_THRESHOLD = 1_000_000n;
 const STATISTICS_MILLION = 1_000_000n;
@@ -28,8 +30,8 @@ export function compactDecimalInteger(value: string) {
   return `${whole}${tenth === 0n ? "" : `.${tenth}`}${suffix}`;
 }
 
-export function formatUsd(picoUsd: string | null) {
-  if (picoUsd === null) return "不可用";
+export function formatUsd(picoUsd: string | null, unavailable: string) {
+  if (picoUsd === null) return unavailable;
   const value = BigInt(picoUsd);
   const whole = value / PICO_USD_PER_USD;
   const fraction = (value % PICO_USD_PER_USD)
@@ -41,9 +43,10 @@ export function formatUsd(picoUsd: string | null) {
 
 export function formatCompactUsd(
   picoUsd: string | null,
+  unavailable: string,
   rounding: "nearest" | "down" = "nearest",
 ) {
-  if (picoUsd === null) return "不可用";
+  if (picoUsd === null) return unavailable;
   const value = BigInt(picoUsd);
   if (value === 0n) return "$0";
 
@@ -54,7 +57,7 @@ export function formatCompactUsd(
   const displayUnit = 10n ** BigInt(12 - decimalPlaces);
   const adjusted = rounding === "nearest" ? value + displayUnit / 2n : value;
   const displayedValue = (adjusted / displayUnit) * displayUnit;
-  return formatUsd(displayedValue.toString());
+  return formatUsd(displayedValue.toString(), unavailable);
 }
 
 export function formatStatisticsTokens(value: string) {
@@ -106,13 +109,13 @@ export function boundedBigIntShares(values: readonly string[]) {
   );
 }
 
-export function exactToken(value: number | null) {
-  return value === null ? "-" : value.toLocaleString();
+export function exactToken(value: number | null, locale: AppLocale) {
+  return value === null ? "-" : value.toLocaleString(locale);
 }
 
-export function compactToken(value: number | null) {
+export function compactToken(value: number | null, locale: AppLocale) {
   if (value === null) return "-";
-  if (value < 1_000) return value.toLocaleString();
+  if (value < 1_000) return value.toLocaleString(locale);
   const divisor = value >= 1_000_000 ? 1_000_000 : 1_000;
   const suffix = value >= 1_000_000 ? "M" : "K";
   return `${(value / divisor).toFixed(1).replace(/\.0$/, "")}${suffix}`;

@@ -1,60 +1,67 @@
-# 开发与交付生命周期
+# Development and delivery lifecycle
 
-AI Router 对使用任务规划工具和直接完成的修改采用同一套交付生命周期。任务记录可以提供需求和验证
-证据，但代码是否已经交付、是否进入版本候选，只由 Git 与 GitHub 的事实状态决定。
+AI Router uses the same delivery lifecycle for changes made with a task-planning tool and changes made
+directly. Task records can provide requirements and verification evidence, but whether code has been
+delivered and whether it enters a release candidate is decided only by the factual state of Git and
+GitHub.
 
-## 自然语言控制
+## Natural-language control
 
-通过项目 AI 入口使用以下固定短语：
+Use the following fixed phrases through the project AI entry point:
 
-| 命令                                            | 结果                                                                         |
-| ----------------------------------------------- | ---------------------------------------------------------------------------- |
-| `开始任务：<事项>`                              | 从最新 `main` 创建聚焦分支，选择合适的规划路径，并开始实现。                 |
-| `开始任务：<事项>，不使用 Trellis`              | 创建聚焦分支，不建立任务规划记录，直接实现。                                 |
-| `继续当前任务`                                  | 恢复当前分支、任务和验证上下文，继续未完成工作。                             |
-| `检查当前任务`                                  | 只审查和验证，不提交、不推送、不创建或修改 PR、不合并、不创建 tag。          |
-| `交付当前任务`                                  | 审查完整 diff，整理逻辑提交，推送分支并创建或更新 PR；不合并 PR。            |
-| `暂存当前成果，先不要合并`                      | 提交并推送，创建或更新 draft PR，保持不进入 `main`。                         |
-| `将当前任务纳入主线`                            | 核对 PR 和 required checks，同步 `main`、处理冲突、验证并合并。              |
-| `延期当前任务`                                  | 保留可恢复的分支和 PR，记录延期原因，不进入 `main`。                         |
-| `准备下一个版本`                                | 对照稳定 tag 到 `main` 的清单，核对开放 PR、本地分支、工作区修改和任务证据。 |
-| `把 <事项列表> 纳入 <版本>，其他未合并内容延期` | 按 Git 事实核对指定发布范围，报告所有无法证明的项目。                        |
-| `发布 <版本>`                                   | 完成版本准备后核对目标提交，创建触发受保护发布流水线的稳定 tag。             |
-| `查看交付状态`                                  | 报告本地提交、推送、PR、主线、任务和版本候选状态。                           |
+| Command                                                           | Result                                                                                                            |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `Start task: <item>`                                              | Create a focused branch from the latest `main`, select an appropriate planning path, and begin implementing.       |
+| `Start task: <item>, without Trellis`                             | Create a focused branch and implement directly, without creating a task-planning record.                           |
+| `Continue the current task`                                       | Resume the current branch, task, and verification context and continue unfinished work.                            |
+| `Check the current task`                                          | Only review and verify; do not commit, push, create or modify a PR, merge, or create a tag.                        |
+| `Deliver the current task`                                        | Review the full diff, organize logical commits, push the branch, and create or update a PR; do not merge the PR.   |
+| `Park the current work; do not merge yet`                         | Commit and push, create or update a draft PR, and keep it out of `main`.                                           |
+| `Bring the current task into main`                                | Check the PR and required checks, sync `main`, resolve conflicts, verify, and merge.                               |
+| `Defer the current task`                                          | Keep a recoverable branch and PR, record the reason for the deferral, and do not enter `main`.                      |
+| `Prepare the next release`                                        | Check open PRs, local branches, working-tree changes, and task evidence against the inventory from the stable tag to `main`. |
+| `Include <item list> in <version>, defer everything else unmerged` | Verify the specified release scope against Git facts and report every item that cannot be proven.                  |
+| `Release <version>`                                               | After release preparation, verify the target commit and create the stable tag that triggers the protected release pipeline. |
+| `Show delivery status`                                            | Report local commit, push, PR, mainline, task, and release-candidate status.                                       |
 
-AI 在 push、合并或创建稳定 tag 前，必须报告目标分支、commit 和文件范围。只读检查绝不执行这些
-动作。
+Before pushing, merging, or creating a stable tag, the AI must report the target branch, commit, and
+file scope. Read-only checks never perform these actions.
 
-## 状态含义
+## State meanings
 
 ```text
-本地修改 -> commit -> 已推送分支 -> PR -> 合入 main -> 稳定 tag
+local changes -> commit -> pushed branch -> PR -> merged into main -> stable tag
 ```
 
-- commit 只表示修改已保存在本地 Git 历史中。
-- push 使远端分支拥有可恢复的提交记录。
-- PR 只表示申请审查和合并，不代表代码已经进入 `main`。
-- 合入 `main` 表示接受该修改进入后续版本候选。
-- 稳定 tag 标识正式面向用户交付的确切 commit。
+- A commit only means the change is saved in the local Git history.
+- A push gives the remote branch a recoverable commit record.
+- A PR only requests review and merge; it does not mean the code has entered `main`.
+- A merge into `main` means the change is accepted into future release candidates.
+- A stable tag identifies the exact commit officially delivered to users.
 
-`main` 只接收已经完成必要验证、确认可以进入后续版本候选的修改。仍在开发或明确延期的修改留在
-独立分支，并可保留开放的 draft PR。任务状态为完成，不能证明其分支已推送或已合并。
+`main` only accepts changes that have completed the necessary verification and are confirmed ready for
+future release candidates. Changes still in development or explicitly deferred stay on separate
+branches and may keep an open draft PR. A task being marked complete does not prove that its branch
+has been pushed or merged.
 
-## 发布范围
+## Release scope
 
-准备版本前运行：
+Before preparing a release, run:
 
 ```sh
 pnpm delivery:status
 pnpm release:inventory
 ```
 
-将输出与开放 PR、本地分支、工作区修改和任务证据交叉核对。每项必须标记为 `纳入`、`延期`、
-`待确认` 或 `随代码交付但不写入说明`。“不写入说明”表示代码仍随版本发布；“延期”则要求代码不在
-版本候选提交中。
+Cross-check the output against open PRs, local branches, working-tree changes, and task evidence. Each
+item must be marked `included`, `deferred`, `unconfirmed`, or `shipped with the code but not written
+into the notes`. "Not written into the notes" means the code still ships with the release; "deferred"
+requires the code to be absent from the release-candidate commit.
 
-## 安全边界
+## Safety boundaries
 
-不要提交无法确认归属的工作区修改。GitHub CLI 无响应时，不得把它解释为空 PR 列表。只有版本号、
-已审阅版本说明、required checks 和源码构建证据指向同一 commit 时，才可以创建稳定 tag。正式资产和
-updater secret 只由[稳定版本发布操作](./releasing.md)所述的受保护发布流水线处理。
+Do not commit working-tree changes whose ownership you cannot confirm. When the GitHub CLI is
+unresponsive, do not interpret it as an empty PR list. Create a stable tag only when the version
+number, the reviewed release notes, required checks, and source-build evidence all point to the same
+commit. Official assets and updater secrets are handled only by the protected release pipeline
+described in [Stable release operations](./releasing.md).

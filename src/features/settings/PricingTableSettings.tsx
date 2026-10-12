@@ -5,6 +5,7 @@ import { useState } from "react";
 import { openPricingSource, syncPricingFromWeb } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
 import type { PricingTableDto } from "../../generated";
+import { useLanguage } from "../language/useLanguage";
 import { pricingPresentation } from "./pricingPresentation";
 import {
   SettingsActionGroup,
@@ -14,6 +15,7 @@ import {
 } from "./SettingsPrimitives";
 
 const MONEY_SCALE = 1_000_000;
+const PRICING_SOURCE_DOMAIN = "developers.openai.com";
 
 /** Micro-USD per million Tokens as the exact decimal money string pricing uses. */
 function formatMoney(microUsd: number): string {
@@ -29,11 +31,13 @@ export function PricingTableSettings({
   snapshot: PricingTableDto | null;
 }) {
   const queryClient = useQueryClient();
+  const { messages } = useLanguage();
+  const pricingMessages = messages.imagesPricing.pricing;
   const [syncing, setSyncing] = useState(false);
   // The backend only reports `syncing` once it owns the run; the click keeps
   // the section in that state until the snapshot arrives.
   const busy = syncing || snapshot?.status === "syncing";
-  const presentation = pricingPresentation(snapshot, busy);
+  const presentation = pricingPresentation(snapshot, pricingMessages, busy);
   const rows = snapshot?.rows ?? [];
 
   const openSource = async () => {
@@ -60,7 +64,7 @@ export function PricingTableSettings({
 
   return (
     <SettingsSection
-      title="模型价格"
+      title={pricingMessages.sectionTitle}
       status={
         <SettingsStatus tone={presentation.sectionTone}>
           {presentation.sectionLabel}
@@ -79,7 +83,7 @@ export function PricingTableSettings({
           ) : (
             <RefreshCw aria-hidden="true" size={15} />
           )}
-          同步官网
+          {pricingMessages.syncButton}
         </SettingsButton>
       </SettingsActionGroup>
       <div className="pricing-status-line">
@@ -88,45 +92,49 @@ export function PricingTableSettings({
         </SettingsStatus>
       </div>
       <p className="pricing-caption">
-        美元 / 每 100 万 tokens。输入 ≤27.2 万 tokens 按「短」计价，超出整单按「长」。
+        {pricingMessages.captionBilling}
         <br />
-        数据来源：
+        {pricingMessages.captionSourcePrefix}
         <button
           className="pricing-source-link"
           type="button"
-          aria-label="打开 OpenAI 官方定价页"
+          aria-label={pricingMessages.sourceLinkLabel}
           onClick={() => void openSource()}
         >
-          developers.openai.com
+          {PRICING_SOURCE_DOMAIN}
         </button>
-        （仅 GPT 模型随官网同步）
+        {pricingMessages.captionNote}
       </p>
       <div className="pricing-table-viewport">
-        <table className="pricing-table" aria-label="模型价格表">
+        <table className="pricing-table" aria-label={pricingMessages.tableLabel}>
           <thead>
             <tr>
-              <th scope="col">模型</th>
-              <th scope="col">上下文</th>
+              <th scope="col">{pricingMessages.columnModel}</th>
+              <th scope="col">{pricingMessages.columnContext}</th>
               <th scope="col" className="num">
-                输入
+                {pricingMessages.columnInput}
               </th>
               <th scope="col" className="num">
-                缓存读
+                {pricingMessages.columnCachedRead}
               </th>
               <th scope="col" className="num">
-                缓存写
+                {pricingMessages.columnCachedWrite}
               </th>
               <th scope="col" className="num">
-                输出
+                {pricingMessages.columnOutput}
               </th>
-              <th scope="col">来源</th>
+              <th scope="col">{pricingMessages.columnSource}</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((row) => (
               <tr key={`${row.modelId}-${row.band}`}>
                 <td>{row.modelId}</td>
-                <td>{row.band === "long" ? "长" : "短"}</td>
+                <td>
+                  {row.band === "long"
+                    ? pricingMessages.bandLong
+                    : pricingMessages.bandShort}
+                </td>
                 <td className="num">{formatMoney(row.inputMicroUsd)}</td>
                 <td className="num">{formatMoney(row.cachedInputMicroUsd)}</td>
                 <td className="num">
@@ -136,7 +144,9 @@ export function PricingTableSettings({
                 </td>
                 <td className="num">{formatMoney(row.outputMicroUsd)}</td>
                 <td className="source">
-                  {row.source === "official" ? "官网" : "内置"}
+                  {row.source === "official"
+                    ? pricingMessages.sourceOfficial
+                    : pricingMessages.sourceBundled}
                 </td>
               </tr>
             ))}

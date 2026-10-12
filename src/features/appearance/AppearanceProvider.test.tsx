@@ -27,18 +27,21 @@ const native = vi.hoisted(() => ({
 vi.mock("../../api/ipc", () => ({
   getBootstrapSnapshot: ipc.getBootstrapSnapshot,
   isTauriRuntime: () => ipc.tauriRuntime,
+  // Mirrors the real normalizer: the stable code selects rendered catalog text
+  // and `message` stays diagnostic data.
   normalizeIpcError: (error: unknown) => {
     if (typeof error === "object" && error !== null && "message" in error) {
+      const code: unknown = "code" in error ? error.code : undefined;
       return {
-        code: "test",
+        code: typeof code === "string" ? code : "ipc_failed",
         message: String(error.message),
         retryable: true,
         field: null,
       };
     }
     return {
-      code: "test",
-      message: "保存失败",
+      code: "ipc_failed",
+      message: "Unable to complete the request.",
       retryable: true,
       field: null,
     };
@@ -255,8 +258,10 @@ describe("AppearanceProvider", () => {
   it("rolls native and document appearance back when persistence fails", async () => {
     ipc.tauriRuntime = true;
     ipc.updateAppearancePreference.mockRejectedValueOnce({
-      code: "save_failed",
-      message: "保存失败",
+      code: "database_operation_failed",
+      message: "database write failed",
+      retryable: true,
+      field: null,
     });
     renderProvider("light");
     await screen.findByLabelText("preference");
@@ -265,7 +270,9 @@ describe("AppearanceProvider", () => {
     fireEvent.click(screen.getByRole("button", { name: "dark" }));
 
     await expectPreference("light", "light");
-    expect(await screen.findByRole("alert")).toHaveTextContent("保存失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "数据库操作失败。",
+    );
     expect(native.setTheme.mock.calls.map(([theme]) => theme)).toEqual([
       "dark",
       "light",

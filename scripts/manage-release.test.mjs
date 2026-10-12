@@ -1,14 +1,17 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  assertReleaseNoteProjectionsMatch,
   createLatestManifest,
   expectedAssetNames,
   inspectAppBundle,
   loadReleaseNotes,
+  parseChineseReleaseNotes,
   parseReleaseNotes,
   ReleaseError,
   releaseNotes,
@@ -36,8 +39,15 @@ function digest(content) {
 }
 
 function releaseDocument(version = "1.2.3") {
-  return parseReleaseNotes(
-    `# AI Router v${version}\n\n## 重点更新\n\n- 新增可审核的版本说明。`,
+  return assertReleaseNoteProjectionsMatch(
+    parseReleaseNotes(
+      `# AI Router release v${version}\n\n## Highlights\n\n- Reviewed release notes are available for users.`,
+      version,
+    ),
+    parseChineseReleaseNotes(
+      `# AI Router v${version}\n\n## 重点更新\n\n- 本版本为重点更新内容。`,
+      version,
+    ),
     version,
   );
 }
@@ -341,41 +351,84 @@ describe("release signing configuration", () => {
   });
 });
 
+async function rewriteManifest(fixture, mutate) {
+  const manifestPath = join(fixture.root, "latest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  mutate(manifest);
+  const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(manifestPath, bytes);
+  // `latest.json` is covered by SHA256SUMS, so a mutated manifest must be
+  // re-checksummed. Otherwise the checksum mismatch would reject the fixture
+  // first and the test would pass without exercising the projection checks.
+  const checksums = [];
+  for (const name of fixture.names.slice(0, 4)) {
+    const bytes = name === "latest.json" ? readFileSync(join(fixture.root, name)) : await readFile(join(fixture.root, name));
+    checksums.push(`${digest(bytes)}  ${name}`);
+  }
+  await writeFile(join(fixture.root, "SHA256SUMS"), `${checksums.join("\n")}\n`);
+}
+
 describe("release metadata and inventory", () => {
   it("produces user-facing DMG guidance without claiming Apple verification", () => {
     const notes = releaseNotes("1.2.3", releaseDocument());
-    expect(notes).toContain("首次安装请下载 DMG");
-    expect(notes).toContain("未经 Apple Developer ID 验证或公证");
+    expect(notes).toContain("For a first-time install, download the DMG");
+    expect(notes).toContain(
+      "not verified or notarized with an Apple Developer ID",
+    );
   });
 
   it("does not generate either release output without reviewed notes", () => {
     const signature = Buffer.from("synthetic minisign signature").toString(
       "base64",
     );
-    expect(() => releaseNotes("1.2.3")).toThrow("missing or empty");
+    expect(() => releaseNotes("1.2.3")).toThrow(
+      "both reviewed language projections",
+    );
     expect(() =>
       createLatestManifest("1.2.3", "2026-08-16T10:00:00.000Z", signature),
-    ).toThrow("missing or empty");
+    ).toThrow("both reviewed language projections");
   });
 
   it("parses one reviewed document for both release and updater output", () => {
-    const document = parseReleaseNotes(
+    const document = assertReleaseNoteProjectionsMatch(
+      parseReleaseNotes(
       [
-        "# AI Router v1.2.3",
+        "# AI Router release v1.2.3",
         "",
-        "## 重点更新",
+        "## Highlights",
         "",
-        "- 新增用户可见的更新摘要。",
-        "- 优化设置窗口的更新流程。",
+        "- Adds a user-visible update summary.",
+        "- Streamlines the update flow in the settings window.",
         "",
-        "## 问题修复",
+        "## Fixes",
         "",
-        "- 修复一个用户可见的问题。",
+        "- Fixes one user-visible problem.",
         "",
-        "## 注意事项",
+        "## Notices",
         "",
-        "- 本版本无需迁移配置。",
+        "- This version requires no configuration migration.",
       ].join("\n"),
+      "1.2.3",
+    ),
+      parseChineseReleaseNotes(
+        [
+          "# AI Router v1.2.3",
+          "",
+          "## 重点更新",
+          "",
+          "- 新增面向用户的更新摘要。",
+          "- 简化设置窗口中的更新流程。",
+          "",
+          "## 问题修复",
+          "",
+          "- 修复一个面向用户的问题。",
+          "",
+          "## 注意事项",
+          "",
+          "- 本版本无需迁移配置。",
+        ].join("\n"),
+        "1.2.3",
+      ),
       "1.2.3",
     );
     const manifest = createLatestManifest(
@@ -385,69 +438,190 @@ describe("release metadata and inventory", () => {
       document,
     );
 
-    expect(manifest.notes).toBe(document.markdown);
-    expect(releaseNotes("1.2.3", document)).toContain(document.markdown);
-    expect(document.highlights).toHaveLength(2);
-    expect(document.fixes).toHaveLength(1);
-    expect(document.notices).toHaveLength(1);
+    // `notes` must stay the Chinese projection an installed reader already
+    // parses, and the sibling locale map is additive.
+    expect(manifest.notes).toBe(document.chinese.markdown);
+    expect(manifest.notes_i18n["zh-CN"]).toBe(document.chinese.markdown);
+    expect(manifest.notes_i18n.en).toBe(document.english.markdown);
+    const body = releaseNotes("1.2.3", document);
+    expect(body).toContain(document.chinese.markdown);
+    expect(body).toContain("## English");
+    expect(body).toContain("中文 | [English](#english)");
+    expect(body).toContain("### Highlights");
+    expect(body).toContain("- Adds a user-visible update summary.");
+    expect(body.indexOf("## 重点更新")).toBeLessThan(body.indexOf("## English"));
+    expect(body).toContain("版本详情 | Version details:");
+    expect(document.english.highlights).toHaveLength(2);
+    expect(document.english.fixes).toHaveLength(1);
+    expect(document.english.notices).toHaveLength(1);
+  });
+
+  it("refuses to publish from a single-language release document", () => {
+    const englishOnly = parseReleaseNotes(
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- Reviewed release notes are available for users.",
+      "1.2.3",
+    );
+    expect(() => releaseNotes("1.2.3", englishOnly)).toThrow(
+      "both reviewed language projections",
+    );
+  });
+
+  // The generic-content guard runs on parsed items that may be Chinese, so its
+  // Chinese alternatives must survive. Without them a Chinese installer
+  // boilerplate note would pass the gate and ship as a real release body.
+  it("rejects Chinese installer boilerplate as generic placeholder content", () => {
+    expect(() =>
+      parseChineseReleaseNotes(
+        [
+          "# AI Router v1.2.3",
+          "",
+          "## 重点更新",
+          "",
+          "- 首次安装请下载 DMG，该应用由 AI Router v1.2.3 已发布。",
+        ].join("\n"),
+        "1.2.3",
+      ),
+    ).toThrow("generic placeholder content is not sufficient");
+
+    expect(() =>
+      parseReleaseNotes(
+        "# AI Router release v1.2.3\n\n## Highlights\n\n- First-time installs download the DMG and the updater signature is applied.",
+        "1.2.3",
+      ),
+    ).toThrow("generic placeholder content is not sufficient");
+
+    // Real reviewed content must keep parsing.
+    expect(() =>
+      parseChineseReleaseNotes(
+        "# AI Router v1.2.3\n\n## 重点更新\n\n- 设置窗口新增应用内更新入口，可直接查看版本说明。",
+        "1.2.3",
+      ),
+    ).not.toThrow();
+  });
+
+  // The pair assertion must hold at the public renderers too, not only inside
+  // `loadReleaseNotes`: both are exported and called directly.
+  it("refuses to render or sign a manifest from a mismatched pair", () => {
+    const mismatched = {
+      english: parseReleaseNotes(
+        "# AI Router release v1.2.3\n\n## Highlights\n\n- One item.\n\n## Notices\n\n- A notice.",
+        "1.2.3",
+      ),
+      chinese: parseChineseReleaseNotes(
+        "# AI Router v1.2.3\n\n## 重点更新\n\n- 只有一项内容。",
+        "1.2.3",
+      ),
+    };
+    expect(() =>
+      createLatestManifest(
+        "1.2.3",
+        "2026-08-16T10:00:00.000Z",
+        Buffer.from("synthetic minisign signature").toString("base64"),
+        mismatched,
+      ),
+    ).toThrow("items but the English source has");
+    expect(() => releaseNotes("1.2.3", mismatched)).toThrow(
+      "items but the English source has",
+    );
+  });
+
+  it("rejects a Chinese projection that describes a different release", () => {
+    expect(() =>
+      assertReleaseNoteProjectionsMatch(
+        parseReleaseNotes(
+          "# AI Router release v1.2.3\n\n## Highlights\n\n- One reviewed item.\n\n## Notices\n\n- A reviewed notice.",
+          "1.2.3",
+        ),
+        parseChineseReleaseNotes(
+          "# AI Router v1.2.3\n\n## 重点更新\n\n- 只有一项内容。",
+          "1.2.3",
+        ),
+        "1.2.3",
+      ),
+    ).toThrow("items but the English source has");
   });
 
   it("rejects draft body drift before publication", () => {
-    const document = parseReleaseNotes(
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- 新增可审核的版本说明。",
-      "1.2.3",
-    );
+    const document = releaseDocument();
     const body = releaseNotes("1.2.3", document);
     expect(() => validateDraftBody({ body }, body)).not.toThrow();
-    expect(() => validateDraftBody({ body: `${body}\n漂移` }, body)).toThrow(
+    expect(() => validateDraftBody({ body: `${body}\nDrift` }, body)).toThrow(
       "does not match",
     );
   });
 
   it.each([
-    ["wrong version", "# AI Router v9.9.9\n\n## 重点更新\n\n- 有效更新"],
-    ["missing highlights", "# AI Router v1.2.3\n\n## 问题修复\n\n- 有效修复"],
-    ["paragraph", "# AI Router v1.2.3\n\n## 重点更新\n\n普通段落"],
+    [
+      "wrong version",
+      "# AI Router release v9.9.9\n\n## Highlights\n\n- A valid improvement.",
+    ],
+    [
+      "missing highlights",
+      "# AI Router release v1.2.3\n\n## Fixes\n\n- A valid fix.",
+    ],
+    [
+      "paragraph",
+      "# AI Router release v1.2.3\n\n## Highlights\n\nA plain paragraph.",
+    ],
     [
       "duplicate",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- 重复项目\n- 重复项目",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- Duplicate item.\n- Duplicate item.",
     ],
     [
       "link",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- [外部链接](https://example.invalid)",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- [External link](https://example.invalid)",
     ],
     [
       "placeholder",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- AI Router v1.2.3 已发布",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- AI Router release v1.2.3 released",
     ],
     [
       "too many highlights",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- 一\n- 二\n- 三\n- 四",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- One\n- Two\n- Three\n- Four",
     ],
     [
       "too many items",
-      `# AI Router v1.2.3\n\n## 重点更新\n\n- 重点\n\n## 问题修复\n\n${Array.from({ length: 20 }, (_, index) => `- 修复 ${index + 1}`).join("\n")}`,
+      `# AI Router release v1.2.3\n\n## Highlights\n\n- Highlight\n\n## Fixes\n\n${Array.from({ length: 20 }, (_, index) => `- Fix ${index + 1}`).join("\n")}`,
     ],
     [
       "oversized item",
-      `# AI Router v1.2.3\n\n## 重点更新\n\n- ${"长".repeat(241)}`,
+      `# AI Router release v1.2.3\n\n## Highlights\n\n- ${"x".repeat(241)}`,
     ],
     [
       "secret-like content",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- 配置 TAURI_SIGNING_PRIVATE_KEY",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- Configures TAURI_SIGNING_PRIVATE_KEY",
     ],
     [
       "control character",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- 含有\t制表符",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- Contains\ta tab",
     ],
     [
       "inline markdown",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- **加粗占位内容**",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- **Bold placeholder**",
     ],
-    ["TODO placeholder", "# AI Router v1.2.3\n\n## 重点更新\n\n- TODO: 补充说明"],
+    [
+      "TODO placeholder",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- TODO: add details",
+    ],
+    [
+      "Chinese placeholder 待补充",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- 待补充",
+    ],
+    [
+      "Chinese placeholder 待定 with punctuation",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- 待定。",
+    ],
+    [
+      "Chinese placeholder 稍后补充",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- 路由回退改进已记录。\n\n## Fixes\n\n- 稍后补充",
+    ],
+    [
+      "Chinese placeholder 待完善 with detail marker",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- 路由回退改进已记录。\n\n## Notices\n\n- 待完善：细节尚未确认",
+    ],
     [
       "local path",
-      `# AI Router v1.2.3\n\n## 重点更新\n\n- 调试文件位于 ${[
+      `# AI Router release v1.2.3\n\n## Highlights\n\n- Debug file at ${[
         "",
         "Users",
         "example",
@@ -456,7 +630,7 @@ describe("release metadata and inventory", () => {
     ],
     [
       "empty optional section",
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- 有效更新\n\n## 问题修复",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- A valid improvement.\n\n## Fixes",
     ],
   ])("rejects invalid reviewed release notes: %s", (_label, markdown) => {
     expect(() => parseReleaseNotes(markdown, "1.2.3")).toThrow(ReleaseError);
@@ -468,11 +642,35 @@ describe("release metadata and inventory", () => {
     await mkdir(join(root, "release-notes"), { recursive: true });
     await writeFile(
       join(root, "release-notes", "v1.2.3.md"),
-      "# AI Router v1.2.3\n\n## 重点更新\n\n- 新增可审核的版本说明。\n",
+      "# AI Router release v1.2.3\n\n## Highlights\n\n- Reviewed release notes are available for users.\n",
+    );
+    await writeFile(
+      join(root, "release-notes", "v1.2.3.zh-CN.md"),
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 已审核的发布说明可供用户查看。\n",
     );
     await expect(loadReleaseNotes(root, "1.2.3")).resolves.toMatchObject({
-      highlights: ["新增可审核的版本说明。"],
+      english: {
+        highlights: ["Reviewed release notes are available for users."],
+      },
+      chinese: {
+        highlights: ["已审核的发布说明可供用户查看。"],
+      },
     });
+    await writeFile(
+      join(root, "release-notes", "v1.2.3.zh-CN.md"),
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 第一项。\n\n- 第二项。\n",
+    );
+    await expect(loadReleaseNotes(root, "1.2.3")).rejects.toThrow(
+      "Chinese projection of v1.2.3",
+    );
+    await writeFile(
+      join(root, "release-notes", "v1.2.3.zh-CN.md"),
+      "# AI Router v1.2.3\n\n## 重点更新\n\n- 已审核的发布说明可供用户查看。\n",
+    );
+    await rm(join(root, "release-notes", "v1.2.3.zh-CN.md"));
+    await expect(loadReleaseNotes(root, "1.2.3")).rejects.toThrow(
+      "missing reviewed Chinese file",
+    );
     await expect(loadReleaseNotes(root, "1.2.4")).rejects.toThrow(
       "missing reviewed file",
     );
@@ -491,7 +689,7 @@ describe("release metadata and inventory", () => {
   it("counts Unicode code points and rejects manifest note drift", async () => {
     expect(() =>
       parseReleaseNotes(
-        `# AI Router v1.2.3\n\n## 重点更新\n\n- ${"😀".repeat(240)}`,
+        `# AI Router release v1.2.3\n\n## Highlights\n\n- ${"😀".repeat(240)}`,
         "1.2.3",
       ),
     ).not.toThrow();
@@ -499,7 +697,10 @@ describe("release metadata and inventory", () => {
     const fixture = await releaseFixture();
     const manifestPath = join(fixture.root, "latest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    manifest.notes = manifest.notes.replace("新增", "修改");
+    // Drift the Chinese projection that `notes` carries, keeping the map
+    // internally consistent so only the reviewed-source comparison can catch it.
+    manifest.notes = manifest.notes.replace("本版本为重点更新内容。", "已被改写的内容。");
+    manifest.notes_i18n["zh-CN"] = manifest.notes;
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     await expect(
       verifyReleaseDirectory(
@@ -509,6 +710,63 @@ describe("release metadata and inventory", () => {
       ),
     ).rejects.toThrow("reviewed source");
   });
+
+  // `notes` is what every already-installed reader parses, so the manifest must
+  // never be able to satisfy its own checks while drifting from that invariant.
+  it.each([
+    ["an empty locale projection", (m) => (m.notes_i18n.en = "")],
+    [
+      "an arbitrary string in a locale projection",
+      (m) => (m.notes_i18n.en = "x"),
+    ],
+    [
+      "a Chinese body mislabelled as English",
+      (m) => (m.notes_i18n.en = m.notes),
+    ],
+    [
+      "a non-canonical English rendering",
+      (m) => (m.notes_i18n.en = `\n${m.notes_i18n.en}\n`),
+    ],
+    [
+      "notes drifting away from the Chinese locale",
+      (m) => (m.notes_i18n.en = m.notes),
+    ],
+  ])("rejects a manifest with %s", async (_label, mutate) => {
+    const fixture = await releaseFixture();
+    await rewriteManifest(fixture, mutate);
+    await expect(
+      verifyReleaseDirectory(
+        fixture.root,
+        fixture.version,
+        fixture.document,
+      ),
+    ).rejects.toThrow(
+      /notes_i18n|reviewed source|Release notes are invalid/,
+    );
+  });
+
+  // The locale map must hold its invariants even when no reviewed document is
+  // supplied for comparison, because verification is a public entry point that
+  // callers may invoke with the reviewed document omitted.
+  it.each([
+    ["an empty locale projection", (m) => (m.notes_i18n.en = "")],
+    ["an arbitrary string", (m) => (m.notes_i18n.en = "x")],
+    [
+      "notes replaced by the English projection",
+      (m) => {
+        m.notes = m.notes_i18n.en;
+      },
+    ],
+  ])(
+    "rejects a manifest with %s and no reviewed document",
+    async (_label, mutate) => {
+      const fixture = await releaseFixture();
+      await rewriteManifest(fixture, mutate);
+      await expect(
+        verifyReleaseDirectory(fixture.root, fixture.version),
+      ).rejects.toThrow(/notes_i18n|Release notes are invalid/);
+    },
+  );
 
   it("rejects missing, unexpected, checksum-drifted, and URL-drifted assets", async () => {
     const missing = await releaseFixture();

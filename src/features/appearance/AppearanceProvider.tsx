@@ -11,7 +11,13 @@ import type { Window as TauriWindow } from "@tauri-apps/api/window";
 
 import { isTauriRuntime, normalizeIpcError, updateAppearancePreference } from "../../api/ipc";
 import { queryKeys, useBootstrapSnapshot } from "../../api/query";
-import type { AppearancePreference, BootstrapSnapshotDto } from "../../generated";
+import type {
+  AppearancePreference,
+  BootstrapSnapshotDto,
+  IpcErrorDto,
+} from "../../generated";
+import type { LanguageMessages } from "../language/languageMessages";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
 import {
   AppearanceContext,
   type ResolvedAppearance,
@@ -28,12 +34,27 @@ function applyDocumentAppearance(appearance: ResolvedAppearance) {
   document.documentElement.style.colorScheme = appearance;
 }
 
-const nativeThemeMutationError = {
+/**
+ * Native window-theme mutations are frontend-synthesized failures: no Rust
+ * command produces this code, so its display text is owned by the bootstrap
+ * catalog section. Identity and retryability stay typed; `message` remains
+ * bounded diagnostic data and is never rendered.
+ */
+const nativeThemeMutationError: IpcErrorDto = {
   code: "appearance_native_theme_failed",
-  message: "无法应用外观设置，请重试。",
+  message: "native theme mutation failed",
   retryable: true,
   field: null,
 };
+
+function appearanceErrorMessage(
+  error: IpcErrorDto,
+  messages: LanguageMessages,
+): string {
+  return error.code === nativeThemeMutationError.code
+    ? messages.bootstrap.appearanceNativeThemeFailure
+    : ipcErrorMessage(error, messages);
+}
 
 interface ApplyPreferenceOptions {
   nativeFailureIsError?: boolean;
@@ -42,6 +63,7 @@ interface ApplyPreferenceOptions {
 
 export function AppearanceProvider({ children }: { children: React.ReactNode }) {
   const bootstrap = useBootstrapSnapshot();
+  const { messages } = useLanguage();
   const queryClient = useQueryClient();
   const initialPreference = bootstrap.data?.appearancePreference ?? "system";
   const nativeRuntime = isTauriRuntime();
@@ -54,7 +76,7 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
   const [initialAppearanceReady, setInitialAppearanceReady] =
     useState(!nativeRuntime);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
   const persistedRef = useRef<AppearancePreference>(initialPreference);
   const preferenceRef = useRef<AppearancePreference>(initialPreference);
   const mutationRef = useRef(0);
@@ -186,7 +208,7 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
       if (mutationRef.current !== request) return;
       preferenceRef.current = previous;
       setPreferenceState(previous);
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
       await applyPreference(previous, {
         isCurrent: () => mutationRef.current === request,
       });
@@ -195,9 +217,20 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
     }
   }, [applyPreference, pending, queryClient]);
 
+  // The context keeps exposing rendered text so its consumers stay unchanged;
+  // the typed error above stays the source of truth and is re-translated on
+  // every render, so an alert already on screen follows a language switch.
+  const errorText =
+    error === null ? null : appearanceErrorMessage(error, messages);
   const value = useMemo(
-    () => ({ preference, resolvedAppearance, pending, error, setPreference }),
-    [error, pending, preference, resolvedAppearance, setPreference],
+    () => ({
+      preference,
+      resolvedAppearance,
+      pending,
+      error: errorText,
+      setPreference,
+    }),
+    [errorText, pending, preference, resolvedAppearance, setPreference],
   );
   return (
     <AppearanceContext.Provider value={value}>

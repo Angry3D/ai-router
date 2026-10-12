@@ -99,6 +99,7 @@ const keysByArea: Record<StateArea, ReadonlyArray<readonly unknown[]>> = {
     queryKeys.settings,
   ],
   appearance: [queryKeys.bootstrap],
+  language: [queryKeys.bootstrap],
   menu_bar: [queryKeys.settings],
   application_update: [queryKeys.applicationUpdate],
   pricing_table: [queryKeys.pricingTable],

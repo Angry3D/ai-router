@@ -110,6 +110,10 @@ function bootstrap(
     proxyStatus,
     lifecycle: { phase: "running" as const, issue: null },
     appearancePreference: "system" as const,
+    // These menu tests render without a LanguageProvider, so the committed
+    // locale must match the one the default context renders (zh-CN) instead of
+    // declaring a locale no consumer reads.
+    language: { preference: "system" as const, effectiveLocale: "zh-CN" as const },
   };
 }
 
@@ -577,7 +581,9 @@ describe("P8 menu interactions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "断开连接" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(
       screen.getByRole("button", { name: "Codex 已连接，断开 Codex" }),
     ).toBeEnabled();
@@ -733,7 +739,9 @@ describe("P8 menu interactions", () => {
       screen.getByRole("button", { name: "Fallback 已关闭，开启 Fallback" }),
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     const button = screen.getByRole("button", {
       name: "Fallback 已关闭，开启 Fallback",
     });
@@ -1157,7 +1165,9 @@ describe("P8 menu interactions", () => {
       screen.queryByLabelText("生成图片容量提醒"),
     ).not.toBeInTheDocument();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(screen.getByLabelText("生成图片容量提醒")).toBeInTheDocument();
     expect(ipc.dismissMcpImageCapacityWarning).toHaveBeenCalledWith(
       "capacity-1",
@@ -1203,7 +1213,9 @@ describe("P8 menu interactions", () => {
     );
 
     rejectDismissal?.(new Error("injected"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(screen.getByLabelText("生成图片容量提醒")).toHaveTextContent(
       "1.4 GB",
     );

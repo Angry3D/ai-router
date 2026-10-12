@@ -639,13 +639,48 @@ fn normalize_notes(notes: &str) -> String {
     normalized
 }
 
+/// Grammar of one structured release-notes document. New authoring emits the
+/// English `release` discriminator; already published bodies keep their strict
+/// Chinese structured grammar for read compatibility.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NotesGrammar {
+    ReleaseEnglish,
+    PublishedChinese,
+}
+
+impl NotesGrammar {
+    fn detect(notes: &str) -> Option<Self> {
+        if notes.starts_with("# AI Router release v") {
+            Some(Self::ReleaseEnglish)
+        } else if notes.starts_with("# AI Router v") {
+            Some(Self::PublishedChinese)
+        } else {
+            None
+        }
+    }
+
+    fn title(self, version: &str) -> String {
+        match self {
+            Self::ReleaseEnglish => format!("# AI Router release v{version}"),
+            Self::PublishedChinese => format!("# AI Router v{version}"),
+        }
+    }
+
+    fn sections(self) -> [&'static str; 3] {
+        match self {
+            Self::ReleaseEnglish => ["Highlights", "Fixes", "Notices"],
+            Self::PublishedChinese => ["重点更新", "问题修复", "注意事项"],
+        }
+    }
+}
+
 fn normalize_update_notes(
     raw_notes: &str,
     version: &str,
 ) -> Result<(Option<ApplicationUpdateNotesDto>, Option<String>), ApplicationUpdateFailureDto> {
     let normalized_newlines = raw_notes.replace("\r\n", "\n");
-    let structured = normalized_newlines.starts_with("# AI Router v");
-    if structured
+    let grammar = NotesGrammar::detect(&normalized_newlines);
+    if grammar.is_some()
         && (normalized_newlines.chars().count() > MAX_RELEASE_NOTES_CHARS
             || normalized_newlines.lines().count() > MAX_RELEASE_NOTES_LINES
             || normalized_newlines
@@ -655,15 +690,16 @@ fn normalize_update_notes(
         return Err(metadata_failure());
     }
     let normalized = normalize_notes(&normalized_newlines).trim().to_owned();
-    if !structured {
+    let Some(grammar) = grammar else {
         return Ok((None, (!normalized.is_empty()).then_some(normalized)));
-    }
-    parse_structured_notes(&normalized, version).map(|notes| (Some(notes), None))
+    };
+    parse_structured_notes(&normalized, version, grammar).map(|notes| (Some(notes), None))
 }
 
 fn parse_structured_notes(
     notes: &str,
     version: &str,
+    grammar: NotesGrammar,
 ) -> Result<ApplicationUpdateNotesDto, ApplicationUpdateFailureDto> {
     #[derive(Clone, Copy, Eq, PartialEq)]
     enum Section {
@@ -673,7 +709,7 @@ fn parse_structured_notes(
     }
 
     let mut lines = notes.lines();
-    if lines.next() != Some(format!("# AI Router v{version}").as_str()) {
+    if lines.next() != Some(grammar.title(version).as_str()) {
         return Err(metadata_failure());
     }
     let mut result = ApplicationUpdateNotesDto {
@@ -690,17 +726,23 @@ fn parse_structured_notes(
             continue;
         }
         if let Some(heading) = line.strip_prefix("## ") {
-            let (next, index) = match heading {
-                "重点更新" => (Section::Highlights, 1),
-                "问题修复" => (Section::Fixes, 2),
-                "注意事项" => (Section::Notices, 3),
-                _ => return Err(metadata_failure()),
+            let headings = grammar.sections();
+            let Some(section_index) = headings
+                .iter()
+                .position(|candidate| *candidate == heading)
+                .map(|index| index + 1)
+            else {
+                return Err(metadata_failure());
             };
-            if index <= last_section_index || !seen_sections.insert(index) {
+            if section_index <= last_section_index || !seen_sections.insert(section_index) {
                 return Err(metadata_failure());
             }
-            last_section_index = index;
-            section = Some(next);
+            last_section_index = section_index;
+            section = Some(match section_index {
+                1 => Section::Highlights,
+                2 => Section::Fixes,
+                _ => Section::Notices,
+            });
             continue;
         }
         let item = line.strip_prefix("- ").ok_or_else(metadata_failure)?;
@@ -1341,6 +1383,33 @@ mod tests {
         assert_eq!(structured.fixes, ["修复一个问题"]);
         assert_eq!(structured.notices, ["无需迁移配置"]);
         assert!(legacy.is_none());
+    }
+
+    #[test]
+    fn release_grammar_notes_are_projected_and_published_grammar_stays_strict() {
+        let notes = "# AI Router release v1.2.4\n\n## Highlights\n\n- One improvement\n- Another improvement\n\n## Fixes\n\n- One correction\n\n## Notices\n\n- No configuration migration";
+        let (structured, legacy) = normalize_update_notes(notes, "1.2.4").expect("release notes");
+        let structured = structured.expect("typed notes");
+        assert_eq!(
+            structured.highlights,
+            ["One improvement", "Another improvement"]
+        );
+        assert_eq!(structured.fixes, ["One correction"]);
+        assert_eq!(structured.notices, ["No configuration migration"]);
+        assert!(legacy.is_none());
+
+        // The new grammar is strict: Chinese headings under the new
+        // discriminator, missing highlights, duplicated sections or a version
+        // mismatch fail closed instead of downgrading to legacy text.
+        for invalid in [
+            "# AI Router release v1.2.4\n\n## 重点更新\n\n- One improvement",
+            "# AI Router release v1.2.4\n\n## Fixes\n\n- One correction",
+            "# AI Router release v1.2.4\n\n## Highlights\n\n- One improvement\n\n## Highlights\n\n- Again",
+            "# AI Router release v9.9.9\n\n## Highlights\n\n- One improvement",
+            "# AI Router release v1.2.4\n\n## Highlights\n\nA paragraph",
+        ] {
+            assert!(normalize_update_notes(invalid, "1.2.4").is_err());
+        }
     }
 
     #[test]

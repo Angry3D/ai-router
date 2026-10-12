@@ -50,8 +50,8 @@ use runtime::{
     restore_recovery_point, retry_database_startup, save_route, set_fallback_enabled,
     show_settings_window, start_over_database, sync_pricing_from_web, test_balance_query,
     test_outbound_proxy, update_appearance_preference, update_balance_query_settings,
-    update_images_generation_settings, update_mcp_image_capacity_threshold,
-    update_menu_bar_settings, update_outbound_proxy_settings,
+    update_images_generation_settings, update_language_preference,
+    update_mcp_image_capacity_threshold, update_menu_bar_settings, update_outbound_proxy_settings,
 };
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, ipc::Channel};
 
@@ -492,6 +492,22 @@ impl LogicalRequestActivitySink for TauriLogicalRequestActivitySink {
     }
 }
 
+/// Builds the status item; the startup tooltip uses the platform-language
+/// sample that the first committed tray projection replaces.
+fn build_tray(app: &mut tauri::App, assets: &TrayIconAssets, isolated: bool) -> tauri::Result<()> {
+    let tray_builder = tauri::tray::TrayIconBuilder::with_id("main")
+        .icon(assets.ready.clone())
+        .icon_as_template(true)
+        .tooltip(popover::startup_tooltip(&app.package_info().name))
+        .show_menu_on_left_click(false);
+    if isolated {
+        tray_builder.title(initial_tray_title(true)).build(app)?;
+    } else {
+        tray_builder.build(app)?;
+    }
+    Ok(())
+}
+
 fn schedule_tray_refresh(app_handle: AppHandle, refresh: Arc<TrayRefreshCoordinator>) -> bool {
     let Some(revision) = refresh.request() else {
         return false;
@@ -505,6 +521,7 @@ fn schedule_tray_refresh(app_handle: AppHandle, refresh: Arc<TrayRefreshCoordina
             return;
         };
         let snapshot = runtime.bootstrap_snapshot();
+        popover::apply_native_language(&app_handle, snapshot.language.effective_locale);
         let Some(services) = app_handle.try_state::<Arc<DesktopLifecycleServices>>() else {
             return;
         };
@@ -682,6 +699,7 @@ fn state_event_affects_tray(event: &StateChangedEventDto) -> bool {
                 | StateArea::Balance
                 | StateArea::Proxy
                 | StateArea::MenuBar
+                | StateArea::Language
         )
     })
 }
@@ -885,6 +903,7 @@ pub fn run() {
             open_runtime_log_directory,
             clear_runtime_logs,
             show_settings_window,
+            update_language_preference,
             quit_application,
             menu_frontend_ready,
             complete_menu_show,
@@ -973,17 +992,8 @@ fn setup_application(
     }
     finish_runtime_log_setup(app.handle());
     let tray_assets = TrayIconAssets::decode()?;
-    let tray_builder = tauri::tray::TrayIconBuilder::with_id("main")
-        .icon(tray_assets.ready.clone())
-        .icon_as_template(true)
-        .tooltip(format!("{} 正在启动", app.package_info().name))
-        .show_menu_on_left_click(false);
-    let tray_builder = if profile.is_isolated() {
-        tray_builder.title(initial_tray_title(true))
-    } else {
-        tray_builder
-    };
-    tray_builder.build(app)?;
+    build_tray(app, &tray_assets, profile.is_isolated())?;
+    popover::apply_startup_native_language(app.handle());
     let tray_refresh = Arc::new(TrayRefreshCoordinator::new(
         tray_assets,
         system_reduce_motion(),

@@ -26,6 +26,7 @@ import type {
   BalanceQueryMode,
   BalanceResult,
   CodexModelDto,
+  IpcErrorDto,
   ReachabilityResult,
   RouteEditDto,
   RouteId,
@@ -33,6 +34,9 @@ import type {
   RouteProtocol,
   RouteSaveInputDto,
 } from "../../generated";
+import type { RoutesEditorMessages } from "../language/catalog/routes";
+import type { LanguageMessages } from "../language/languageMessages";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
 import { AppScrollArea } from "../shared/AppScrollArea";
 import { previewBaseUrl } from "./baseUrlPreview";
 import customBalanceScriptScaffold from "./customBalanceScriptScaffold.txt?raw";
@@ -90,24 +94,28 @@ function containsControlCharacter(value: string) {
   });
 }
 
-function validateCodexModels(rows: CodexModelDraft[]): CodexModelErrors {
+function validateCodexModels(
+  rows: CodexModelDraft[],
+  messages: RoutesEditorMessages,
+): CodexModelErrors {
   const errors: CodexModelErrors = {};
   const ids = new Map<string, string>();
   for (const row of rows) {
     const rowErrors: Partial<Record<CodexModelField, string>> = {};
     const modelId = row.modelId.trim();
-    if (!modelId) rowErrors.modelId = "请输入模型 ID。";
+    if (!modelId) rowErrors.modelId = messages.validationModelIdRequired;
     else if (containsControlCharacter(modelId)) {
-      rowErrors.modelId = "不能包含控制字符。";
-    } else if (ids.has(modelId)) rowErrors.modelId = "模型 ID 不能重复。";
-    else ids.set(modelId, row.key);
+      rowErrors.modelId = messages.validationControlCharacter;
+    } else if (ids.has(modelId)) {
+      rowErrors.modelId = messages.validationModelIdDuplicate;
+    } else ids.set(modelId, row.key);
     if (containsControlCharacter(row.displayName.trim())) {
-      rowErrors.displayName = "不能包含控制字符。";
+      rowErrors.displayName = messages.validationControlCharacter;
     }
     if (row.contextWindow.trim()) {
       const contextWindow = Number(row.contextWindow);
       if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) {
-        rowErrors.contextWindow = "请输入正整数。";
+        rowErrors.contextWindow = messages.validationPositiveInteger;
       }
     }
     if (Object.keys(rowErrors).length > 0) errors[row.key] = rowErrors;
@@ -115,18 +123,21 @@ function validateCodexModels(rows: CodexModelDraft[]): CodexModelErrors {
   return errors;
 }
 
-function modelActivationMessage(activation: string) {
+function modelActivationMessage(
+  activation: string,
+  messages: RoutesEditorMessages,
+) {
   switch (activation) {
     case "restart_codex":
-      return "已保存，重启 Codex 后生效";
+      return messages.activationRestartCodex;
     case "connect_codex":
-      return "已保存，连接 Codex 后生效";
+      return messages.activationConnectCodex;
     case "reconnect_codex":
-      return "已保存，需要重新连接 Codex";
+      return messages.activationReconnectCodex;
     case "fix_codex_config":
-      return "已保存，请先修复 Codex 配置";
+      return messages.activationFixCodexConfig;
     default:
-      return "已保存";
+      return messages.activationSaved;
   }
 }
 
@@ -150,48 +161,73 @@ export interface RouteEditorHealthDetail {
 
 type BalanceTestFeedback =
   | { kind: "result"; result: BalanceResult }
-  | { kind: "error"; message: string };
+  | { kind: "error"; error: IpcErrorDto };
 
 type ModelsFetchState =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "ready"; models: string[] }
-  | { kind: "error"; message: string };
+  | { kind: "categoryError"; category: RouteModelsErrorCategory }
+  | { kind: "ipcError"; error: IpcErrorDto };
 
-const systemProxyErrorMessage =
-  "系统代理不可用，请检查 macOS 手动代理设置或在系统设置中改用自定义代理；不支持 PAC/WPAD。";
+type EditorNotice = "retryRequired" | "scriptFormatFailed" | "systemProxy";
 
-const modelsErrorCopy: Record<RouteModelsErrorCategory, string> = {
-  unauthorized: "获取失败：鉴权失败，请检查 API Key",
-  not_found: "获取失败：上游未提供 /models 接口",
-  network: "获取失败：无法连接上游",
-  system_proxy: systemProxyErrorMessage,
-  timeout: "获取失败：请求超时",
-  http_status: "获取失败：上游响应不可用",
-  too_large: "获取失败：上游响应不可用",
-  invalid_response: "获取失败：上游响应不可用",
-};
+type EditorError =
+  | { kind: "ipc"; error: IpcErrorDto }
+  | { kind: "notice"; notice: EditorNotice };
 
-function modelsFetchStatusFor(state: ModelsFetchState): {
+function editorNoticeText(
+  messages: RoutesEditorMessages,
+  notice: EditorNotice,
+): string {
+  switch (notice) {
+    case "retryRequired":
+      return messages.saveRetryRequired;
+    case "scriptFormatFailed":
+      return messages.scriptFormatFailed;
+    case "systemProxy":
+      return messages.modelsError.system_proxy;
+  }
+}
+
+function modelsFetchStatusFor(
+  state: ModelsFetchState,
+  messages: LanguageMessages,
+): {
   text: string;
   tone: SettingsTone;
   alert: boolean;
 } {
+  const editor = messages.routes.editor;
   switch (state.kind) {
     case "loading":
-      return { text: "正在获取模型列表…", tone: "neutral", alert: false };
+      return { text: editor.modelsFetching, tone: "neutral", alert: false };
     case "ready":
       return state.models.length === 0
-        ? { text: "上游未返回模型", tone: "warning", alert: false }
+        ? { text: editor.modelsEmpty, tone: "warning", alert: false }
         : {
-            text: `已获取 ${state.models.length} 个模型`,
+            text: editor.modelsFetched(state.models.length),
             tone: "neutral",
             alert: false,
           };
-    case "error":
-      return { text: state.message, tone: "danger", alert: true };
+    case "categoryError":
+      return {
+        text: editor.modelsError[state.category],
+        tone: "danger",
+        alert: true,
+      };
+    case "ipcError":
+      return {
+        text: ipcErrorMessage(state.error, messages),
+        tone: "danger",
+        alert: true,
+      };
     default:
-      return { text: "未获取模型列表", tone: "neutral", alert: false };
+      return {
+        text: editor.modelsNotFetched,
+        tone: "neutral",
+        alert: false,
+      };
   }
 }
 
@@ -239,6 +275,8 @@ export function RouteEditor(props: {
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     props.newRoute || props.routeId === null ? "ready" : "loading",
   );
+  const { messages } = useLanguage();
+  const editorMessages = messages.routes.editor;
 
   useEffect(() => {
     if (props.newRoute || props.routeId === null) return undefined;
@@ -261,16 +299,18 @@ export function RouteEditor(props: {
     return (
       <section className="route-editor-empty">
         <Route aria-hidden="true" size={24} />
-        <h2>选择或新建路由</h2>
+        <h2>{editorMessages.emptyTitle}</h2>
       </section>
     );
   }
   if (!props.newRoute && loadState === "loading")
-    return <section className="route-editor-empty">正在读取路由...</section>;
+    return (
+      <section className="route-editor-empty">{editorMessages.loading}</section>
+    );
   if (!props.newRoute && (loadState === "error" || edit === null))
     return (
       <section className="route-editor-empty settings-error">
-        路由读取失败。
+        {editorMessages.loadFailed}
       </section>
     );
   return (
@@ -297,12 +337,14 @@ function RouteForm(props: {
   onDeleted: (routeId: RouteId) => void;
 }) {
   const { onDirtyChange } = props;
+  const { messages } = useLanguage();
+  const editorMessages = messages.routes.editor;
   const queryClient = useQueryClient();
   const [form, setForm] = useState<RouteFormState>(() => props.initial);
   const [baseline, setBaseline] = useState<RouteFormState>(() => props.initial);
   const [showKey, setShowKey] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<EditorError | null>(null);
   const [reachability, setReachability] = useState<ReachabilityResult | null>(
     null,
   );
@@ -322,7 +364,7 @@ function RouteForm(props: {
     useState<HTMLElement | null>(null);
   const [modelIdInput, setModelIdInput] = useState("");
   const [retryToken, setRetryToken] = useState<string | null>(null);
-  const [modelSuccess, setModelSuccess] = useState<string | null>(null);
+  const [modelActivation, setModelActivation] = useState<string | null>(null);
   const nextModelKey = useRef(props.initial.models.length);
   const fallbackModelInputRef = useRef<HTMLInputElement>(null);
   const modelIdComboboxRef = useRef<HTMLInputElement>(null);
@@ -350,7 +392,7 @@ function RouteForm(props: {
   const inferenceUrl = form.baseUrl.trim()
     ? baseUrlPreview.valid
       ? baseUrlPreview.inferenceUrl
-      : "地址无效"
+      : editorMessages.invalidUrl
     : "";
   const insecureHttp = useMemo(() => {
     try {
@@ -373,7 +415,7 @@ function RouteForm(props: {
     id,
     disabled: form.fallbackExcludedModels.includes(id),
   }));
-  const modelsFetchStatus = modelsFetchStatusFor(modelsFetch);
+  const modelsFetchStatus = modelsFetchStatusFor(modelsFetch, messages);
 
   const patchForm = <K extends keyof RouteFormState>(
     key: K,
@@ -410,7 +452,7 @@ function RouteForm(props: {
       return { ...current, [key]: { ...current[key], [field]: undefined } };
     });
     setError(null);
-    setModelSuccess(null);
+    setModelActivation(null);
   };
 
   const addModelWithId = (value: string) => {
@@ -426,7 +468,7 @@ function RouteForm(props: {
     }));
     setModelIdInput("");
     setError(null);
-    setModelSuccess(null);
+    setModelActivation(null);
     requestAnimationFrame(() => modelIdComboboxRef.current?.focus());
   };
 
@@ -441,15 +483,17 @@ function RouteForm(props: {
       return next;
     });
     setError(null);
-    setModelSuccess(null);
+    setModelActivation(null);
   };
 
   const validateFallbackModel = (value: string) => {
     const modelId = value.trim();
     if (!modelId) return null;
-    if (containsControlCharacter(modelId)) return "不能包含控制字符。";
+    if (containsControlCharacter(modelId)) {
+      return editorMessages.validationControlCharacter;
+    }
     if (form.fallbackExcludedModels.includes(modelId)) {
-      return "模型 ID 不能重复。";
+      return editorMessages.validationModelIdDuplicate;
     }
     return null;
   };
@@ -493,7 +537,7 @@ function RouteForm(props: {
     const fallbackExcludedModels = pendingFallbackModel
       ? [...form.fallbackExcludedModels, pendingFallbackModel]
       : form.fallbackExcludedModels;
-    const validation = validateCodexModels(form.models);
+    const validation = validateCodexModels(form.models, editorMessages);
     setModelErrors(validation);
     if (Object.keys(validation).length > 0) return;
     setBusy(true);
@@ -531,7 +575,7 @@ function RouteForm(props: {
       const result = await saveRoute(input);
       if (result.catalog.retryRequired && result.catalog.retryToken) {
         setRetryToken(result.catalog.retryToken);
-        setError("路由已保存，但模型目录尚未完整应用。请重试。");
+        setError({ kind: "notice", notice: "retryRequired" });
         return;
       }
       const savedModels = codexModelDrafts(result.catalog.models).map(
@@ -554,7 +598,7 @@ function RouteForm(props: {
       setFallbackModelInput("");
       setFallbackModelError(null);
       setRetryToken(null);
-      setModelSuccess(modelActivationMessage(result.catalog.activation));
+      setModelActivation(result.catalog.activation);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.settings }),
         queryClient.invalidateQueries({ queryKey: queryKeys.menu }),
@@ -563,8 +607,9 @@ function RouteForm(props: {
       props.onSaved(result.routeId);
     } catch (reason) {
       const normalized = normalizeIpcError(reason);
+      const fieldMessage = ipcErrorMessage(normalized, messages);
       if (normalized.field?.startsWith("fallbackExcludedModels.")) {
-        setFallbackModelError(normalized.message);
+        setFallbackModelError(fieldMessage);
       }
       const match = normalized.field?.match(/^models\.(\d+)\.(.+)$/u);
       if (match) {
@@ -576,11 +621,11 @@ function RouteForm(props: {
         ) {
           setModelErrors((current) => ({
             ...current,
-            [row.key]: { ...current[row.key], [field]: normalized.message },
+            [row.key]: { ...current[row.key], [field]: fieldMessage },
           }));
         }
       }
-      setError(normalized.message);
+      setError({ kind: "ipc", error: normalized });
     } finally {
       setBusy(false);
     }
@@ -593,9 +638,9 @@ function RouteForm(props: {
       !props.riskConfirmed
     ) {
       setSettingsConfirmation({
-        title: "允许余额脚本使用 API Key？",
-        body: "自定义脚本可以把当前路由的 API Key 发送到任意 HTTP(S) 地址。请只启用你信任的脚本。",
-        confirmLabel: "确认并保存",
+        title: editorMessages.scriptRiskTitle,
+        body: editorMessages.scriptRiskBody,
+        confirmLabel: editorMessages.scriptRiskConfirm,
         onConfirm: () => {
           setSettingsConfirmation(null);
           void commitSave(true);
@@ -618,13 +663,13 @@ function RouteForm(props: {
           case "system_proxy_read_failed":
           case "system_proxy_invalid":
           case "system_proxy_automatic_unsupported":
-            setError(systemProxyErrorMessage);
+            setError({ kind: "notice", notice: "systemProxy" });
             break;
         }
       }
     } catch (reason) {
       if (generation === probeGeneration.current) {
-        setError(normalizeIpcError(reason).message);
+        setError({ kind: "ipc", error: normalizeIpcError(reason) });
       }
     } finally {
       setBusy(false);
@@ -648,7 +693,7 @@ function RouteForm(props: {
     } catch (reason) {
       setBalanceFeedback({
         kind: "error",
-        message: normalizeIpcError(reason).message,
+        error: normalizeIpcError(reason),
       });
     } finally {
       setBusy(false);
@@ -669,15 +714,12 @@ function RouteForm(props: {
       if (generation !== modelsGeneration.current) return;
       setModelsFetch(
         result.errorCategory
-          ? { kind: "error", message: modelsErrorCopy[result.errorCategory] }
+          ? { kind: "categoryError", category: result.errorCategory }
           : { kind: "ready", models: result.models },
       );
     } catch (reason) {
       if (generation !== modelsGeneration.current) return;
-      setModelsFetch({
-        kind: "error",
-        message: normalizeIpcError(reason).message,
-      });
+      setModelsFetch({ kind: "ipcError", error: normalizeIpcError(reason) });
     } finally {
       setBusy(false);
     }
@@ -689,7 +731,7 @@ function RouteForm(props: {
     try {
       patchForm("customSource", await formatBalanceScript(form.customSource));
     } catch {
-      setError("脚本格式化失败，请检查 JavaScript 语法。");
+      setError({ kind: "notice", notice: "scriptFormatFailed" });
     } finally {
       setBusy(false);
     }
@@ -700,12 +742,12 @@ function RouteForm(props: {
     const active = props.routeId === props.activeRouteId;
     setSettingsConfirmation({
       title: active
-        ? `删除当前路由“${form.name}”？`
-        : `删除路由“${form.name}”？`,
+        ? editorMessages.deleteActiveTitle(form.name)
+        : editorMessages.deleteTitle(form.name),
       body: active
-        ? "删除后将进入“无中转”，新请求会失败，直到你手动切换路由。"
-        : "这条路由及其 API Key 和余额脚本将被永久删除。",
-      confirmLabel: "删除路由",
+        ? editorMessages.deleteActiveBody
+        : editorMessages.deleteBody,
+      confirmLabel: editorMessages.deleteConfirm,
       destructive: true,
       onConfirm: () => {
         const routeId = props.routeId as RouteId;
@@ -720,7 +762,9 @@ function RouteForm(props: {
             ]);
             props.onDeleted(routeId);
           })
-          .catch((reason) => setError(normalizeIpcError(reason).message))
+          .catch((reason) =>
+            setError({ kind: "ipc", error: normalizeIpcError(reason) }),
+          )
           .finally(() => setBusy(false));
       },
     });
@@ -729,7 +773,11 @@ function RouteForm(props: {
   return (
     <section
       className="route-form-pane"
-      aria-label={props.newRoute ? "新建路由" : `编辑 ${form.name}`}
+      aria-label={
+        props.newRoute
+          ? editorMessages.newRouteTitle
+          : editorMessages.editRouteLabel(form.name)
+      }
     >
       <AppScrollArea
         className="route-form-scroll"
@@ -737,11 +785,15 @@ function RouteForm(props: {
       >
         <fieldset className="route-form-fields" disabled={locked}>
           <SettingsPageTitle
-            title={props.newRoute ? "新建路由" : form.name}
+            title={props.newRoute ? editorMessages.newRouteTitle : form.name}
             detail={props.newRoute ? null : props.healthDetail?.text}
             detailTone={props.healthDetail?.tone}
           />
-          <SettingsFieldRow label="路由名称" htmlFor="route-name" required>
+          <SettingsFieldRow
+            label={editorMessages.nameLabel}
+            htmlFor="route-name"
+            required
+          >
             <SettingsTextInput
               id="route-name"
               value={form.name}
@@ -750,11 +802,11 @@ function RouteForm(props: {
               onChange={(event) => patchForm("name", event.target.value)}
             />
           </SettingsFieldRow>
-          <SettingsFieldRow label="上游协议">
+          <SettingsFieldRow label={editorMessages.protocolLabel}>
             <div
               className="settings-segments"
               role="radiogroup"
-              aria-label="上游协议"
+              aria-label={editorMessages.protocolLabel}
             >
               <label className="settings-segment-option">
                 <input
@@ -778,7 +830,11 @@ function RouteForm(props: {
               </label>
             </div>
           </SettingsFieldRow>
-          <SettingsFieldRow label="Base URL" htmlFor="route-base-url" required>
+          <SettingsFieldRow
+            label={editorMessages.baseUrlLabel}
+            htmlFor="route-base-url"
+            required
+          >
             <SettingsTextInput
               id="route-base-url"
               value={form.baseUrl}
@@ -787,15 +843,19 @@ function RouteForm(props: {
               placeholder="https://example.com/v1"
             />
           </SettingsFieldRow>
-          <SettingsReadonlyRow label="最终推理地址">
+          <SettingsReadonlyRow label={editorMessages.inferenceUrlLabel}>
             {inferenceUrl || "-"}
           </SettingsReadonlyRow>
           {insecureHttp ? (
             <p className="inline-warning">
-              该地址使用非回环 HTTP，API Key 将以明文传输。
+              {editorMessages.insecureHttpWarning}
             </p>
           ) : null}
-          <SettingsFieldRow label="API Key" htmlFor="route-api-key" required>
+          <SettingsFieldRow
+            label={editorMessages.apiKeyLabel}
+            htmlFor="route-api-key"
+            required
+          >
             <span className="secret-input">
               <SettingsTextInput
                 id="route-api-key"
@@ -806,8 +866,14 @@ function RouteForm(props: {
               />
               <SettingsIconButton
                 type="button"
-                label={showKey ? "隐藏 API Key" : "显示 API Key"}
-                title={showKey ? "隐藏 Key" : "显示 Key"}
+                label={
+                  showKey
+                    ? editorMessages.hideApiKey
+                    : editorMessages.showApiKey
+                }
+                title={
+                  showKey ? editorMessages.hideKey : editorMessages.showKey
+                }
                 onClick={() => setShowKey((value) => !value)}
               >
                 {showKey ? (
@@ -818,10 +884,10 @@ function RouteForm(props: {
               </SettingsIconButton>
             </span>
           </SettingsFieldRow>
-          <SettingsFieldRow label="在顶部菜单中显示">
+          <SettingsFieldRow label={editorMessages.menuVisibleLabel}>
             <div className="route-fallback-switch-help">
               <SettingsSwitch
-                label="在顶部菜单中显示"
+                label={editorMessages.menuVisibleLabel}
                 checked={form.menuVisible}
                 disabled={
                   props.routeId !== null &&
@@ -831,8 +897,8 @@ function RouteForm(props: {
                   patchForm("menuVisible", event.target.checked)
                 }
               />
-              <SettingsHelpTooltip label="说明菜单显示与自动 Fallback 资格">
-                关闭后不会显示在顶部菜单，也不会参与自动 Fallback。
+              <SettingsHelpTooltip label={editorMessages.menuVisibleHelpLabel}>
+                {editorMessages.menuVisibleHelpText}
               </SettingsHelpTooltip>
             </div>
           </SettingsFieldRow>
@@ -842,13 +908,13 @@ function RouteForm(props: {
               disabled={busy || !baseUrlPreview.valid}
               onClick={() => void probe()}
             >
-              检查推理地址
+              {editorMessages.checkReachability}
             </SettingsButton>
             {reachability ? (
               <SettingsStatus
-                tone={reachabilityPresentation[reachability.status].tone}
+                tone={reachabilityTone[reachability.status]}
               >
-                {reachabilityPresentation[reachability.status].label}
+                {reachabilityLabel(reachability.status, editorMessages)}
                 {reachability.ttfbMs !== null
                   ? ` · ${reachability.ttfbMs} ms`
                   : null}
@@ -866,7 +932,9 @@ function RouteForm(props: {
               }
               onClick={() => void fetchModels()}
             >
-              {modelsFetch.kind === "loading" ? "获取中…" : "获取模型列表"}
+              {modelsFetch.kind === "loading"
+                ? editorMessages.fetchingModels
+                : editorMessages.fetchModels}
             </SettingsButton>
             <SettingsStatus
               tone={modelsFetchStatus.tone}
@@ -885,16 +953,20 @@ function RouteForm(props: {
                 id="route-fallback-model-heading"
                 className="settings-section-title"
               >
-                跳过 Fallback 的模型
+                {editorMessages.fallbackModelsTitle}
               </h3>
               <SettingsStatus>
                 {fallbackModelsDirty
-                  ? `${form.fallbackExcludedModels.length} 个 · 未保存`
-                  : `${form.fallbackExcludedModels.length} 个`}
+                  ? editorMessages.fallbackModelsCountUnsaved(
+                      form.fallbackExcludedModels.length,
+                    )
+                  : editorMessages.fallbackModelsCount(
+                      form.fallbackExcludedModels.length,
+                    )}
               </SettingsStatus>
             </div>
             <p className="fallback-model-notice">
-              当前路由收到这些模型时不会自动切换；作为候选路由时会被跳过。
+              {editorMessages.fallbackModelsNotice}
             </p>
             <div
               className="fallback-model-popup-host"
@@ -915,8 +987,10 @@ function RouteForm(props: {
                       <button
                         type="button"
                         className="fallback-model-remove"
-                        aria-label={`移除跳过 Fallback 的模型：${modelId}`}
-                        title={`移除 ${modelId}`}
+                        aria-label={editorMessages.removeFallbackModelLabel(
+                          modelId,
+                        )}
+                        title={editorMessages.removeFallbackModelTitle(modelId)}
                         onClick={() => removeFallbackModel(modelId)}
                       >
                         <X aria-hidden="true" size={13} />
@@ -935,10 +1009,10 @@ function RouteForm(props: {
                   options={fallbackModelOptions}
                   onSelect={addFallbackModel}
                   onSubmit={addFallbackModel}
-                  ariaLabel="添加跳过 Fallback 的模型"
+                  ariaLabel={editorMessages.fallbackModelComboboxLabel}
                   placeholder={
                     form.fallbackExcludedModels.length === 0
-                      ? "输入模型 ID"
+                      ? editorMessages.fallbackModelPlaceholder
                       : undefined
                   }
                   describedBy={
@@ -951,8 +1025,8 @@ function RouteForm(props: {
                 />
                 <SettingsIconButton
                   type="button"
-                  label="添加模型"
-                  title="添加模型"
+                  label={editorMessages.addModelLabel}
+                  title={editorMessages.addModelTitle}
                   disabled={!fallbackModelInput.trim()}
                   onClick={() => addFallbackModel()}
                 >
@@ -976,38 +1050,46 @@ function RouteForm(props: {
           >
             <div className="settings-section-heading">
               <h3 id="route-model-heading" className="settings-section-title">
-                自定义模型
+                {editorMessages.modelsTitle}
               </h3>
               <SettingsStatus
                 tone={
-                  retryToken ? "danger" : modelSuccess ? "success" : "neutral"
+                  retryToken
+                    ? "danger"
+                    : modelActivation
+                      ? "success"
+                      : "neutral"
                 }
               >
-                {modelSuccess ??
-                  (retryToken
-                    ? `${form.models.length} 个 · 需要重试`
+                {modelActivation
+                  ? modelActivationMessage(modelActivation, editorMessages)
+                  : retryToken
+                    ? editorMessages.modelsCountRetry(form.models.length)
                     : modelsDirty
-                      ? `${form.models.length} 个 · 未保存`
-                      : `${form.models.length} 个`)}
+                      ? editorMessages.modelsCountUnsaved(form.models.length)
+                      : editorMessages.modelsCount(form.models.length)}
               </SettingsStatus>
             </div>
-            <p className="codex-model-notice">
-              保存非空列表后，将替换 Codex 内置模型列表。
-            </p>
+            <p className="codex-model-notice">{editorMessages.modelsNotice}</p>
             {form.models.length === 0 ? (
-              <div className="codex-model-empty">尚未添加自定义模型</div>
+              <div className="codex-model-empty">
+                {editorMessages.modelsEmptyGrid}
+              </div>
             ) : (
-              <div className="codex-model-grid" aria-label="自定义模型列表">
+              <div
+                className="codex-model-grid"
+                aria-label={editorMessages.modelsGridLabel}
+              >
                 <div className="codex-model-grid-header" aria-hidden="true">
                   <span>
-                    模型 ID{" "}
+                    {editorMessages.columnModelId}{" "}
                     <span
                       className="settings-required-marker"
                       aria-hidden="true"
                     />
                   </span>
-                  <span>显示名称</span>
-                  <span>上下文窗口（Token）</span>
+                  <span>{editorMessages.columnDisplayName}</span>
+                  <span>{editorMessages.columnContextWindow}</span>
                   <span />
                 </div>
                 {form.models.map((row, index) => {
@@ -1016,7 +1098,9 @@ function RouteForm(props: {
                     <div className="codex-model-row" key={row.key}>
                       <div className="codex-model-field">
                         <SettingsTextInput
-                          aria-label={`模型 ID ${index + 1}`}
+                          aria-label={editorMessages.modelIdFieldLabel(
+                            index + 1,
+                          )}
                           aria-invalid={Boolean(rowErrors.modelId)}
                           value={row.modelId}
                           disabled={busy}
@@ -1034,9 +1118,11 @@ function RouteForm(props: {
                       </div>
                       <div className="codex-model-field">
                         <SettingsTextInput
-                          aria-label={`显示名称 ${index + 1}`}
+                          aria-label={editorMessages.displayNameFieldLabel(
+                            index + 1,
+                          )}
                           aria-invalid={Boolean(rowErrors.displayName)}
-                          placeholder="使用模型 ID"
+                          placeholder={editorMessages.displayNamePlaceholder}
                           value={row.displayName}
                           disabled={busy}
                           onChange={(event) =>
@@ -1053,7 +1139,9 @@ function RouteForm(props: {
                       </div>
                       <div className="codex-model-field">
                         <SettingsTextInput
-                          aria-label={`上下文窗口（Token） ${index + 1}`}
+                          aria-label={editorMessages.contextWindowFieldLabel(
+                            index + 1,
+                          )}
                           aria-invalid={Boolean(rowErrors.contextWindow)}
                           type="number"
                           min={1}
@@ -1075,8 +1163,8 @@ function RouteForm(props: {
                       </div>
                       <SettingsIconButton
                         type="button"
-                        label={`删除模型 ${index + 1}`}
-                        title={`删除模型 ${index + 1}`}
+                        label={editorMessages.removeModelLabel(index + 1)}
+                        title={editorMessages.removeModelLabel(index + 1)}
                         disabled={busy}
                         onClick={() => removeModel(row.key)}
                       >
@@ -1098,8 +1186,8 @@ function RouteForm(props: {
                 options={customModelOptions}
                 onSelect={addModelWithId}
                 onSubmit={addModelWithId}
-                ariaLabel="搜索或输入模型 ID"
-                placeholder="搜索或输入模型 ID"
+                ariaLabel={editorMessages.modelSearchLabel}
+                placeholder={editorMessages.modelSearchLabel}
                 placement="above"
                 disabled={busy}
               />
@@ -1108,18 +1196,20 @@ function RouteForm(props: {
                 disabled={busy || !modelIdInput.trim()}
                 onClick={() => addModelWithId(modelIdInput)}
               >
-                添加模型
+                {editorMessages.addModelLabel}
               </SettingsButton>
             </div>
           </section>
 
           <SettingsDivider />
-          <h3 className="settings-section-title">余额查询</h3>
-          <SettingsFieldRow label="查询方式">
+          <h3 className="settings-section-title">
+            {editorMessages.balanceTitle}
+          </h3>
+          <SettingsFieldRow label={editorMessages.queryModeLabel}>
             <div
               className="settings-segments"
               role="radiogroup"
-              aria-label="余额查询方式"
+              aria-label={editorMessages.queryModeAriaLabel}
             >
               <label className="settings-segment-option">
                 <input
@@ -1129,7 +1219,7 @@ function RouteForm(props: {
                   checked={form.queryMode === "general_v1"}
                   onChange={() => patchForm("queryMode", "general_v1")}
                 />
-                <span>通用查询</span>
+                <span>{editorMessages.queryModeGeneral}</span>
               </label>
               <label className="settings-segment-option">
                 <input
@@ -1139,12 +1229,12 @@ function RouteForm(props: {
                   checked={form.queryMode === "custom_js"}
                   onChange={() => patchForm("queryMode", "custom_js")}
                 />
-                <span>自定义脚本</span>
+                <span>{editorMessages.queryModeCustom}</span>
               </label>
             </div>
           </SettingsFieldRow>
           <SettingsSwitch
-            label="启用余额查询"
+            label={editorMessages.queryEnabledLabel}
             checked={form.queryEnabled}
             onChange={(event) =>
               patchForm("queryEnabled", event.target.checked)
@@ -1152,7 +1242,7 @@ function RouteForm(props: {
           />
           {form.queryMode === "custom_js" ? (
             <SettingsTextarea
-              aria-label="JavaScript 表达式"
+              aria-label={editorMessages.scriptAriaLabel}
               className="route-script-editor"
               spellCheck={false}
               value={form.customSource}
@@ -1171,7 +1261,7 @@ function RouteForm(props: {
                   onClick={() => void formatScript()}
                 >
                   <Sparkles aria-hidden="true" size={15} />
-                  格式化
+                  {editorMessages.formatScript}
                 </SettingsButton>
               ) : (
                 <SettingsButton
@@ -1182,7 +1272,7 @@ function RouteForm(props: {
                   }
                 >
                   <FileCode2 aria-hidden="true" size={15} />
-                  插入骨架
+                  {editorMessages.insertScaffold}
                 </SettingsButton>
               )
             ) : null}
@@ -1199,11 +1289,16 @@ function RouteForm(props: {
                   }
                 >
                   {balanceFeedback.kind === "error"
-                    ? balanceFeedback.message
+                    ? ipcErrorMessage(balanceFeedback.error, messages)
                     : balanceFeedback.result.isValid
-                      ? `余额 ${balanceFeedback.result.remaining === null ? "-" : balanceFeedback.result.remaining.toFixed(2)} ${balanceFeedback.result.unit ?? ""}`
+                      ? editorMessages.balanceResult(
+                          balanceFeedback.result.remaining === null
+                            ? "-"
+                            : balanceFeedback.result.remaining.toFixed(2),
+                          balanceFeedback.result.unit ?? "",
+                        )
                       : (balanceFeedback.result.invalidMessage ??
-                        "查询返回无效结果")}
+                        editorMessages.balanceInvalidResult)}
                 </SettingsStatus>
               ) : null}
               <SettingsButton
@@ -1217,13 +1312,15 @@ function RouteForm(props: {
                 }
                 onClick={() => void testBalance()}
               >
-                测试余额查询
+                {editorMessages.testBalance}
               </SettingsButton>
             </div>
           </SettingsActionGroup>
           {error ? (
             <p className="settings-error" role="alert">
-              {error}
+              {error.kind === "ipc"
+                ? ipcErrorMessage(error.error, messages)
+                : editorNoticeText(editorMessages, error.notice)}
             </p>
           ) : null}
         </fieldset>
@@ -1237,7 +1334,7 @@ function RouteForm(props: {
               disabled={locked}
               onClick={requestDelete}
             >
-              删除路由
+              {editorMessages.deleteRoute}
             </SettingsButton>
           )
         }
@@ -1247,7 +1344,7 @@ function RouteForm(props: {
           disabled={locked}
           onClick={props.onCancel}
         >
-          取消
+          {messages.shell.cancel}
         </SettingsButton>
         <SettingsButton
           variant="primary"
@@ -1258,7 +1355,7 @@ function RouteForm(props: {
           {busy ? (
             <LoaderCircle aria-hidden="true" className="spin" size={15} />
           ) : null}
-          保存
+          {messages.shell.save}
         </SettingsButton>
       </SettingsFooter>
       {confirmation ? (
@@ -1271,15 +1368,25 @@ function RouteForm(props: {
   );
 }
 
-const reachabilityPresentation: Record<
-  ReachabilityResult["status"],
-  { tone: SettingsTone; label: string }
-> = {
-  reachable: { tone: "success", label: "可达" },
-  slow: { tone: "warning", label: "较慢" },
-  path_not_found: {
-    tone: "warning",
-    label: "服务器可达，推理路径可能不正确",
-  },
-  unreachable: { tone: "danger", label: "不可达" },
+const reachabilityTone: Record<ReachabilityResult["status"], SettingsTone> = {
+  reachable: "success",
+  slow: "warning",
+  path_not_found: "warning",
+  unreachable: "danger",
 };
+
+function reachabilityLabel(
+  status: ReachabilityResult["status"],
+  messages: RoutesEditorMessages,
+): string {
+  switch (status) {
+    case "reachable":
+      return messages.reachable;
+    case "slow":
+      return messages.slow;
+    case "path_not_found":
+      return messages.pathNotFound;
+    case "unreachable":
+      return messages.unreachable;
+  }
+}

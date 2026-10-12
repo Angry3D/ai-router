@@ -11,9 +11,14 @@ import {
 } from "../../api/ipc";
 import { queryKeys } from "../../api/query";
 import type {
+  ApplicationUpdateFailureDto,
   ApplicationUpdateProgressDto,
   ApplicationUpdateSnapshotDto,
+  IpcErrorDto,
 } from "../../generated";
+import type { UpdatesMessages } from "../language/catalog/updates";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
+import { formatDateTime } from "./codexSettingsFormatting";
 import {
   SettingsActionGroup,
   SettingsButton,
@@ -31,6 +36,8 @@ export function ApplicationUpdateSettings({
   snapshot: ApplicationUpdateSnapshotDto | null;
 }) {
   const queryClient = useQueryClient();
+  const { messages, effectiveLocale } = useLanguage();
+  const updatesMessages = messages.updates;
   const [localResult, setLocalResult] = useState<{
     source: ApplicationUpdateSnapshotDto | null;
     snapshot: ApplicationUpdateSnapshotDto;
@@ -43,7 +50,7 @@ export function ApplicationUpdateSettings({
   const [confirmation, setConfirmation] = useState<SettingsConfirmation | null>(
     null,
   );
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<IpcErrorDto | null>(null);
   const [expandedNotesVersion, setExpandedNotesVersion] = useState<
     string | null
   >(null);
@@ -62,10 +69,13 @@ export function ApplicationUpdateSettings({
     : downloadPending
       ? (progress?.operation ?? "downloading")
       : current.operation;
-  const presentation = updatePresentation({
-    ...current,
-    operation: effectiveOperation,
-  });
+  const presentation = updatePresentation(
+    {
+      ...current,
+      operation: effectiveOperation,
+    },
+    updatesMessages,
+  );
   const busy =
     checkPending ||
     downloadPending ||
@@ -86,7 +96,7 @@ export function ApplicationUpdateSettings({
     try {
       applySnapshot(await checkApplicationUpdate());
     } catch (reason) {
-      setActionError(normalizeIpcError(reason).message);
+      setActionError(normalizeIpcError(reason));
       await queryClient.invalidateQueries({
         queryKey: queryKeys.applicationUpdate,
       });
@@ -117,7 +127,7 @@ export function ApplicationUpdateSettings({
       }
     } catch (reason) {
       if (downloadGeneration.current === generation) {
-        setActionError(normalizeIpcError(reason).message);
+        setActionError(normalizeIpcError(reason));
         await queryClient.invalidateQueries({
           queryKey: queryKeys.applicationUpdate,
         });
@@ -135,7 +145,7 @@ export function ApplicationUpdateSettings({
     try {
       await openApplicationUpdateRelease();
     } catch (reason) {
-      setActionError(normalizeIpcError(reason).message);
+      setActionError(normalizeIpcError(reason));
     }
   };
 
@@ -145,26 +155,25 @@ export function ApplicationUpdateSettings({
     try {
       await restartForApplicationUpdate();
     } catch (reason) {
-      setActionError(normalizeIpcError(reason).message);
+      setActionError(normalizeIpcError(reason));
     }
   };
 
   const confirmDownload = () => {
     setConfirmation({
-      title: "下载并安装应用更新？",
-      body: "应用会先校验项目签名，再替换应用文件；安装完成后不会自动重启。",
-      confirmLabel: "下载并安装",
-      cancelLabel: "取消",
+      title: updatesMessages.confirmDownloadTitle,
+      body: updatesMessages.confirmDownloadBody,
+      confirmLabel: updatesMessages.confirmDownloadConfirm,
       onConfirm: () => void download(),
     });
   };
 
   const confirmRestart = () => {
     setConfirmation({
-      title: "重启并完成更新？",
-      body: "应用会先正常关闭代理与后台服务，然后重新打开更新后的版本。",
-      confirmLabel: "重启应用",
-      cancelLabel: "稍后",
+      title: updatesMessages.confirmRestartTitle,
+      body: updatesMessages.confirmRestartBody,
+      confirmLabel: updatesMessages.confirmRestartConfirm,
+      cancelLabel: updatesMessages.confirmRestartCancel,
       onConfirm: () => void restart(),
     });
   };
@@ -172,30 +181,32 @@ export function ApplicationUpdateSettings({
   return (
     <>
       <SettingsSection
-        title="应用更新"
+        title={updatesMessages.sectionTitle}
         status={
           <SettingsStatus tone={presentation.tone} aria-live="polite">
             {presentation.label}
           </SettingsStatus>
         }
       >
-        <SettingsReadonlyRow label="当前版本">
+        <SettingsReadonlyRow label={updatesMessages.currentVersionLabel}>
           {current.currentVersion || "—"}
         </SettingsReadonlyRow>
         {current.lastSuccessfulCheckAtMs !== null ? (
-          <SettingsReadonlyRow label="最近检查">
-            {formatDateTime(current.lastSuccessfulCheckAtMs)}
+          <SettingsReadonlyRow label={updatesMessages.lastCheckedLabel}>
+            {formatDateTime(current.lastSuccessfulCheckAtMs, effectiveLocale)}
           </SettingsReadonlyRow>
         ) : null}
         {current.available ? (
-          <SettingsReadonlyRow label="可用版本">
+          <SettingsReadonlyRow label={updatesMessages.availableVersionLabel}>
             {current.available.version}
           </SettingsReadonlyRow>
         ) : null}
 
         {current.available?.notes ? (
           <div className="application-update-notes">
-            <span className="settings-field-label">本次更新</span>
+            <span className="settings-field-label">
+              {updatesMessages.notesHeading}
+            </span>
             <div className="application-update-notes-content">
               <div id="application-update-release-details">
                 {notesExpanded ? (
@@ -203,6 +214,9 @@ export function ApplicationUpdateSettings({
                     highlights={current.available.notes.highlights}
                     fixes={current.available.notes.fixes}
                     notices={current.available.notes.notices}
+                    highlightsHeading={updatesMessages.notesHighlightsHeading}
+                    fixesHeading={updatesMessages.notesFixesHeading}
+                    noticesHeading={updatesMessages.notesNoticesHeading}
                   />
                 ) : (
                   <ul className="application-update-notes-summary">
@@ -228,15 +242,19 @@ export function ApplicationUpdateSettings({
                   }
                 >
                   {notesExpanded
-                    ? "收起更新内容"
-                    : `查看全部 ${releaseNoteItemCount(current.available.notes)} 项`}
+                    ? updatesMessages.notesCollapse
+                    : updatesMessages.notesViewAll(
+                        releaseNoteItemCount(current.available.notes),
+                      )}
                 </button>
               ) : null}
             </div>
           </div>
         ) : current.available ? (
           <div className="application-update-notes application-update-notes-legacy">
-            <span className="settings-field-label">发行说明</span>
+            <span className="settings-field-label">
+              {updatesMessages.releaseNotesHeading}
+            </span>
             <div className="application-update-notes-content">
               {current.available.legacyNotes ? (
                 <>
@@ -260,15 +278,17 @@ export function ApplicationUpdateSettings({
                         )
                       }
                     >
-                      {notesExpanded ? "收起发行说明" : "展开发行说明"}
+                      {notesExpanded
+                        ? updatesMessages.releaseNotesCollapse
+                        : updatesMessages.releaseNotesExpand}
                     </button>
                   ) : null}
                 </>
               ) : null}
               <p className="application-update-notes-fallback">
                 {current.available.legacyNotes
-                  ? "此说明来自旧版格式，完整内容请查看 GitHub Release。"
-                  : "此版本未提供可验证的更新摘要，请查看 GitHub Release。"}
+                  ? updatesMessages.releaseNotesLegacyHint
+                  : updatesMessages.releaseNotesFallback}
               </p>
             </div>
           </div>
@@ -276,17 +296,23 @@ export function ApplicationUpdateSettings({
 
         {effectiveOperation === "downloading" ||
         effectiveOperation === "installing" ? (
-          <UpdateProgress progress={effectiveProgress} />
+          <UpdateProgress
+            progress={effectiveProgress}
+            updatesMessages={updatesMessages}
+          />
         ) : null}
 
         {current.manualFailure ? (
           <p className="application-update-error" role="alert">
-            {current.manualFailure.message}
+            {ipcErrorMessage(
+              updateFailureError(current.manualFailure),
+              messages,
+            )}
           </p>
         ) : null}
         {actionError ? (
           <p className="application-update-error" role="alert">
-            {actionError}
+            {ipcErrorMessage(actionError, messages)}
           </p>
         ) : null}
 
@@ -298,7 +324,7 @@ export function ApplicationUpdateSettings({
               onClick={confirmRestart}
             >
               <RefreshCw aria-hidden="true" size={15} />
-              重启并完成更新
+              {updatesMessages.restartButton}
             </SettingsButton>
           ) : current.available &&
             !busy &&
@@ -309,7 +335,9 @@ export function ApplicationUpdateSettings({
               onClick={confirmDownload}
             >
               <Download aria-hidden="true" size={15} />
-              {current.manualFailure ? "重试下载" : "下载并安装"}
+              {current.manualFailure
+                ? updatesMessages.retryDownloadButton
+                : updatesMessages.downloadButton}
             </SettingsButton>
           ) : !current.available && effectiveOperation !== "installing" ? (
             <SettingsButton type="button" disabled={busy} onClick={check}>
@@ -319,16 +347,16 @@ export function ApplicationUpdateSettings({
                 <RefreshCw aria-hidden="true" size={15} />
               )}
               {effectiveOperation === "checking"
-                ? "正在检查"
+                ? updatesMessages.checkingButton
                 : current.lastSuccessfulCheckAtMs === null
-                  ? "检查更新"
-                  : "再次检查"}
+                  ? updatesMessages.checkButton
+                  : updatesMessages.recheckButton}
             </SettingsButton>
           ) : null}
           {current.available || current.manualFailure || actionError ? (
             <SettingsButton type="button" onClick={() => void openRelease()}>
               <ExternalLink aria-hidden="true" size={15} />
-              查看 GitHub Release
+              {updatesMessages.viewReleaseButton}
             </SettingsButton>
           ) : null}
         </SettingsActionGroup>
@@ -353,12 +381,22 @@ function ApplicationUpdateNoteGroups({
   highlights,
   fixes,
   notices,
-}: ReleaseNoteGroupsProps) {
+  highlightsHeading,
+  fixesHeading,
+  noticesHeading,
+}: ReleaseNoteGroupsProps & {
+  highlightsHeading: string;
+  fixesHeading: string;
+  noticesHeading: string;
+}) {
   return (
     <div className="application-update-note-groups">
-      <ApplicationUpdateNoteGroup heading="重点更新" items={highlights} />
-      <ApplicationUpdateNoteGroup heading="问题修复" items={fixes} />
-      <ApplicationUpdateNoteGroup heading="注意事项" items={notices} />
+      <ApplicationUpdateNoteGroup
+        heading={highlightsHeading}
+        items={highlights}
+      />
+      <ApplicationUpdateNoteGroup heading={fixesHeading} items={fixes} />
+      <ApplicationUpdateNoteGroup heading={noticesHeading} items={notices} />
     </div>
   );
 }
@@ -393,8 +431,10 @@ function legacyNotesAreExpandable(notes: string) {
 
 function UpdateProgress({
   progress,
+  updatesMessages,
 }: {
   progress: ApplicationUpdateProgressDto;
+  updatesMessages: UpdatesMessages;
 }) {
   const determinate =
     progress.operation === "downloading" &&
@@ -416,8 +456,8 @@ function UpdateProgress({
         role="progressbar"
         aria-label={
           progress.operation === "installing"
-            ? "正在验证并安装"
-            : "更新下载进度"
+            ? updatesMessages.progressInstalling
+            : updatesMessages.progressDownloadLabel
         }
         aria-valuemin={determinate ? 0 : undefined}
         aria-valuemax={determinate ? 100 : undefined}
@@ -429,10 +469,14 @@ function UpdateProgress({
       </div>
       <p>
         {progress.operation === "installing"
-          ? "正在验证并安装"
+          ? updatesMessages.progressInstalling
           : percentage === null
-            ? "正在下载"
-            : `${percentage}% · ${formatBytes(progress.downloadedBytes ?? 0)} / ${formatBytes(progress.totalBytes ?? 0)}`}
+            ? updatesMessages.progressDownloading
+            : updatesMessages.progressDetail(
+                percentage,
+                formatBytes(progress.downloadedBytes ?? 0),
+                formatBytes(progress.totalBytes ?? 0),
+              )}
       </p>
     </div>
   );
@@ -448,30 +492,32 @@ const emptyUpdateSnapshot: ApplicationUpdateSnapshotDto = {
   manualFailure: null,
 };
 
-function updatePresentation(snapshot: ApplicationUpdateSnapshotDto): {
+function updatePresentation(
+  snapshot: ApplicationUpdateSnapshotDto,
+  updatesMessages: UpdatesMessages,
+): {
   label: string;
   tone: SettingsTone;
 } {
   if (snapshot.operation === "checking")
-    return { label: "正在检查", tone: "neutral" };
+    return { label: updatesMessages.statusChecking, tone: "neutral" };
   if (snapshot.operation === "downloading")
-    return { label: "正在下载", tone: "neutral" };
+    return { label: updatesMessages.statusDownloading, tone: "neutral" };
   if (snapshot.operation === "installing")
-    return { label: "正在安装", tone: "neutral" };
+    return { label: updatesMessages.statusInstalling, tone: "neutral" };
   if (snapshot.operation === "restart_ready")
-    return { label: "更新已安装，等待重启", tone: "success" };
-  if (snapshot.available) return { label: "发现新版本", tone: "warning" };
-  if (snapshot.manualFailure) return { label: "检查失败", tone: "danger" };
+    return { label: updatesMessages.statusRestartReady, tone: "success" };
+  if (snapshot.available)
+    return { label: updatesMessages.statusAvailable, tone: "warning" };
+  if (snapshot.manualFailure)
+    return { label: updatesMessages.statusCheckFailed, tone: "danger" };
   if (snapshot.lastSuccessfulCheckAtMs !== null)
-    return { label: "已是最新版本", tone: "success" };
-  return { label: "尚未检查", tone: "neutral" };
+    return { label: updatesMessages.statusUpToDate, tone: "success" };
+  return { label: updatesMessages.statusNotChecked, tone: "neutral" };
 }
 
-function formatDateTime(value: number) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(value);
+function updateFailureError(failure: ApplicationUpdateFailureDto): IpcErrorDto {
+  return { ...failure, field: null };
 }
 
 function formatBytes(bytes: number) {

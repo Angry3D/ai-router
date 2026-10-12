@@ -1,170 +1,223 @@
 # AI Router
 
+English | [简体中文](./README.zh-CN.md)
+
 [![CI](https://github.com/Angry3D/ai-router/actions/workflows/ci.yml/badge.svg)](https://github.com/Angry3D/ai-router/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/Angry3D/ai-router)](https://github.com/Angry3D/ai-router/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20Apple%20Silicon-lightgrey)](./SUPPORT.md)
 
-AI Router 是一款面向中文 macOS 个人开发者的本地菜单栏应用，用于在 Codex CLI 或
-Codex App 与多个兼容 OpenAI Responses API 的上游之间切换路由。它可以查询余额、自动
-回退路由、管理自定义 Codex 模型目录和图片生成 MCP，并在本地汇总请求用量。
+AI Router is a local menu bar app for macOS developers that switches between
+Codex CLI or the Codex app and multiple upstreams that are compatible with the
+OpenAI Responses API. It queries balances, falls back across routes
+automatically, manages custom Codex model catalogs and the image-generation
+MCP, and summarizes request usage locally.
 
-项目仍处于早期开发阶段，提供简体中文界面、官方 Apple Silicon DMG 和源码。它不是稳定的
-通用网络代理或企业级网关。
+The project is still in early development. It ships a Simplified Chinese and
+English interface, an official Apple Silicon DMG and source code. It is not a
+stable general-purpose network proxy or an enterprise gateway.
 
-**[前往 GitHub Releases 下载官方 DMG](https://github.com/Angry3D/ai-router/releases)**
+**[Download the official DMG from GitHub Releases](https://github.com/Angry3D/ai-router/releases)**
 
-## 软件截图
+## Screenshots
 
-截图由隔离的 `AI Router QA.app` 和合成数据生成，不包含真实路由、API Key 或请求内容。
-捕获与来源记录见 [README 图片说明](./docs/images/readme/README.md)。
+The screenshots come from the isolated `AI Router QA.app` and synthetic data;
+they contain no real routes, API keys or request content. The current
+screenshots show the Chinese interface; English captures will follow in a later
+release. See [README image notes](./docs/images/readme/README.md) for capture
+and provenance records.
 
-### 菜单与路由切换
+### Menu and route switching
 
-| 浅色主题                                                                                                                                      | 深色主题                                                                                                                                     |
-| --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| <img src="./docs/images/readme/menu-overview-light.png" alt="AI Router 浅色主题菜单，显示四条合成路由、当前路由和 Fallback 状态" width="384"> | <img src="./docs/images/readme/menu-overview-dark.png" alt="AI Router 深色主题菜单，显示四条合成路由、当前路由和 Fallback 状态" width="384"> |
+| Light theme                                                                                                                                                                   | Dark theme                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| <img src="./docs/images/readme/menu-overview-light.png" alt="AI Router menu in the light theme (Chinese UI) showing four synthetic routes, the current route and the fallback state" width="384"> | <img src="./docs/images/readme/menu-overview-dark.png" alt="AI Router menu in the dark theme (Chinese UI) showing four synthetic routes, the current route and the fallback state" width="384"> |
 
-从菜单栏一键切换当前路由，并实时查看 Codex 连接状态与 Fallback 状态。
+Switch the current route from the menu bar and watch the Codex connection state
+and fallback state in real time.
 
-### 路由配置
+### Route configuration
 
-| 浅色主题                                                                                                                                           | 深色主题                                                                                                                                          |
-| -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <img src="./docs/images/readme/route-overview-light.png" alt="AI Router 浅色主题路由页面，显示四条合成路由、Fallback 顺序和路由编辑器" width="460"> | <img src="./docs/images/readme/route-overview-dark.png" alt="AI Router 深色主题路由页面，显示四条合成路由、Fallback 顺序和路由编辑器" width="460"> |
+| Light theme                                                                                                                                                                       | Dark theme                                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| <img src="./docs/images/readme/route-overview-light.png" alt="AI Router routes page in the light theme (Chinese UI) showing four synthetic routes, the fallback order and the route editor" width="460"> | <img src="./docs/images/readme/route-overview-dark.png" alt="AI Router routes page in the dark theme (Chinese UI) showing four synthetic routes, the fallback order and the route editor" width="460"> |
 
-路由页集中管理上游地址、余额与回退顺序，每条路由可独立选择上游协议。
+The routes page keeps upstream addresses, balances and fallback order in one
+place, and every route can select its own upstream protocol.
 
-## 目录
+## Contents
 
-- [主要功能](#主要功能)
-- [支持范围](#支持范围)
-- [安装和首次使用](#安装和首次使用)
-- [应用内更新](#应用内更新)
-- [网络出站](#网络出站)
-- [数据与隐私](#数据与隐私)
-- [故障排查](#故障排查)
-- [从源码开发](#从源码开发)
-- [工程与社区](#工程与社区)
-- [许可证](#许可证)
+- [Features](#features)
+- [Support scope](#support-scope)
+- [Installation and first run](#installation-and-first-run)
+- [In-app updates](#in-app-updates)
+- [Network egress](#network-egress)
+- [Data and privacy](#data-and-privacy)
+- [Troubleshooting](#troubleshooting)
+- [Building from source](#building-from-source)
+- [Engineering and community](#engineering-and-community)
+- [License](#license)
 
-## 主要功能
+## Features
 
-- 在菜单栏查看代理、Codex 和 Fallback 状态，一键切换当前路由。
-- 为多个 Responses API 上游保存路由信息、查询余额，并在故障时按顺序回退。
-- 每条路由可选择上游协议：Responses 原样转发，或桥接只提供 Chat Completions 的上游，
-  同时向 Codex 保持一致的 Responses 契约。
-- 通过受保护的配置投影连接 Codex；断开时恢复之前保存的配置目标。
-- 管理自定义模型目录和图片生成 MCP，无需手工维护对应的 Codex 配置片段。
-- 按路由、模型、状态和时间查看 token、费用估算与延迟等本地请求元数据。
-- 查看模型价格表，手动「同步官网」即可从 OpenAI 官方定价页更新 GPT 模型价格，结果只写入
-  本地价格表。
-- 备份和恢复本地设置，并保留有界诊断信息。
+- See proxy, Codex and fallback state in the menu bar, and switch the current
+  route with one click.
+- Store route details for multiple Responses API upstreams, query balances and
+  fall back in order on failure.
+- Choose an upstream protocol per route: forward Responses untouched, or bridge
+  upstreams that only speak Chat Completions while keeping the Responses
+  contract for Codex.
+- Connect Codex through a protected configuration projection; disconnecting
+  restores the previously saved configuration target.
+- Manage the custom model catalog and the image-generation MCP without
+  hand-editing the matching Codex configuration fragments.
+- Inspect local request metadata such as tokens, estimated cost and latency by
+  route, model, status and time.
+- Browse the model price table and update GPT model prices from the official
+  OpenAI pricing page with a manual "Sync page"; the result only writes to the
+  local price table.
+- Back up and restore local settings, and keep bounded diagnostics.
 
-## 支持范围
+## Support scope
 
-| 项目     | 当前边界                                                                                 |
-| -------- | ---------------------------------------------------------------------------------------- |
-| 操作系统 | macOS 13 或更高版本                                                                      |
-| 硬件     | Apple Silicon (`aarch64`)                                                                |
-| Codex    | 需要已安装并可运行的 Codex CLI 或 Codex App；自动兼容性检查固定为 `codex-cli 0.160.0`    |
-| 界面语言 | 简体中文                                                                                 |
-| 分发     | 官方 DMG 使用 ad-hoc 签名，不做 Developer ID 签名或 Apple 公证；支持显式确认的应用内更新 |
-| 网络边界 | 本地代理仅监听 loopback；上游请求按用户配置的 Responses API 地址发出                     |
+| Item             | Current boundary                                                                                                |
+| ---------------- | --------------------------------------------------------------------------------------------------------------- |
+| Operating system | macOS 13 or later                                                                                               |
+| Hardware         | Apple Silicon (`aarch64`)                                                                                       |
+| Codex            | Requires an installed and working Codex CLI or Codex app; the automatic compatibility check pins `codex-cli 0.160.0` |
+| Interface language | Simplified Chinese / English (follows macOS by default, manual switch available)                             |
+| Distribution     | The official DMG uses ad-hoc signing, not Developer ID signing or Apple notarization; in-app updates require explicit confirmation |
+| Network boundary | The local proxy listens on loopback only; upstream requests go to the Responses API address configured by the user |
 
-未列出的 Codex 版本可能可以工作，但当前没有兼容性保证。Windows、Linux 和 Intel Mac 不在
-支持范围内。完整边界见 [支持说明](./SUPPORT.md)。
+Unlisted Codex versions may work, but there is no compatibility guarantee at
+the moment. Windows, Linux and Intel Macs are out of scope. See the
+[support documentation](./SUPPORT.md) for the complete boundaries.
 
-## 安装和首次使用
+## Installation and first run
 
-只从 [GitHub Releases](https://github.com/Angry3D/ai-router/releases) 下载文件名为
-`AI.Router_<version>_aarch64.dmg` 的资产。打开 DMG，将 `AI Router.app` 拖入「应用程序」，
-再从 Finder 启动。
+Download the asset named `AI.Router_<version>_aarch64.dmg` from
+[GitHub Releases](https://github.com/Angry3D/ai-router/releases) only. Open the
+DMG, drag `AI Router.app` into Applications, and launch it from Finder.
 
-官方 DMG 使用 macOS ad-hoc 签名以保持 bundle 内代码一致，但不包含 Apple Developer ID 身份，
-也没有经过 Apple 公证或 Apple 验证。首次打开如果被 macOS 阻止，请打开「系统设置 → 隐私与
-安全性」，在「安全性」区域确认被阻止的是 `AI Router.app`，选择「仍要打开」，再在系统确认框中
-允许。项目不建议使用终端命令关闭或绕过 Gatekeeper。
+The official DMG uses an ad-hoc macOS signature to keep the code inside the
+bundle consistent, but it carries no Apple Developer ID identity and is not
+notarized or verified by Apple. If macOS blocks the first launch, open System
+Settings → Privacy & Security, confirm in the Security section that the blocked
+item is `AI Router.app`, choose "Open Anyway", and allow it in the system
+confirmation dialog. The project does not recommend terminal commands that
+disable or bypass Gatekeeper.
 
-首次启动后：
+After the first launch:
 
-1. 打开菜单栏中的 AI Router，在「设置 → 路由」新增一条路由，填写兼容 Responses API 的
-   地址和密钥。
-2. 保存并测试路由；确认状态正常后，将它设为当前路由。
-3. 在菜单中明确执行 Codex 连接。连接会受保护地更新 Codex 当前 provider 的传输字段；断开
-   会恢复已保存的恢复目标。
+1. Open AI Router in the menu bar, add a route under Settings → Routes, and enter
+   a Responses API compatible address and key.
+2. Save and test the route; once its state is healthy, make it the current
+   route.
+3. Connect Codex explicitly from the menu. Connecting updates the transport
+   fields of the current Codex provider through the protected projection;
+   disconnecting restores the saved recovery target.
 
-首次连接前，请阅读 [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)，确认你理解
-API Key 的保存方式和 Codex 配置所有权边界。
+Before the first connection, read
+[Data, privacy and recovery](./docs/engineering/data-privacy-recovery.md) to
+confirm you understand how API keys are stored and where Codex configuration
+ownership ends.
 
-Release 同时提供 updater 归档、`.sig`、`latest.json`、`SHA256SUMS` 和 GitHub provenance。
-普通首次安装只需下载 DMG；其他文件用于更新认证、人工校验和构建来源证明。具体校验方式见
-[发布与应用更新](./docs/engineering/application-updates.md)。
+Releases also provide the updater archive, `.sig`, `latest.json`, `SHA256SUMS`
+and GitHub provenance. A normal first install only needs the DMG; the other
+files serve update authentication, manual verification and build provenance.
+See [Release and application updates](./docs/engineering/application-updates.md)
+for the exact verification steps.
 
-## 应用内更新
+## In-app updates
 
-官方安装可在「设置 → 系统 → 应用更新」中手动检查。应用进入正常运行状态后会立即静默检查
-一次，之后在后台按固定节奏持续检查；后台检查不会自动下载、安装、通知或打断代理请求。
+Official installs can check manually under Settings → System → Application
+updates. The app checks silently once it reaches the running state and then
+keeps checking in the background on a fixed cadence; background checks never
+download, install, notify or interrupt proxy requests.
 
-发现新稳定版本后，设置页会先显示经发布负责人审核的重点更新。下载和安装需要一次明确确认，
-安装完成后的重启需要再次确认；更新包必须先通过项目 updater 签名校验。
+When a new stable version appears, the settings page first shows the highlights
+reviewed by the release owner. Downloading and installing require one explicit
+confirmation, and the restart after installation requires another; the update
+package must pass the project updater signature check first.
 
-更旧版本请先按 [支持说明](./SUPPORT.md#安装与更新支持) 手动安装当前 DMG。调度节奏、失败
-重试与签名校验规则见 [发布与应用更新](./docs/engineering/application-updates.md)。
+For older versions, install the current DMG manually as described in the
+[support documentation](./SUPPORT.md#installation-and-update-support). See
+[Release and application updates](./docs/engineering/application-updates.md)
+for the scheduling cadence, failure retries and signature verification rules.
 
-## 网络出站
+## Network egress
 
-「系统 → 全局出站代理」默认选择「跟随系统」：推理、余额、模型发现、图片生成与图片下载、
-应用更新使用 macOS 的手动 HTTP/HTTPS/SOCKS 代理和绕过规则；没有适用代理时直连，也可以
-改用「自定义代理」。本地回环地址始终直连；代理失败不会回退直连。价格同步和 Codex 会话
-获取仍跟随系统网络栈。
+Settings → System → Global outbound proxy defaults to "Follow system":
+inference, balance queries, model discovery, image generation and image
+downloads, and application updates use the manual HTTP/HTTPS/SOCKS proxy and
+bypass rules of macOS; connections go direct when no applicable proxy exists,
+and you can switch to a "Custom proxy" instead. Loopback addresses always
+connect directly, and a failed proxy never falls back to a direct connection.
+Pricing sync and Codex session retrieval still follow the system network stack.
 
-不执行 PAC/WPAD。完整的代理决策、失败关闭与绕过规则见
-[路由与韧性](./docs/engineering/routing-resilience.md)。
+PAC/WPAD is not executed. See
+[Routing and resilience](./docs/engineering/routing-resilience.md) for the
+complete proxy decisions, fail-closed behavior and bypass rules.
 
-## 数据与隐私
+## Data and privacy
 
-- 路由、API Key、设置、请求元数据和恢复状态保存在应用数据目录的 `router.sqlite3`。
-- API Key 不写入普通运行日志，但会以原始字节保存在受私有权限保护的 SQLite 数据库中；当前
-  不使用 macOS Keychain，也不做应用层加密。
-- 请求记录只保留路由、状态、token、费用估算等有界元数据，不保存原始提示词或完整响应正文。
-- 运行日志使用固定错误码和有界计数，不应包含 API Key、Authorization header、请求正文、
-  完整配置、上游 URL 或 provider 原始消息。
-- 恢复点保存关键配置，包括路由密钥和 Codex 配置恢复信息；不包含请求历史、用量行或日志。
-- AI Router 不提供云同步。所有外发流量来自用户配置的上游请求、Codex 自身行为，或用户在
-  设置中手动触发的「同步官网」——它只在隐藏的只读窗口中访问 OpenAI 官方定价页，把 GPT
-  模型的价格行写入本地价格表；不上传任何本地数据，也不携带 API Key。
+- Routes, API keys, settings, request metadata and recovery state live in
+  `router.sqlite3` in the application data directory.
+- API keys never go into regular runtime logs, but they are stored as raw bytes
+  in the SQLite database protected by private file permissions; the app does not
+  use the macOS Keychain and performs no application-layer encryption today.
+- Request records keep only bounded metadata such as route, status, tokens and
+  estimated cost; raw prompts and full response bodies are not stored.
+- Runtime logs use fixed error codes and bounded counters, and must not contain
+  API keys, Authorization headers, request bodies, complete configurations,
+  upstream URLs or raw provider messages.
+- Recovery points store critical configuration, including route keys and Codex
+  configuration recovery information; they contain no request history, usage
+  rows or logs.
+- AI Router provides no cloud sync. All outbound traffic comes from
+  user-configured upstream requests, Codex behavior itself, or the manual "Sync
+  page" action in settings, which visits the official OpenAI pricing page in a
+  hidden read-only window and writes the GPT model price rows into the local
+  price table; it uploads no local data and carries no API key.
 
-具体路径、备份范围和恢复限制见
-[数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)。安全问题不要提交到公开 Issue，
-请按 [安全政策](./SECURITY.md) 使用私下报告入口。
+See [Data, privacy and recovery](./docs/engineering/data-privacy-recovery.md)
+for exact paths, backup scope and recovery limits. Report security issues
+through the private channel in the [security policy](./SECURITY.md) instead of
+a public issue.
 
-## 故障排查
+## Troubleshooting
 
-- 官方 DMG 首次启动被阻止：使用「系统设置 → 隐私与安全性 → 仍要打开」。不要运行
-  Gatekeeper 绕过命令；确认下载来自 GitHub Releases，并核对 `SHA256SUMS` 和 provenance。
-- 应用内更新失败：保留当前安装，从更新区域重试，或打开 GitHub Releases 手动安装 DMG。
-  签名或元数据校验失败时不要替换现有应用。
-- Codex 状态为「已更改」或「冲突」：不要直接覆盖 `config.toml`。先断开 Codex，检查当前
-  provider 与保留字段，再使用界面提供的预览或修复操作。
-- 数据库启动失败：保留应用数据目录，不要手工编辑或删除 SQLite、WAL 或恢复点。先在启动
-  恢复界面选择已验证恢复点，没有可用恢复点时再决定重新开始。
-- 提交诊断信息：只提供版本、macOS、复现步骤和界面显示的固定错误码。不要上传 API Key、
-  完整配置、数据库、原始日志或真实请求内容。
+- The official DMG is blocked on first launch: use System Settings → Privacy &
+  Security → Open Anyway. Do not run Gatekeeper bypass commands; confirm the
+  download came from GitHub Releases and check `SHA256SUMS` and provenance.
+- An in-app update fails: keep the current installation, retry from the update
+  section, or open GitHub Releases and install the DMG manually. Do not replace
+  the existing app when the signature or metadata check fails.
+- Codex shows "Changed" or "Conflict": do not overwrite `config.toml` directly.
+  Disconnect Codex first, inspect the current provider and retained fields, and
+  then use the preview or repair actions the interface offers.
+- The database fails to start: keep the application data directory, and do not
+  hand-edit or delete the SQLite files, WAL files or recovery points. Pick a
+  verified recovery point in the startup recovery screen first, and only decide
+  to start over when none is available.
+- Submitting diagnostics: provide only the version, macOS release, reproduction
+  steps and the fixed error codes the interface shows. Never upload API keys,
+  complete configurations, databases, raw logs or real request content.
 
-更多说明见 [支持说明](./SUPPORT.md)。
+See the [support documentation](./SUPPORT.md) for more.
 
-## 从源码开发
+## Building from source
 
-### 构建前提
+### Build prerequisites
 
-准备一台受支持的 Mac，并安装：
+Prepare a supported Mac and install:
 
-- Xcode Command Line Tools：`xcode-select --install`
-- Node.js `22.22.3`，推荐通过 `nvm` 读取仓库中的 `.nvmrc`
-- pnpm `10.33.2`，通过 Corepack 激活
-- Rust/Cargo `1.97.1`；`rust-toolchain.toml` 会选择工具链和 `aarch64-apple-darwin` target
-- 可正常启动的 Codex CLI 或 Codex App
+- Xcode Command Line Tools: `xcode-select --install`
+- Node.js `22.22.3`, preferably through `nvm` reading the repository `.nvmrc`
+- pnpm `10.33.2`, activated through Corepack
+- Rust/Cargo `1.97.1`; `rust-toolchain.toml` selects the toolchain and the
+  `aarch64-apple-darwin` target
+- A Codex CLI or Codex app that starts correctly
 
 ```sh
 git clone https://github.com/Angry3D/ai-router.git
@@ -177,9 +230,9 @@ corepack prepare pnpm@10.33.2 --activate
 pnpm install --frozen-lockfile
 ```
 
-### 检查命令
+### Check commands
 
-先运行项目检查：
+Run the project checks first:
 
 ```sh
 pnpm docs:check
@@ -192,52 +245,60 @@ cargo test --workspace
 pnpm build
 ```
 
-### 构建 macOS 应用
+### Build the macOS app
 
 ```sh
 pnpm tauri:prod:build
 ```
 
-产物位于 `target/release/bundle/macos/AI Router.app`。自行构建的 `.app` 没有 Developer ID
-签名、Apple 公证或官方 updater 公钥，macOS 可能显示警告或阻止启动。项目不提供绕过
-Gatekeeper 的步骤，也不暗示源码产物经过 Apple 验证。
+The artifact lands in `target/release/bundle/macos/AI Router.app`. A
+self-built `.app` has no Developer ID signature, Apple notarization or official
+updater public key, so macOS may warn or refuse to start it. The project
+provides no Gatekeeper bypass steps and does not imply that source builds are
+verified by Apple.
 
-### 开发运行
+### Development run
 
-普通界面开发使用隔离的 QA 标识和数据目录：
+Regular interface development uses the isolated QA identity and data
+directory:
 
 ```sh
 pnpm tauri:dev
 ```
 
-`pnpm tauri:dev` 与 `pnpm tauri:qa:dev` 等价，使用 QA 标识和独立数据目录，不会接管生产 Codex
-配置，并使用系统分配的临时代理端口。debug 构建使用生产标识（`com.relax.airouter`）时会拒绝启动，
-以免开发进程读写生产数据目录和真实 Codex 配置。
+`pnpm tauri:dev` is equivalent to `pnpm tauri:qa:dev`: it uses the QA identity
+and a separate data directory, never takes over the production Codex
+configuration, and picks a temporary proxy port assigned by the system. A debug
+build using the production identity (`com.relax.airouter`) refuses to start so
+that development processes cannot read or write the production data directory
+or the real Codex configuration.
 
-常用的其他检查命令：
+Other useful check commands:
 
-| 目的          | 命令                  |
-| ------------- | --------------------- |
-| 生成 IPC 类型 | `pnpm generate:types` |
-| 版本一致性    | `pnpm version:check`  |
-| 许可证与来源  | `pnpm license:check`  |
+| Purpose           | Command               |
+| ----------------- | --------------------- |
+| Generate IPC types | `pnpm generate:types` |
+| Version consistency | `pnpm version:check`  |
+| Licenses and provenance | `pnpm license:check`  |
 
-## 工程与社区
+## Engineering and community
 
-- [工程文档索引](./docs/engineering/README.md)
-- [架构与代码边界](./docs/engineering/architecture.md)
-- [路由与韧性](./docs/engineering/routing-resilience.md)
-- [数据、隐私与恢复](./docs/engineering/data-privacy-recovery.md)
-- [macOS 原生生命周期](./docs/engineering/native-lifecycle.md)
-- [发布与应用更新](./docs/engineering/application-updates.md)
-- [稳定版本发布操作](./docs/engineering/releasing.md)
-- [风险对应的验证策略](./docs/engineering/verification.md)
-- [贡献指南](./CONTRIBUTING.md)
-- [行为准则](./CODE_OF_CONDUCT.md)
-- [安全政策](./SECURITY.md)
+- [Engineering documentation index](./docs/engineering/README.md)
+- [Architecture and code boundaries](./docs/engineering/architecture.md)
+- [Routing and resilience](./docs/engineering/routing-resilience.md)
+- [Data, privacy and recovery](./docs/engineering/data-privacy-recovery.md)
+- [macOS native lifecycle](./docs/engineering/native-lifecycle.md)
+- [Release and application updates](./docs/engineering/application-updates.md)
+- [Stable release operations](./docs/engineering/releasing.md)
+- [Risk-proportional verification](./docs/engineering/verification.md)
+- [Contributing guide](./CONTRIBUTING.md)
+- [Code of conduct](./CODE_OF_CONDUCT.md)
+- [Security policy](./SECURITY.md)
 
-## 许可证
+## License
 
-AI Router 自有代码和截图中的第一方界面构图使用 [MIT License](./LICENSE)。第三方组件、
-派生图标、截图中渲染的 Lucide 图标、嵌入 fixture 和定价数据来源见
-[第三方声明](./THIRD_PARTY_NOTICES.md)。
+First-party code and interface compositions visible in the AI Router
+screenshots are licensed under the [MIT License](./LICENSE). See the
+[third-party notices](./THIRD_PARTY_NOTICES.md) for third-party components,
+derived icons, Lucide icons rendered in the screenshots, embedded fixtures and
+pricing data sources.

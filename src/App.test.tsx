@@ -4,7 +4,12 @@ import { describe, expect, it } from "vitest";
 
 import { App } from "./App";
 import { createRouterQueryClient, queryKeys } from "./api/query";
-import type { MenuSnapshotDto, SettingsSnapshotDto } from "./generated";
+import type {
+  BootstrapSnapshotDto,
+  MenuSnapshotDto,
+  SettingsSnapshotDto,
+} from "./generated";
+import { LanguageProvider } from "./features/language/LanguageProvider";
 
 const bootstrap = {
   revision: 0,
@@ -20,10 +25,15 @@ const bootstrap = {
   proxyStatus: "running" as const,
   lifecycle: { phase: "running" as const, issue: null },
   appearancePreference: "system" as const,
+  language: { preference: "system" as const, effectiveLocale: "en" as const },
 };
 
 function renderWithData(view: "menu" | "settings") {
   const client = createRouterQueryClient();
+  client.setQueryData<BootstrapSnapshotDto>(
+    queryKeys.bootstrap,
+    bootstrap as BootstrapSnapshotDto,
+  );
   client.setQueryData<MenuSnapshotDto>(queryKeys.menu, {
     bootstrap,
     balances: [],
@@ -105,32 +115,43 @@ function renderWithData(view: "menu" | "settings") {
   });
   return render(
     <QueryClientProvider client={client}>
-      <App view={view} />
+      <LanguageProvider view={view}>
+        <App view={view} />
+      </LanguageProvider>
     </QueryClientProvider>,
   );
 }
 
 describe("P0 application routes", () => {
-  it("renders the empty menu route", () => {
+  // The bootstrap fixture is committed as `en`, so these assertions only pass
+  // when the real provider boundary drives the application surfaces.
+  it("renders the empty menu route in the committed locale", () => {
     renderWithData("menu");
 
     expect(
-      screen.getByRole("main", { name: "AI Router 菜单" }),
+      screen.getByRole("main", { name: "AI Router menu" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "还没有路由" }),
+      screen.getByRole("heading", { name: "No routes" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Proxy on")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Codex off, Select route" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Fallback N/A, Need 2 routes" }),
     ).toBeInTheDocument();
   });
 
-  it("renders the empty settings route", () => {
+  it("renders the empty settings route in the committed locale", () => {
     renderWithData("settings");
 
     expect(
-      screen.getByRole("main", { name: "AI Router 设置" }),
+      screen.getByRole("main", { name: "AI Router Settings" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("navigation", { name: "设置分区" }),
+      screen.getByRole("navigation", { name: "Settings sections" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "路由" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Routes" })).toBeInTheDocument();
   });
 });

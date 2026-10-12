@@ -18,8 +18,8 @@ use crate::{
     balance::BalanceQueryMode,
     domain::{
         BalanceQueryPolicy, BalanceScriptSource, CodexModel, ImagesGenerationModel,
-        ImagesGenerationTimeout, McpImageCapacityWarningThreshold, OutboundProxyConfig,
-        OutboundProxyUrl,
+        ImagesGenerationTimeout, LanguagePreference, McpImageCapacityWarningThreshold,
+        OutboundProxyConfig, OutboundProxyUrl,
     },
     incident::{self, IncidentAction, IncidentKind, IncidentRecheck, IncidentRecord},
     storage::{DatabaseExecutor, SCHEMA_VERSION, StorageError},
@@ -69,6 +69,7 @@ type AppSettingsDomainRow = (
     i64,
     i64,
     Option<String>,
+    String,
     String,
 );
 
@@ -2002,9 +2003,9 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         |row| row.get(0),
     )?;
     let settings: AppSettingsDomainRow = connection.query_row(
-        "SELECT proxy_port, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, outbound_proxy_enabled, outbound_proxy_url, images_generation_model FROM app_settings WHERE singleton = 1",
+        "SELECT proxy_port, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, outbound_proxy_enabled, outbound_proxy_url, images_generation_model, language_preference FROM app_settings WHERE singleton = 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?)),
     )?;
     let policy_valid = u16::try_from(settings.1)
         .ok()
@@ -2181,6 +2182,7 @@ fn verify_domain(connection: &Connection) -> Result<(), RecoveryError> {
         || settings.6.is_some_and(|timestamp| timestamp < 0)
         || !matches!(settings.7, 0 | 1)
         || !matches!(settings.8, 0 | 1)
+        || LanguagePreference::parse_persisted(&settings.12).is_err()
         || !balance_queries_valid
         || !codex_models_valid
         || !fallback_excluded_models_valid
@@ -2916,6 +2918,34 @@ mod tests {
                 DatabaseStartupClassification::RecoveryRequired(_)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn recovery_validation_rejects_invalid_language_preference() {
+        let (_root, primary, database, manager) = setup();
+        let point = manager.create_point(&database).await.expect("point");
+        drop(database);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        for path in [&primary, &point.path] {
+            let connection = Connection::open(path).expect("database to corrupt");
+            connection
+                .pragma_update(None, "ignore_check_constraints", true)
+                .expect("bypass CHECK for corruption fixture");
+            connection
+                .execute("UPDATE app_settings SET language_preference = 'fr'", [])
+                .expect("invalidate language preference");
+        }
+
+        let inventory = manager.scan().expect("scan corrupt point");
+        assert!(inventory.valid_points.is_empty());
+        assert_eq!(inventory.invalid_point_count, 1);
+        assert!(matches!(
+            manager
+                .classify_startup()
+                .expect("classify corrupt primary"),
+            DatabaseStartupClassification::RecoveryRequired(_)
+        ));
     }
 
     #[tokio::test]

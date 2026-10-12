@@ -20,8 +20,9 @@ use crate::domain::{
     ApiKey, AppearancePreference, BalanceQueryPolicy, BalanceScriptSource, BaseUrl, CodexModel,
     CodexModelValidationError, CompletionState, DeliveryState,
     FallbackExcludedModelValidationError, ImagesGenerationModel, ImagesGenerationTimeout,
-    McpImageCapacityWarningThreshold, ModelVerdict, OutboundProxyConfig, OutboundProxyUrl, RouteId,
-    RouteMoveDirection, RouteName, RouteProtocol, SecretId, UpstreamAttemptId, ValidationError,
+    LanguagePreference, McpImageCapacityWarningThreshold, ModelVerdict, OutboundProxyConfig,
+    OutboundProxyUrl, RouteId, RouteMoveDirection, RouteName, RouteProtocol, SecretId,
+    UpstreamAttemptId, ValidationError,
 };
 use crate::pricing::{CatalogProvider, CostStatus};
 
@@ -31,7 +32,7 @@ pub(crate) mod schema;
 use self::schema::{enforce_database_file_permissions, open_connection, prepare_database_path};
 
 const DATABASE_QUEUE_CAPACITY: usize = 1_024;
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 28;
 
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 type AppSettingsRow = (
@@ -52,6 +53,7 @@ type AppSettingsRow = (
     i64,
     Option<String>,
     Option<String>,
+    String,
     String,
 );
 
@@ -168,6 +170,7 @@ pub struct AppSettingsRecord {
     pub images_generation_timeout: ImagesGenerationTimeout,
     pub images_generation_model: ImagesGenerationModel,
     pub appearance_preference: AppearancePreference,
+    pub language_preference: LanguagePreference,
     pub last_automatic_update_check_at_ms: Option<i64>,
     pub menu_bar: MenuBarSettingsRecord,
     pub mcp_image_capacity: McpImageCapacitySettingsRecord,
@@ -485,7 +488,7 @@ pub struct UsageStatisticsTokens {
 pub struct UsageStatisticsBucket {
     pub started_at_ms: i64,
     pub finished_at_ms: i64,
-    pub label: String,
+    pub include_utc_offset: bool,
     pub request_count: u64,
     pub tokens: UsageStatisticsTokens,
     pub cost_pico_usd: u64,
@@ -494,7 +497,7 @@ pub struct UsageStatisticsBucket {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageStatisticsAttribution {
     pub key: String,
-    pub label: String,
+    pub label: Option<String>,
     pub is_other: bool,
     pub value: u64,
     pub share_percent: String,
@@ -510,6 +513,7 @@ pub struct UsageStatistics {
     pub redirected_request_count: u64,
     pub redirected_total_tokens: u64,
     pub granularity: UsageStatisticsGranularity,
+    pub time_zone: String,
     pub trend: Vec<UsageStatisticsBucket>,
     pub attribution: Vec<UsageStatisticsAttribution>,
 }
@@ -517,7 +521,7 @@ pub struct UsageStatistics {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageRouteOption {
     pub route_id: RouteId,
-    pub name: String,
+    pub name: Option<String>,
     pub retained: bool,
 }
 
@@ -2059,8 +2063,9 @@ impl DatabaseExecutor {
                 mcp_image_capacity_active_episode,
                 mcp_image_capacity_dismissed_episode,
                 images_generation_model,
+                language_preference,
             ): AppSettingsRow = connection.query_row(
-                "SELECT proxy_port, outbound_proxy_enabled, outbound_proxy_url, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode, images_generation_model FROM app_settings WHERE singleton = 1",
+                "SELECT proxy_port, outbound_proxy_enabled, outbound_proxy_url, first_run_presented, balance_script_risk_confirmed, menu_balance_debounce_seconds, automatic_balance_refresh_minutes, images_generation_enabled, images_generation_route_id, images_generation_timeout_secs, appearance_preference, last_automatic_update_check_at_ms, menu_bar_status_text_enabled, menu_bar_activity_animation_enabled, mcp_image_capacity_warning_mib, mcp_image_capacity_active_episode, mcp_image_capacity_dismissed_episode, images_generation_model, language_preference FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
@@ -2082,6 +2087,7 @@ impl DatabaseExecutor {
                         row.get(15)?,
                         row.get(16)?,
                         row.get(17)?,
+                        row.get(18)?,
                     ))
                 },
             )?;
@@ -2141,6 +2147,7 @@ impl DatabaseExecutor {
                 images_generation_timeout,
                 images_generation_model,
                 appearance_preference: AppearancePreference::parse_persisted(&appearance_preference)?,
+                language_preference: LanguagePreference::parse_persisted(&language_preference)?,
                 last_automatic_update_check_at_ms,
                 menu_bar: MenuBarSettingsRecord {
                     status_text_enabled: parse_persisted_bool(menu_bar_status_text_enabled)?,
@@ -2318,6 +2325,37 @@ impl DatabaseExecutor {
             }
             transaction.execute(
                 "UPDATE app_settings SET appearance_preference = ?1 WHERE singleton = 1",
+                [preference.as_str()],
+            )?;
+            transaction.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
+    /// Persists a closed language preference and reports whether it changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an executor, transaction, or persisted-value validation error.
+    pub async fn set_language_preference(
+        &self,
+        preference: LanguagePreference,
+    ) -> Result<bool, StorageError> {
+        self.call(move |connection| {
+            let transaction = connection.transaction()?;
+            let current: String = transaction.query_row(
+                "SELECT language_preference FROM app_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            let current = LanguagePreference::parse_persisted(&current)?;
+            if current == preference {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            transaction.execute(
+                "UPDATE app_settings SET language_preference = ?1 WHERE singleton = 1",
                 [preference.as_str()],
             )?;
             transaction.commit()?;
@@ -3371,8 +3409,8 @@ mod tests {
         balance::{BalanceQueryMode, BalanceRouteSource, LEGACY_GENERAL_V1_SOURCE},
         domain::{
             ApiKey, AppearancePreference, BalanceQueryPolicy, BaseUrl, ImagesGenerationModel,
-            ImagesGenerationTimeout, McpImageCapacityWarningThreshold, ModelVerdict,
-            OutboundProxyUrl, RouteId, RouteMoveDirection,
+            ImagesGenerationTimeout, LanguagePreference, McpImageCapacityWarningThreshold,
+            ModelVerdict, OutboundProxyUrl, RouteId, RouteMoveDirection,
         },
         recovery::{
             NoopRecoveryEventSink, RecoveryCoordinator, RecoveryFailureCode, RecoveryHealthKind,
@@ -4176,6 +4214,95 @@ mod tests {
                 connection.pragma_update(None, "ignore_check_constraints", true)?;
                 connection.execute(
                     "UPDATE app_settings SET appearance_preference = 'sepia'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("corrupt fixture");
+        assert!(database.app_settings().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn language_preference_defaults_persists_and_noops() {
+        let (_directory, database) = database();
+        assert_eq!(
+            database
+                .app_settings()
+                .await
+                .expect("settings")
+                .language_preference,
+            LanguagePreference::System
+        );
+        assert!(
+            database
+                .set_language_preference(LanguagePreference::ZhCn)
+                .await
+                .expect("change")
+        );
+        assert!(
+            !database
+                .set_language_preference(LanguagePreference::ZhCn)
+                .await
+                .expect("no-op")
+        );
+        assert_eq!(
+            database
+                .app_settings()
+                .await
+                .expect("updated settings")
+                .language_preference,
+            LanguagePreference::ZhCn
+        );
+    }
+
+    #[tokio::test]
+    async fn language_preference_migrates_v27_and_rejects_unknown_values() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("router.sqlite3");
+        let mut connection = Connection::open(&path).expect("legacy connection");
+        migrate_v1(&mut connection).expect("v1");
+        migrate_v2(&mut connection).expect("v2");
+        migrate_v3(&mut connection).expect("v3");
+        migrate_v4(&mut connection).expect("v4");
+        migrate_v5(&mut connection).expect("v5");
+        migrate_v6(&mut connection).expect("v6");
+        migrate_v7(&mut connection).expect("v7");
+        migrate_v8(&mut connection).expect("v8");
+        migrate_v9(&mut connection).expect("v9");
+        migrate_v10(&mut connection).expect("v10");
+        migrate_v11(&mut connection).expect("v11");
+        migrate_v12(&mut connection).expect("v12");
+        migrate_v13(&mut connection).expect("v13");
+        migrate_v14(&mut connection).expect("v14");
+        migrate_v15(&mut connection).expect("v15");
+        migrate_v16(&mut connection).expect("v16");
+        migrate_v17(&mut connection).expect("v17");
+        migrate_v18(&mut connection).expect("v18");
+        migrate_v19(&mut connection).expect("v19");
+        migrate_v20(&mut connection).expect("v20");
+        migrate_v21(&mut connection).expect("v21");
+        migrate_v22(&mut connection).expect("v22");
+        migrate_v23(&mut connection).expect("v23");
+        migrate_v24(&mut connection).expect("v24");
+        migrate_v25(&mut connection).expect("v25");
+        migrate_v26(&mut connection).expect("v26");
+        migrate_v27(&mut connection).expect("v27");
+        drop(connection);
+        let database = DatabaseExecutor::open(&path).expect("current database");
+        assert_eq!(
+            database
+                .app_settings()
+                .await
+                .expect("settings")
+                .language_preference,
+            LanguagePreference::System
+        );
+        database
+            .test_execute(|connection| {
+                connection.pragma_update(None, "ignore_check_constraints", true)?;
+                connection.execute(
+                    "UPDATE app_settings SET language_preference = 'klingon'",
                     [],
                 )?;
                 Ok(())
@@ -8652,9 +8779,11 @@ mod tests {
             .await
             .expect("current route");
         let deleted_route_id = RouteId::from_string("deleted-route".to_owned());
+        let unnamed_route_id = RouteId::from_string("unnamed-route".to_owned());
         database
             .test_execute({
                 let deleted_route_id = deleted_route_id.clone();
+                let unnamed_route_id = unnamed_route_id.clone();
                 move |connection| {
                     connection.execute(
                         "INSERT INTO proxy_requests (
@@ -8663,6 +8792,13 @@ mod tests {
                          ) VALUES ('retained-request', 10, ?1, 'Deleted route', 0, 'completed', 1)",
                         [deleted_route_id.as_str()],
                     )?;
+                    connection.execute(
+                        "INSERT INTO proxy_requests (
+                            request_id, started_at_ms, final_route_id, final_route_name,
+                            streaming, completion_state, metadata_complete
+                         ) VALUES ('unnamed-request', 20, ?1, NULL, 0, 'completed', 1)",
+                        [unnamed_route_id.as_str()],
+                    )?;
                     Ok(())
                 }
             })
@@ -8670,13 +8806,16 @@ mod tests {
             .expect("retained history");
 
         let options = database.usage_route_options().await.expect("route options");
-        assert_eq!(options.len(), 2);
+        assert_eq!(options.len(), 3);
         assert_eq!(options[0].route_id, current.route_id);
-        assert_eq!(options[0].name, "Current route");
+        assert_eq!(options[0].name.as_deref(), Some("Current route"));
         assert!(!options[0].retained);
-        assert_eq!(options[1].route_id, deleted_route_id);
-        assert_eq!(options[1].name, "Deleted route");
+        assert_eq!(options[1].route_id, unnamed_route_id);
+        assert_eq!(options[1].name, None);
         assert!(options[1].retained);
+        assert_eq!(options[2].route_id, deleted_route_id);
+        assert_eq!(options[2].name.as_deref(), Some("Deleted route"));
+        assert!(options[2].retained);
     }
 
     #[tokio::test]
@@ -9033,9 +9172,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn usage_statistics_counts_only_completed_rows_and_preserves_recorded_values() {
-        let (_directory, database) = database();
+    async fn seed_completed_statistics_rows(database: &DatabaseExecutor) {
         database
             .test_execute(|connection| {
                 connection.execute_batch(
@@ -9065,6 +9202,12 @@ mod tests {
             })
             .await
             .expect("fixtures");
+    }
+
+    #[tokio::test]
+    async fn usage_statistics_counts_only_completed_rows_and_preserves_recorded_values() {
+        let (_directory, database) = database();
+        seed_completed_statistics_rows(&database).await;
 
         let result = database
             .usage_statistics(statistics_query(Some(3_600_000), 10_800_000, "UTC"))
@@ -9084,11 +9227,11 @@ mod tests {
         assert_eq!(result.trend[0].request_count, 2);
         assert_eq!(result.trend[1].request_count, 1);
         assert_eq!(result.attribution.len(), 2);
-        assert_eq!(result.attribution[0].label, "Route A");
+        assert_eq!(result.attribution[0].label.as_deref(), Some("Route A"));
         assert_eq!(result.attribution[0].share_percent, "66.7");
         assert_eq!(result.attribution[0].redirected_request_count, 1);
         assert_eq!(result.attribution[0].redirected_total_tokens, 10);
-        assert_eq!(result.attribution[1].label, "Route B");
+        assert_eq!(result.attribution[1].label.as_deref(), Some("Route B"));
         assert_eq!(result.attribution[1].share_percent, "33.3");
         assert_eq!(result.attribution[1].redirected_request_count, 0);
         assert_eq!(result.attribution[1].redirected_total_tokens, 0);
@@ -9100,18 +9243,33 @@ mod tests {
             .usage_statistics(model_query)
             .await
             .expect("model statistics");
-        assert_eq!(model_result.attribution[0].label, "model-a");
+        assert_eq!(
+            model_result.attribution[0].label.as_deref(),
+            Some("model-a")
+        );
         assert_eq!(model_result.attribution[0].value, 14);
         assert_eq!(model_result.attribution[0].share_percent, "58.3");
         assert_eq!(model_result.attribution[0].redirected_request_count, 0);
-        assert_eq!(model_result.attribution[1].label, "model-z");
+        assert_eq!(
+            model_result.attribution[1].label.as_deref(),
+            Some("model-z")
+        );
         assert_eq!(model_result.attribution[1].value, 10);
         assert_eq!(model_result.attribution[1].share_percent, "41.7");
         assert_eq!(model_result.attribution[1].redirected_request_count, 1);
         assert_eq!(model_result.attribution[1].redirected_total_tokens, 10);
-        assert_eq!(model_result.attribution[2].label, "model-b");
+        assert_eq!(
+            model_result.attribution[2].label.as_deref(),
+            Some("model-b")
+        );
         assert_eq!(model_result.attribution[2].value, 0);
         assert_eq!(model_result.attribution[2].share_percent, "0.0");
+    }
+
+    #[tokio::test]
+    async fn usage_statistics_model_filter_matches_either_identifier() {
+        let (_directory, database) = database();
+        seed_completed_statistics_rows(&database).await;
 
         let mut filtered_query = statistics_query(Some(3_600_000), 10_800_000, "UTC");
         filtered_query.route_id = Some(RouteId::from_string("route-a".to_owned()));
@@ -9139,6 +9297,57 @@ mod tests {
             .await
             .expect("literal model statistics");
         assert_eq!(literal.matched_request_count, 0);
+    }
+
+    #[tokio::test]
+    async fn usage_statistics_attribution_keeps_missing_identity_labels_null() {
+        let (_directory, database) = database();
+        database
+            .test_execute(|connection| {
+                connection.execute_batch(
+                    "
+                    INSERT INTO proxy_requests (
+                        request_id, started_at_ms, finished_at_ms, requested_model, actual_model,
+                        final_route_id, final_route_name, streaming, completion_state,
+                        metadata_complete
+                    ) VALUES
+                        ('named-route', 1, 10, 'model-a', 'model-a', 'route-a', 'Route A', 0,
+                         'completed', 1),
+                        ('unnamed-route', 2, 20, 'model-b', 'model-b', 'route-b', NULL, 0,
+                         'completed', 1),
+                        ('reserved-name', 3, 30, 'model-c', 'model-c', 'route-c', '未知路由', 0,
+                         'completed', 1);
+                    ",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("identity fixtures");
+
+        let routes = database
+            .usage_statistics(statistics_query(Some(1), 30, "UTC"))
+            .await
+            .expect("route attribution");
+        let by_key = routes
+            .attribution
+            .iter()
+            .map(|item| (item.key.as_str(), item.label.as_deref()))
+            .collect::<Vec<_>>();
+        assert!(by_key.contains(&("route:route-b", None)));
+        assert!(by_key.contains(&("route:route-c", Some("未知路由"))));
+
+        let mut model_query = statistics_query(Some(1), 30, "UTC");
+        model_query.attribution_dimension = UsageStatisticsAttributionDimension::Model;
+        let models = database
+            .usage_statistics(model_query)
+            .await
+            .expect("model attribution");
+        assert!(
+            models
+                .attribution
+                .iter()
+                .any(|item| item.key == "model:model-a" && item.label.as_deref() == Some("model-a"))
+        );
     }
 
     #[tokio::test]

@@ -297,14 +297,16 @@ impl DatabaseExecutor {
                 attribution
                     .entry(identity.key)
                     .and_modify(|aggregate| {
-                        if aggregate.label.starts_with("未知")
-                            && !identity.label.starts_with("未知")
-                        {
+                        // A present raw name always wins over an absent one; no
+                        // name text is interpreted as a missing-value category.
+                        if aggregate.label.is_none() {
                             aggregate.label.clone_from(&identity.label);
+                            aggregate.sort_key.clone_from(&identity.sort_key);
                         }
                     })
                     .or_insert_with(|| AttributionAggregate {
                         label: identity.label,
+                        sort_key: identity.sort_key,
                         totals: StatisticsTotals::default(),
                     })
                     .totals
@@ -316,7 +318,7 @@ impl DatabaseExecutor {
                 .map(|(window, totals)| UsageStatisticsBucket {
                     started_at_ms: window.started_at_ms,
                     finished_at_ms: window.finished_at_ms,
-                    label: window.label,
+                    include_utc_offset: window.include_utc_offset,
                     request_count: totals.request_count,
                     tokens: totals.tokens,
                     cost_pico_usd: totals.cost_pico_usd,
@@ -331,6 +333,7 @@ impl DatabaseExecutor {
                 redirected_request_count: totals.redirected_request_count,
                 redirected_total_tokens: totals.redirected_total_tokens,
                 granularity,
+                time_zone: query.time_zone.clone(),
                 trend,
                 attribution,
             })
@@ -350,10 +353,10 @@ impl DatabaseExecutor {
                     SELECT route_id, display_name AS name, 0 AS retained, sort_order AS ordering FROM routes
                     UNION ALL
                     SELECT historical.final_route_id,
-                           COALESCE((SELECT latest.final_route_name FROM proxy_requests latest
+                           (SELECT latest.final_route_name FROM proxy_requests latest
                             WHERE latest.final_route_id = historical.final_route_id
                               AND latest.final_route_name IS NOT NULL
-                            ORDER BY latest.started_at_ms DESC, latest.request_id DESC LIMIT 1), '已删除路由'),
+                            ORDER BY latest.started_at_ms DESC, latest.request_id DESC LIMIT 1),
                            1, 1000000
                     FROM proxy_requests historical
                     WHERE historical.final_route_id IS NOT NULL
@@ -1026,18 +1029,20 @@ struct StatisticsObservation {
 
 struct AttributionIdentity {
     key: String,
-    label: String,
+    label: Option<String>,
+    sort_key: String,
 }
 
 struct AttributionAggregate {
-    label: String,
+    label: Option<String>,
+    sort_key: String,
     totals: StatisticsTotals,
 }
 
 struct StatisticsBucketWindow {
     started_at_ms: i64,
     finished_at_ms: i64,
-    label: String,
+    include_utc_offset: bool,
 }
 
 fn validate_usage_statistics_query(query: &UsageStatisticsQuery) -> Result<(), StorageError> {
@@ -1101,6 +1106,17 @@ const fn statistics_uncached_input(input: Option<i64>, cached: Option<i64>) -> O
     }
 }
 
+/// Pre-migration display text for a route without a name.
+///
+/// It is never emitted as a label anymore: it survives only as the internal
+/// tie-break key so that equal-value ordering, top-five membership, and the
+/// `other` bucket stay byte-identical to the implementation that always
+/// carried a display label.
+const LEGACY_UNKNOWN_ROUTE_LABEL: &str = "未知路由";
+/// Pre-migration display text for a model without a name, kept as the internal
+/// tie-break key for model attribution. See [`LEGACY_UNKNOWN_ROUTE_LABEL`].
+const LEGACY_UNKNOWN_MODEL_LABEL: &str = "未知模型";
+
 fn attribution_identity(
     dimension: UsageStatisticsAttributionDimension,
     route_id: Option<String>,
@@ -1109,24 +1125,33 @@ fn attribution_identity(
     actual_model: Option<String>,
 ) -> AttributionIdentity {
     match dimension {
-        UsageStatisticsAttributionDimension::Route => match route_id {
-            Some(route_id) => AttributionIdentity {
-                key: format!("route:{route_id}"),
-                label: route_name.unwrap_or_else(|| "未知路由".to_owned()),
-            },
-            None => AttributionIdentity {
-                key: "route:unknown".to_owned(),
-                label: route_name.unwrap_or_else(|| "未知路由".to_owned()),
-            },
-        },
+        UsageStatisticsAttributionDimension::Route => {
+            let key = route_id.map_or_else(
+                || "route:unknown".to_owned(),
+                |route_id| format!("route:{route_id}"),
+            );
+            let sort_key = route_name
+                .clone()
+                .unwrap_or_else(|| LEGACY_UNKNOWN_ROUTE_LABEL.to_owned());
+            AttributionIdentity {
+                key,
+                label: route_name,
+                sort_key,
+            }
+        }
         UsageStatisticsAttributionDimension::Model => {
             let model = actual_model.or(requested_model);
+            let key = model.as_ref().map_or_else(
+                || "model:unknown".to_owned(),
+                |model| format!("model:{model}"),
+            );
+            let sort_key = model
+                .clone()
+                .unwrap_or_else(|| LEGACY_UNKNOWN_MODEL_LABEL.to_owned());
             AttributionIdentity {
-                key: model.as_ref().map_or_else(
-                    || "model:unknown".to_owned(),
-                    |model| format!("model:{model}"),
-                ),
-                label: model.unwrap_or_else(|| "未知模型".to_owned()),
+                key,
+                label: model,
+                sort_key,
             }
         }
     }
@@ -1143,6 +1168,7 @@ fn statistics_attribution(
         .map(|(key, aggregate)| {
             (
                 key,
+                aggregate.sort_key,
                 aggregate.label,
                 aggregate.totals.selected_value(metric),
                 aggregate.totals.redirected_request_count,
@@ -1152,8 +1178,8 @@ fn statistics_attribution(
         .collect::<Vec<_>>();
     values.sort_by(|left, right| {
         right
-            .2
-            .cmp(&left.2)
+            .3
+            .cmp(&left.3)
             .then_with(|| left.1.cmp(&right.1))
             .then_with(|| left.0.cmp(&right.0))
     });
@@ -1161,7 +1187,8 @@ fn statistics_attribution(
         let remainder = values.split_off(5);
         Some(remainder.into_iter().try_fold(
             (0_u64, 0_u64, 0_u64),
-            |(sum, redirected, redirected_tokens), (_, _, value, item_redirected, item_tokens)| {
+            |(sum, redirected, redirected_tokens),
+             (_, _, _, value, item_redirected, item_tokens)| {
                 Ok::<_, StorageError>((
                     sum.checked_add(value)
                         .ok_or(StorageError::UsageStatisticsOverflow)?,
@@ -1180,7 +1207,7 @@ fn statistics_attribution(
     let mut result = values
         .into_iter()
         .map(
-            |(key, label, value, redirected_request_count, redirected_total_tokens)| {
+            |(key, _sort_key, label, value, redirected_request_count, redirected_total_tokens)| {
                 UsageStatisticsAttribution {
                     key,
                     label,
@@ -1196,7 +1223,7 @@ fn statistics_attribution(
     if let Some((value, redirected_request_count, redirected_total_tokens)) = other {
         result.push(UsageStatisticsAttribution {
             key: "other".to_owned(),
-            label: "其他".to_owned(),
+            label: None,
             is_other: true,
             value,
             share_percent: statistics_share_percent(value, total),
@@ -1252,7 +1279,7 @@ fn statistics_bucket_windows(
         return Ok(vec![StatisticsBucketWindow {
             started_at_ms: lower_ms,
             finished_at_ms: upper_ms,
-            label: statistics_bucket_label(lower, time_zone, granularity, false),
+            include_utc_offset: false,
         }]);
     }
     let duplicate_hour_labels = if granularity == UsageStatisticsGranularity::Hour {
@@ -1262,7 +1289,7 @@ fn statistics_bucket_windows(
                 .timestamp_millis_opt(*boundary)
                 .single()
                 .ok_or(StorageError::InvalidUsageQuery)?;
-            let label = statistics_bucket_label(instant, time_zone, granularity, false);
+            let label = statistics_bucket_label(instant, time_zone, granularity);
             *labels.entry(label).or_default() += 1;
         }
         labels
@@ -1276,12 +1303,13 @@ fn statistics_bucket_windows(
                 .timestamp_millis_opt(window[0])
                 .single()
                 .ok_or(StorageError::InvalidUsageQuery)?;
-            let base_label = statistics_bucket_label(instant, time_zone, granularity, false);
-            let include_offset = duplicate_hour_labels.get(&base_label).copied().unwrap_or(0) > 1;
+            let base_label = statistics_bucket_label(instant, time_zone, granularity);
+            let include_utc_offset =
+                duplicate_hour_labels.get(&base_label).copied().unwrap_or(0) > 1;
             Ok(StatisticsBucketWindow {
                 started_at_ms: window[0],
                 finished_at_ms: window[1],
-                label: statistics_bucket_label(instant, time_zone, granularity, include_offset),
+                include_utc_offset,
             })
         })
         .collect()
@@ -1370,11 +1398,9 @@ fn statistics_bucket_label(
     instant: DateTime<Utc>,
     time_zone: Tz,
     granularity: UsageStatisticsGranularity,
-    include_offset: bool,
 ) -> String {
     let local = instant.with_timezone(&time_zone);
     let local = match granularity {
-        UsageStatisticsGranularity::Hour if include_offset => local.format("%m/%d %H:00 %:z"),
         UsageStatisticsGranularity::Hour => local.format("%m/%d %H:00"),
         UsageStatisticsGranularity::Day => local.format("%m/%d"),
         UsageStatisticsGranularity::Month => local.format("%Y/%m"),
@@ -1562,8 +1588,16 @@ mod tests {
         .expect("windows");
 
         assert_eq!(windows.len(), 4);
-        assert!(windows[1].label.contains("-04:00"));
-        assert!(windows[2].label.contains("-05:00"));
+        // The repeated civil hour requests the offset suffix on both buckets.
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.include_utc_offset)
+                .collect::<Vec<_>>(),
+            [false, true, true, false]
+        );
+        assert_eq!(windows[1].started_at_ms, utc_ms(2024, 11, 3, 5, 0));
+        assert_eq!(windows[2].started_at_ms, utc_ms(2024, 11, 3, 6, 0));
         assert_eq!(windows[0].started_at_ms, lower);
         assert_eq!(windows[3].finished_at_ms, upper);
     }
@@ -1577,13 +1611,20 @@ mod tests {
             UsageStatisticsGranularity::Hour,
         )
         .expect("spring windows");
+        assert_eq!(spring.len(), 4);
         assert_eq!(
             spring
                 .iter()
-                .map(|window| window.label.as_str())
+                .map(|window| window.started_at_ms)
                 .collect::<Vec<_>>(),
-            ["03/10 00:00", "03/10 01:00", "03/10 03:00", "03/10 04:00"]
+            [
+                utc_ms(2024, 3, 10, 5, 0),
+                utc_ms(2024, 3, 10, 6, 0),
+                utc_ms(2024, 3, 10, 7, 0),
+                utc_ms(2024, 3, 10, 8, 0)
+            ]
         );
+        assert!(spring.iter().all(|window| !window.include_utc_offset));
 
         let daily_lower = utc_ms(2025, 12, 31, 12, 0);
         let daily_upper = utc_ms(2026, 1, 2, 6, 0);
@@ -1594,15 +1635,9 @@ mod tests {
             UsageStatisticsGranularity::Day,
         )
         .expect("daily windows");
+        assert_eq!(daily.len(), 3);
         assert_eq!(daily.first().expect("first").started_at_ms, daily_lower);
         assert_eq!(daily.last().expect("last").finished_at_ms, daily_upper);
-        assert_eq!(
-            daily
-                .iter()
-                .map(|window| window.label.as_str())
-                .collect::<Vec<_>>(),
-            ["12/31", "01/01", "01/02"]
-        );
 
         let monthly = statistics_bucket_windows(
             utc_ms(2025, 12, 15, 12, 0),
@@ -1611,13 +1646,10 @@ mod tests {
             UsageStatisticsGranularity::Month,
         )
         .expect("monthly windows");
-        assert_eq!(
-            monthly
-                .iter()
-                .map(|window| window.label.as_str())
-                .collect::<Vec<_>>(),
-            ["2025/12", "2026/01", "2026/02"]
-        );
+        assert_eq!(monthly.len(), 3);
+        assert_eq!(monthly[0].started_at_ms, utc_ms(2025, 12, 15, 12, 0));
+        assert_eq!(monthly[0].finished_at_ms, utc_ms(2026, 1, 1, 0, 0));
+        assert_eq!(monthly[2].finished_at_ms, utc_ms(2026, 2, 10, 6, 0));
     }
     #[test]
     fn usage_statistics_attribution_is_top_five_plus_other_with_stable_ties() {
@@ -1639,7 +1671,8 @@ mod tests {
             aggregates.insert(
                 key.to_owned(),
                 AttributionAggregate {
-                    label: label.to_owned(),
+                    label: Some(label.to_owned()),
+                    sort_key: label.to_owned(),
                     totals,
                 },
             );
@@ -1657,14 +1690,192 @@ mod tests {
         .expect("attribution");
 
         assert_eq!(result.len(), 6);
-        assert_eq!(result[0].label, "A");
-        assert_eq!(result[4].label, "E");
+        assert_eq!(result[0].label.as_deref(), Some("A"));
+        assert_eq!(result[4].label.as_deref(), Some("E"));
         assert_eq!(result[4].redirected_request_count, 5);
         assert_eq!(result[4].redirected_total_tokens, 50);
         assert!(result[5].is_other);
+        assert_eq!(result[5].label, None);
         assert_eq!(result[5].value, "1".parse::<u64>().unwrap());
         assert_eq!(result[5].redirected_request_count, 6);
         assert_eq!(result[5].redirected_total_tokens, 60);
+    }
+
+    #[test]
+    fn usage_statistics_attribution_keeps_missing_and_reserved_names_verbatim() {
+        let mut aggregates = BTreeMap::new();
+        for (key, label, sort_key, count) in [
+            ("route:unknown", None, LEGACY_UNKNOWN_ROUTE_LABEL, 2_u64),
+            ("route:named", Some("未知路由"), "未知路由", 2),
+            ("route:other-name", Some("Other"), "Other", 1),
+        ] {
+            aggregates.insert(
+                key.to_owned(),
+                AttributionAggregate {
+                    label: label.map(str::to_owned),
+                    sort_key: sort_key.to_owned(),
+                    totals: StatisticsTotals {
+                        request_count: count,
+                        ..StatisticsTotals::default()
+                    },
+                },
+            );
+        }
+        let summary = StatisticsTotals {
+            request_count: 5,
+            ..StatisticsTotals::default()
+        };
+
+        let result = statistics_attribution(
+            aggregates,
+            UsageStatisticsAttributionMetric::Requests,
+            &summary,
+        )
+        .expect("attribution");
+
+        // Equal values tie-break on the legacy substitution key and then on the
+        // identity key: the missing name ties with a raw name equal to the
+        // fallback and loses on `route:named < route:unknown`, and a distinct
+        // raw name that happens to read like a fallback stays verbatim.
+        assert_eq!(result[0].label.as_deref(), Some("未知路由"));
+        assert_eq!(result[0].key, "route:named");
+        assert_eq!(result[1].label, None);
+        assert_eq!(result[1].key, "route:unknown");
+        assert!(!result[1].is_other);
+        assert_eq!(result[2].label.as_deref(), Some("Other"));
+        assert_eq!(result[2].key, "route:other-name");
+    }
+
+    async fn seed_legacy_tie_attribution_fixture(database: &DatabaseExecutor) {
+        database
+            .test_execute(|connection| {
+                connection.execute_batch(
+                    "
+                    INSERT INTO proxy_requests (
+                        request_id, started_at_ms, finished_at_ms, requested_model, actual_model,
+                        final_route_id, final_route_name, streaming, completion_state,
+                        total_tokens, metadata_complete
+                    ) VALUES
+                        ('tie-a', 1, 10, 'model-a', 'model-a', 'route-a', 'A', 0, 'completed', 1, 1),
+                        ('tie-b', 2, 11, 'model-a', 'model-a', 'route-b', 'B', 0, 'completed', 1, 1),
+                        ('tie-c', 3, 12, 'model-a', 'model-a', 'route-c', 'C', 0, 'completed', 1, 1),
+                        ('tie-d', 4, 13, 'model-a', 'model-a', 'route-d', 'D', 0, 'completed', 1, 1),
+                        ('tie-missing', 5, 14, 'model-a', 'model-a', 'route-missing', NULL, 0,
+                         'completed', 1, 1),
+                        ('tie-reserved', 6, 15, 'model-a', 'model-a', 'route-reserved',
+                         '未知路由', 0, 'completed', 1, 1),
+                        ('tie-unicode', 7, 16, 'model-a', 'model-a', 'route-unicode',
+                         '高优先级', 0, 'completed', 1, 1);
+                    ",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("tie fixtures");
+    }
+
+    /// Seven equal-count routes: four ASCII names, one missing name, one raw
+    /// name equal to the legacy fallback text, and one non-ASCII name.
+    fn legacy_tie_statistics_query() -> UsageStatisticsQuery {
+        UsageStatisticsQuery {
+            finished_at_or_after_ms: Some(1),
+            finished_at_or_before_ms: 30,
+            route_id: None,
+            model_contains: None,
+            time_zone: "UTC".to_owned(),
+            attribution_dimension: UsageStatisticsAttributionDimension::Route,
+            attribution_metric: UsageStatisticsAttributionMetric::Requests,
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_statistics_attribution_orders_ties_by_the_legacy_name_key() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = DatabaseExecutor::open(directory.path().join("data/router.sqlite3"))
+            .expect("database opens");
+        seed_legacy_tie_attribution_fixture(&database).await;
+
+        let base_query = legacy_tie_statistics_query;
+
+        let statistics = database
+            .usage_statistics(base_query())
+            .await
+            .expect("route statistics");
+
+        assert_eq!(statistics.matched_request_count, 7);
+        assert_eq!(statistics.attribution.len(), 6);
+
+        // Seven equal counts order on the frozen legacy `未知路由` key, so the
+        // missing name keeps the fifth slot ahead of the non-ASCII names and
+        // the reserved and non-ASCII routes fall into `other`.
+        assert_eq!(
+            statistics
+                .attribution
+                .iter()
+                .take(5)
+                .map(|item| item.key.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "route:route-a",
+                "route:route-b",
+                "route:route-c",
+                "route:route-d",
+                "route:route-missing",
+            ]
+        );
+        assert_eq!(
+            statistics
+                .attribution
+                .iter()
+                .take(5)
+                .map(|item| item.label.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("A"), Some("B"), Some("C"), Some("D"), None]
+        );
+        for item in statistics.attribution.iter().take(5) {
+            assert!(!item.is_other);
+            assert_eq!(item.value, 1);
+            assert_eq!(item.share_percent, "14.3");
+            assert_eq!(item.redirected_request_count, 0);
+            assert_eq!(item.redirected_total_tokens, 0);
+        }
+
+        let other = &statistics.attribution[5];
+        assert!(other.is_other);
+        assert_eq!(other.key, "other");
+        assert_eq!(other.label, None);
+        assert_eq!(other.value, 2);
+        assert_eq!(other.share_percent, "28.6");
+
+        // A raw route named like the legacy fallback and a non-ASCII route come
+        // back verbatim, while the missing name stays a display-only `None`.
+        let mut reserved_query = base_query();
+        reserved_query.route_id = Some(RouteId::from_string("route-reserved".to_owned()));
+        let reserved = database
+            .usage_statistics(reserved_query)
+            .await
+            .expect("reserved statistics");
+        assert_eq!(reserved.attribution.len(), 1);
+        assert_eq!(reserved.attribution[0].key, "route:route-reserved");
+        assert_eq!(reserved.attribution[0].label.as_deref(), Some("未知路由"));
+
+        let mut missing_query = base_query();
+        missing_query.route_id = Some(RouteId::from_string("route-missing".to_owned()));
+        let missing = database
+            .usage_statistics(missing_query)
+            .await
+            .expect("missing statistics");
+        assert_eq!(missing.attribution.len(), 1);
+        assert_eq!(missing.attribution[0].label, None);
+
+        let mut unicode_query = base_query();
+        unicode_query.route_id = Some(RouteId::from_string("route-unicode".to_owned()));
+        let unicode = database
+            .usage_statistics(unicode_query)
+            .await
+            .expect("unicode statistics");
+        assert_eq!(unicode.attribution.len(), 1);
+        assert_eq!(unicode.attribution[0].label.as_deref(), Some("高优先级"));
     }
 
     #[test]

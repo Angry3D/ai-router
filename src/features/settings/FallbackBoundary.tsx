@@ -2,6 +2,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripHorizontal } from "lucide-react";
 
+import { useLanguage } from "../language/useLanguage";
 import { FALLBACK_BOUNDARY_ID } from "./routeOrderSequence";
 
 interface FallbackBoundaryProps {
@@ -16,10 +17,10 @@ interface FallbackBoundaryVisualProps extends FallbackBoundaryProps {
   overlay?: boolean;
 }
 
-function FallbackBoundaryContent() {
+function FallbackBoundaryContent({ label }: { label: string }) {
   return (
     <>
-      <span className="fallback-boundary-label">以下不参与 Fallback</span>
+      <span className="fallback-boundary-label">{label}</span>
       <span className="fallback-boundary-rail" aria-hidden="true">
         <GripHorizontal className="fallback-boundary-grip" size={14} />
       </span>
@@ -35,13 +36,14 @@ export function FallbackBoundaryVisual({
   dragging = false,
   overlay = false,
 }: FallbackBoundaryVisualProps) {
+  const { messages } = useLanguage();
   return (
     <div
       className={`fallback-boundary${dragging ? " is-dragging" : ""}${pending ? " is-pending" : ""}${overlay ? " is-drag-overlay" : ""}`}
       aria-hidden="true"
       data-fallback-boundary-overlay={overlay ? "" : undefined}
     >
-      <FallbackBoundaryContent />
+      <FallbackBoundaryContent label={messages.routes.boundary.label} />
       <span className="visually-hidden">
         {participantCount} / {routeCount}
         {disabled ? " disabled" : ""}
@@ -56,6 +58,8 @@ export function FallbackBoundary({
   disabled,
   pending,
 }: FallbackBoundaryProps) {
+  const { messages } = useLanguage();
+  const boundary = messages.routes.boundary;
   const {
     attributes,
     listeners,
@@ -88,18 +92,18 @@ export function FallbackBoundary({
         className={`fallback-boundary${isDragging ? " is-dragging" : ""}${pending ? " is-pending" : ""}`}
         disabled={disabled}
         aria-busy={pending}
-        title="拖动调整参与 Fallback 的路由数量"
+        title={boundary.dragHandleTitle}
         data-sortable-handle={FALLBACK_BOUNDARY_ID}
         {...attributes}
         {...listeners}
-        aria-label="拖动调整 Fallback 参与分界"
+        aria-label={boundary.dragHandleLabel}
         aria-describedby="fallback-boundary-description"
       >
-        <FallbackBoundaryContent />
+        <FallbackBoundaryContent label={boundary.label} />
       </button>
       <span id="fallback-boundary-description" className="visually-hidden">
-        当前 {participantCount} 条路由参与 Fallback，共 {routeCount} 条路由
-        {pending ? "，正在保存" : ""}
+        {boundary.description(participantCount, routeCount)}
+        {pending ? boundary.savingSuffix : ""}
       </span>
     </div>
   );

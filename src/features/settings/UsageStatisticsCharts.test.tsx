@@ -10,6 +10,7 @@ import {
   AppearanceContext,
   type AppearanceContextValue,
 } from "../appearance/useAppearance";
+import { usageMessages } from "../language/catalog/usage";
 
 const echarts = vi.hoisted(() => ({
   use: vi.fn(),
@@ -33,6 +34,8 @@ import {
   buildUsageTokenCompositionChartOption,
   type UsageChartColors,
 } from "./UsageStatisticsCharts";
+
+const usage = usageMessages["zh-CN"];
 
 const colors: UsageChartColors = {
   primary: "primary",
@@ -76,22 +79,33 @@ const tokens: UsageStatisticsTokensDto = {
 
 const trend: UsageStatisticsBucketDto[] = [
   {
-    startedAtMs: 1,
-    finishedAtMs: 2,
-    label: "08/04",
+    startedAtMs: Date.UTC(2024, 7, 4),
+    finishedAtMs: Date.UTC(2024, 7, 5),
+    includeUtcOffset: false,
     requestCount: 5,
     tokens,
     costPicoUsd: "500000000000",
   },
   {
-    startedAtMs: 2,
-    finishedAtMs: 3,
-    label: "08/05",
+    startedAtMs: Date.UTC(2024, 7, 5),
+    finishedAtMs: Date.UTC(2024, 7, 6),
+    includeUtcOffset: false,
     requestCount: 10,
     tokens: { ...tokens, total: "16" },
     costPicoUsd: "1000000000000",
   },
 ];
+
+const timeLabels: Record<number, string> = {
+  [Date.UTC(2024, 7, 4)]: "08/04",
+  [Date.UTC(2024, 7, 5)]: "08/05",
+};
+
+const timeLabelFor = (bucket: UsageStatisticsBucketDto) =>
+  timeLabels[bucket.startedAtMs] ?? "";
+
+const attributionLabelFor = (item: UsageStatisticsAttributionDto) =>
+  item.label ?? "其他";
 
 const attribution: UsageStatisticsAttributionDto[] = [
   {
@@ -105,7 +119,7 @@ const attribution: UsageStatisticsAttributionDto[] = [
   },
   {
     key: "other",
-    label: "其他",
+    label: null,
     isOther: true,
     value: "2500000000000",
     sharePercent: "33.3",
@@ -116,7 +130,13 @@ const attribution: UsageStatisticsAttributionDto[] = [
 
 describe("Usage statistics chart options", () => {
   it("builds bounded time bars while preserving formatted tooltip values", () => {
-    const option = buildUsageTimeChartOption(trend, "requests", colors);
+    const option = buildUsageTimeChartOption(
+      trend,
+      "requests",
+      colors,
+      usage,
+      timeLabelFor,
+    );
     expect(option).toMatchObject({
       aria: { enabled: false },
       tooltip: { renderMode: "richText" },
@@ -126,7 +146,13 @@ describe("Usage statistics chart options", () => {
   });
 
   it("builds a model donut from bounded backend percentages", () => {
-    const option = buildUsageSourceChartOption(attribution, "cost", colors);
+    const option = buildUsageSourceChartOption(
+      attribution,
+      "cost",
+      colors,
+      usage,
+      attributionLabelFor,
+    );
     expect(option).toMatchObject({
       aria: { enabled: false },
       tooltip: { renderMode: "richText" },
@@ -162,6 +188,8 @@ describe("Usage statistics chart options", () => {
       [{ ...attribution[0], redirectedRequestCount: 3 }],
       "cost",
       colors,
+      usage,
+      attributionLabelFor,
     );
     const legendFormatter = (
       option.legend as { formatter: (name: string) => string }
@@ -178,6 +206,8 @@ describe("Usage statistics chart options", () => {
       [attribution[0]],
       "cost",
       colors,
+      usage,
+      attributionLabelFor,
     );
     const plainFormatter = (
       withoutRedirects.legend as { formatter: (name: string) => string }
@@ -196,6 +226,8 @@ describe("Usage statistics chart options", () => {
       ],
       "cost",
       colors,
+      usage,
+      attributionLabelFor,
     );
     const formatter = (
       option.tooltip as { formatter: (value: unknown) => string }
@@ -206,7 +238,11 @@ describe("Usage statistics chart options", () => {
   });
 
   it("builds a four-part Token donut with shared geometry and stable colors", () => {
-    const option = buildUsageTokenCompositionChartOption(tokens, colors);
+    const option = buildUsageTokenCompositionChartOption(
+      tokens,
+      colors,
+      usage,
+    );
     expect(option).toMatchObject({
       aria: { enabled: false },
       color: ["input", "cached", "write", "output"],
@@ -254,6 +290,7 @@ describe("Usage statistics chart options", () => {
         output: "0",
       },
       colors,
+      usage,
     );
     expect(option).toMatchObject({
       series: [
@@ -298,7 +335,12 @@ describe("Usage statistics chart lifecycle", () => {
 
     const rendered = render(
       withAppearance(
-        <UsageTimeChart trend={trend} metric="requests" />,
+        <UsageTimeChart
+          trend={trend}
+          metric="requests"
+          granularity="day"
+          timeZone="UTC"
+        />,
         "light",
       ),
     );
@@ -314,7 +356,12 @@ describe("Usage statistics chart lifecycle", () => {
 
     rendered.rerender(
       withAppearance(
-        <UsageTimeChart trend={trend} metric="tokens" />,
+        <UsageTimeChart
+          trend={trend}
+          metric="tokens"
+          granularity="day"
+          timeZone="UTC"
+        />,
         "light",
       ),
     );
@@ -323,7 +370,12 @@ describe("Usage statistics chart lifecycle", () => {
 
     rendered.rerender(
       withAppearance(
-        <UsageTimeChart trend={trend} metric="tokens" />,
+        <UsageTimeChart
+          trend={trend}
+          metric="tokens"
+          granularity="day"
+          timeZone="UTC"
+        />,
         "dark",
       ),
     );
@@ -342,7 +394,11 @@ describe("Usage statistics chart lifecycle", () => {
   it("gives both donuts matching hosts and hidden formatted data lists", () => {
     render(
       <>
-        <UsageSourceChart attribution={attribution} metric="cost" />
+        <UsageSourceChart
+          attribution={attribution}
+          metric="cost"
+          dimension="model"
+        />
         <UsageTokenCompositionChart tokens={tokens} />
       </>,
     );
@@ -361,7 +417,41 @@ describe("Usage statistics chart lifecycle", () => {
       screen.getByRole("list", { name: "来源图表数据" }),
     ).toHaveTextContent("gpt-5: $5.10，占比 66.7%");
     expect(
+      screen.getByRole("list", { name: "来源图表数据" }),
+    ).toHaveTextContent("其他: $2.50，占比 33.3%");
+    expect(
       screen.getByRole("list", { name: "Token 构成图表数据" }),
     ).toHaveTextContent("未缓存输入: 0M");
+  });
+
+  it("resolves a missing attribution identity from the query dimension", () => {
+    const missing: UsageStatisticsAttributionDto[] = [
+      {
+        key: "model:unknown",
+        label: null,
+        isOther: false,
+        value: "1",
+        sharePercent: "100.0",
+        redirectedRequestCount: 0,
+        redirectedTotalTokens: "0",
+      },
+    ];
+    const rendered = render(
+      <UsageSourceChart attribution={missing} metric="cost" dimension="model" />,
+    );
+    expect(
+      screen.getByRole("list", { name: "来源图表数据" }),
+    ).toHaveTextContent("未知模型: $0.00，占比 100.0%");
+    rendered.unmount();
+    render(
+      <UsageSourceChart
+        attribution={missing}
+        metric="cost"
+        dimension="route"
+      />,
+    );
+    expect(
+      screen.getByRole("list", { name: "来源图表数据" }),
+    ).toHaveTextContent("未知路由: ");
   });
 });

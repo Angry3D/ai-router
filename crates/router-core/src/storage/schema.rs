@@ -111,6 +111,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     if version < 27 {
         migrate_v27(connection)?;
     }
+    if version < 28 {
+        migrate_v28(connection)?;
+    }
     Ok(())
 }
 
@@ -745,6 +748,19 @@ pub(super) fn migrate_v26(connection: &mut Connection) -> Result<(), StorageErro
     ALTER TABLE app_settings ADD COLUMN images_generation_model TEXT NOT NULL DEFAULT 'gpt-image-2'
         CHECK (length(images_generation_model) BETWEEN 1 AND 256);
     PRAGMA user_version = 26;
+    ",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+pub(super) fn migrate_v28(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "
+    ALTER TABLE app_settings ADD COLUMN language_preference TEXT NOT NULL DEFAULT 'system'
+        CHECK (language_preference IN ('system', 'zh-CN', 'en'));
+    PRAGMA user_version = 28;
     ",
     )?;
     transaction.commit()?;

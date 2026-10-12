@@ -37,15 +37,16 @@ import {
   useMenuSnapshot,
 } from "../../api/query";
 import { appVariant } from "../../appVariant";
+import type { MenuMessages } from "../language/catalog/menu";
+import { ipcErrorMessage, useLanguage } from "../language/useLanguage";
 import { AppScrollArea } from "../shared/AppScrollArea";
 import type {
+  AppLocale,
   BalanceDisplaySnapshot,
   BootstrapSnapshotDto,
   CodexConfigStatus,
-  DatabaseStartupIssue,
   FallbackStateDto,
-  InferenceFailureReason,
-  InferenceStatusKind,
+  IpcErrorDto,
   MenuSnapshotDto,
   ProxyRuntimeStatus,
   RouteActivationPreviewDto,
@@ -55,69 +56,49 @@ import { useMenuPopover } from "./useMenuPopover";
 import { MenuUsagePreview } from "./MenuUsagePreview";
 import { useMenuUsagePreview } from "./useMenuUsagePreview";
 
-const inferenceLabels: Record<InferenceStatusKind, string> = {
-  unverified: "未验证",
-  recent_success: "最近成功",
-  recent_failure: "最近失败",
-  expired: "状态已过期",
-};
-
-const failureLabels: Record<InferenceFailureReason, string> = {
-  connection: "连接失败",
-  timeout: "请求超时",
-  service: "服务失败",
-  rate_limit: "限流失败",
-  invalid_key: "Key无效",
-  insufficient_quota: "余额不足",
-  billing_limit: "额度受限",
-  authentication: "鉴权失败",
-  access_denied: "访问拒绝",
-};
-
-const databaseIssueMenuLabels: Record<DatabaseStartupIssue, string> = {
-  permission: "数据库权限异常",
-  disk_full: "磁盘空间不足",
-  future_schema: "数据库版本过新",
-  unsafe_path: "数据库路径不安全",
-  unavailable: "数据库不可用",
-  directory_in_use: "数据目录被占用",
-};
-
-function databaseIssueLabel(snapshot: BootstrapSnapshotDto) {
+function databaseIssueLabel(
+  snapshot: BootstrapSnapshotDto,
+  messages: MenuMessages,
+) {
   const issue = snapshot.lifecycle.issue;
   return typeof issue === "object" && issue !== null
-    ? databaseIssueMenuLabels[issue.database]
-    : databaseIssueMenuLabels.unavailable;
+    ? messages.databaseIssue[issue.database]
+    : messages.databaseIssue.unavailable;
 }
 
 function inferenceLabel(
   status: MenuSnapshotDto["bootstrap"]["routes"][number]["inferenceStatus"],
+  messages: MenuMessages,
 ) {
   if (status.kind === "recent_failure" && status.failureReason) {
-    return failureLabels[status.failureReason];
+    return messages.failureReason[status.failureReason];
   }
-  return inferenceLabels[status.kind];
-}
-
-function proxyLabel(status: ProxyRuntimeStatus) {
-  switch (status) {
-    case "running":
-      return ["代理运行中", "good"] as const;
-    case "starting":
-      return ["代理启动中", "warning"] as const;
-    case "port_conflict":
-      return ["端口冲突", "bad"] as const;
-    case "database_error":
-      return ["数据库不可用", "bad"] as const;
-    case "shutting_down":
-      return ["正在退出", "warning"] as const;
-    case "stopped":
-    case "error":
-      return ["代理故障", "bad"] as const;
-  }
+  return messages.inferenceStatus[status.kind];
 }
 
 type RuntimeStatusTone = "good" | "warning" | "bad";
+
+function proxyLabel(
+  status: ProxyRuntimeStatus,
+  messages: MenuMessages["proxyStatus"],
+): readonly [string, RuntimeStatusTone] {
+  switch (status) {
+    case "running":
+      return [messages.running, "good"];
+    case "starting":
+      return [messages.starting, "warning"];
+    case "port_conflict":
+      return [messages.port_conflict, "bad"];
+    case "database_error":
+      return [messages.database_error, "bad"];
+    case "shutting_down":
+      return [messages.shutting_down, "warning"];
+    case "stopped":
+      return [messages.stopped, "bad"];
+    case "error":
+      return [messages.error, "bad"];
+  }
+}
 
 type CodexControlAction =
   "connect" | "reconnect" | "disconnect" | "settings" | null;
@@ -125,21 +106,22 @@ type CodexControlAction =
 function codexControlPresentation(
   status: CodexConfigStatus,
   hasActiveRoute: boolean,
+  messages: MenuMessages["codexControl"],
 ) {
   switch (status) {
     case "connected":
       return {
-        state: "Codex 已连接",
-        action: "断开 Codex",
-        pending: "断开中",
+        state: messages.connectedState,
+        action: messages.disconnectAction,
+        pending: messages.disconnecting,
         tone: "good" as RuntimeStatusTone,
         activation: "disconnect" as CodexControlAction,
         unavailable: false,
       };
     case "checking":
       return {
-        state: "Codex 检查中",
-        action: "正在检查",
+        state: messages.checkingState,
+        action: messages.checkingAction,
         pending: null,
         tone: "warning" as RuntimeStatusTone,
         activation: null,
@@ -147,18 +129,22 @@ function codexControlPresentation(
       };
     case "changed":
       return {
-        state: "Codex 待重新连接",
-        action: hasActiveRoute ? "重新连接" : "请先选择路由",
-        pending: "连接中",
+        state: messages.changedState,
+        action: hasActiveRoute
+          ? messages.reconnectAction
+          : messages.selectRouteFirst,
+        pending: messages.connecting,
         tone: "warning" as RuntimeStatusTone,
         activation: "reconnect" as CodexControlAction,
         unavailable: !hasActiveRoute,
       };
     case "not_connected":
       return {
-        state: "Codex 未连接",
-        action: hasActiveRoute ? "连接 Codex" : "请先选择路由",
-        pending: "连接中",
+        state: messages.notConnectedState,
+        action: hasActiveRoute
+          ? messages.connectAction
+          : messages.selectRouteFirst,
+        pending: messages.connecting,
         tone: "warning" as RuntimeStatusTone,
         activation: "connect" as CodexControlAction,
         unavailable: !hasActiveRoute,
@@ -166,8 +152,8 @@ function codexControlPresentation(
     case "images_mcp_name_conflict":
     case "images_mcp_projection_conflict":
       return {
-        state: "Codex 图片配置冲突",
-        action: "前往处理",
+        state: messages.imagesConflictState,
+        action: messages.imagesConflictAction,
         pending: null,
         tone: "bad" as RuntimeStatusTone,
         activation: "settings" as CodexControlAction,
@@ -177,8 +163,8 @@ function codexControlPresentation(
     case "unreadable":
     case "symlink_unsupported":
       return {
-        state: "Codex 配置异常",
-        action: "修复配置",
+        state: messages.configErrorState,
+        action: messages.configErrorAction,
         pending: null,
         tone: "bad" as RuntimeStatusTone,
         activation: "settings" as CodexControlAction,
@@ -190,26 +176,27 @@ function codexControlPresentation(
 function fallbackControlPresentation(
   fallback: FallbackStateDto,
   effectiveParticipantCount: number,
+  messages: MenuMessages["fallbackControl"],
 ) {
   if (effectiveParticipantCount < 2) {
     return {
-      state: "Fallback 不可用",
-      action: "至少需 2 条路由",
+      state: messages.unavailableState,
+      action: messages.minimumRoutesAction,
       tone: "warning" as RuntimeStatusTone,
       unavailable: true,
     };
   }
   if (!fallback.enabled) {
     return {
-      state: "Fallback 已关闭",
-      action: "开启 Fallback",
+      state: messages.disabledState,
+      action: messages.enableAction,
       tone: "warning" as RuntimeStatusTone,
       unavailable: false,
     };
   }
   return {
-    state: "Fallback 已开启",
-    action: "关闭 Fallback",
+    state: messages.enabledState,
+    action: messages.disableAction,
     tone: "good" as RuntimeStatusTone,
     unavailable: false,
   };
@@ -218,16 +205,20 @@ function fallbackControlPresentation(
 function MenuFallbackBoundary({
   edge,
   enabled,
+  messages,
 }: {
   edge: "start" | "end";
   enabled: boolean;
+  messages: MenuMessages["fallbackControl"];
 }) {
   return (
     <span
       className={`menu-fallback-boundary menu-fallback-boundary-${edge}${enabled ? "" : " is-disabled"}`}
       aria-hidden="true"
     >
-      <span>{enabled ? "以上参与 Fallback" : "Fallback 范围 · 已关闭"}</span>
+      <span>
+        {enabled ? messages.boundaryIncluded : messages.boundaryDisabled}
+      </span>
     </span>
   );
 }
@@ -235,16 +226,17 @@ function MenuFallbackBoundary({
 function balanceLabel(
   balance: BalanceDisplaySnapshot | undefined,
   enabled: boolean,
+  messages: MenuMessages["balance"],
 ) {
-  if (!enabled) return "未配置余额";
-  if (!balance || balance.status === "unavailable") return "尚无余额";
-  if (balance.status === "failed") return "余额查询失败";
-  if (!balance.value) return "尚无余额";
+  if (!enabled) return messages.notConfigured;
+  if (!balance || balance.status === "unavailable") return messages.none;
+  if (balance.status === "failed") return messages.queryFailed;
+  if (!balance.value) return messages.none;
   const value = balance.value.remaining;
   const unit = balance.value?.unit ?? "";
   const amount =
     value === null || value === undefined
-      ? "余额可用"
+      ? messages.available
       : ["$", "¥", "€", "£"].includes(unit)
         ? `${unit}${value.toFixed(2)}`
         : unit === "USD"
@@ -253,48 +245,62 @@ function balanceLabel(
   return amount;
 }
 
-function formatBalanceTime(timestamp: number) {
-  return new Intl.DateTimeFormat("zh-CN", {
+function formatBalanceTime(timestamp: number, locale: AppLocale) {
+  return new Intl.DateTimeFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
   }).format(timestamp);
 }
 
-function balanceMetaLabel(balance: BalanceDisplaySnapshot | undefined) {
+function balanceMetaLabel(
+  balance: BalanceDisplaySnapshot | undefined,
+  messages: MenuMessages["balance"],
+  locale: AppLocale,
+) {
   if (!balance) return null;
   if (balance.status === "stale") {
     const refreshedAt = balance.lastCompletionAtMs ?? balance.lastSuccessAtMs;
     return refreshedAt
-      ? `${formatBalanceTime(refreshedAt)} · 待刷新`
-      : "待刷新";
+      ? `${formatBalanceTime(refreshedAt, locale)} · ${messages.pendingRefresh}`
+      : messages.pendingRefresh;
   }
   if (balance.status === "last_good") {
     return balance.lastSuccessAtMs
-      ? `${formatBalanceTime(balance.lastSuccessAtMs)} · 上次结果`
-      : "上次结果";
+      ? `${formatBalanceTime(balance.lastSuccessAtMs, locale)} · ${messages.lastResult}`
+      : messages.lastResult;
   }
   const refreshedAt = balance.lastCompletionAtMs ?? balance.lastSuccessAtMs;
-  return refreshedAt ? `刷新于 ${formatBalanceTime(refreshedAt)}` : null;
+  return refreshedAt
+    ? messages.refreshedAt(formatBalanceTime(refreshedAt, locale))
+    : null;
 }
 
-function batchLabel(snapshot: MenuSnapshotDto) {
+function batchLabel(
+  snapshot: MenuSnapshotDto,
+  messages: MenuMessages["balanceBatch"],
+) {
   const batch = snapshot.balanceBatch;
   if (!batch) {
     return snapshot.balanceEnabledRouteIds.length === 0
-      ? "没有可更新的余额"
-      : "更新全部余额";
+      ? messages.nothingToRefresh
+      : messages.refreshAll;
   }
   if (batch.phase === "running")
-    return `正在更新 ${batch.completedCount}/${batch.eligibleCount}`;
-  if (batch.eligibleCount === 0) return "没有可更新的余额";
-  if (batch.failureCount === 0) return "全部更新成功";
-  return `已更新 ${batch.successCount}/${batch.eligibleCount}，${batch.failureCount} 项失败`;
+    return messages.refreshing(batch.completedCount, batch.eligibleCount);
+  if (batch.eligibleCount === 0) return messages.nothingToRefresh;
+  if (batch.failureCount === 0) return messages.allSucceeded;
+  return messages.partial(
+    batch.successCount,
+    batch.eligibleCount,
+    batch.failureCount,
+  );
 }
 
 function MenuConfirmDialog({
   titleId,
   title,
   body,
+  cancelLabel,
   confirmLabel,
   pending = false,
   destructive = false,
@@ -304,6 +310,7 @@ function MenuConfirmDialog({
   titleId: string;
   title: string;
   body: ReactNode;
+  cancelLabel: string;
   confirmLabel: string;
   pending?: boolean;
   destructive?: boolean;
@@ -328,7 +335,7 @@ function MenuConfirmDialog({
             disabled={pending}
             onClick={onCancel}
           >
-            取消
+            {cancelLabel}
           </button>
           <button
             type="button"
@@ -353,6 +360,8 @@ export function MenuPopover() {
     bootstrap.data?.lifecycle.phase,
   );
   const query = useMenuSnapshot(bootstrap.isSuccess && !databaseBlocked);
+  const { messages, effectiveLocale } = useLanguage();
+  const menuMessages = messages.menu;
   const { generation, previewLayout } = useMenuPopover(shellRef);
   const [pendingRoute, setPendingRoute] = useState<RouteId | null>(null);
   const [activationPreview, setActivationPreview] =
@@ -377,7 +386,8 @@ export function MenuPopover() {
   const [fallbackOperation, setFallbackOperation] = useState<
     "enable" | "disable" | null
   >(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<IpcErrorDto | null>(null);
+  const [incompleteSwitch, setIncompleteSwitch] = useState(false);
 
   const balances = useMemo(
     () =>
@@ -407,23 +417,28 @@ export function MenuPopover() {
     await queryClient.invalidateQueries({ queryKey: queryKeys.menu });
   };
 
+  // The inline alert slot shows either a typed IPC error or the partial
+  // route-switch notice, so both clear together before each operation.
+  const clearError = () => {
+    setError(null);
+    setIncompleteSwitch(false);
+  };
+
   const finishActivation = async (preview: RouteActivationPreviewDto) => {
     setPendingRoute(preview.targetRouteId);
-    setError(null);
+    clearError();
     try {
       const result = await confirmRouteActivation(preview.permit);
       setActivationPreview(null);
       await refreshMenu();
       if (!result.catalog.projectionApplied) {
-        setError(
-          "中转已切换，但 Codex 模型列表尚未完整应用。请重新连接 Codex 后重试。",
-        );
+        setIncompleteSwitch(true);
         return;
       }
       await hideMenu();
     } catch (reason) {
       const normalized = normalizeIpcError(reason);
-      setError(normalized.message);
+      setError(normalized);
       if (
         normalized.code === "route_activation_permit_stale" ||
         normalized.code === "route_activation_permit_invalid"
@@ -443,7 +458,7 @@ export function MenuPopover() {
 
   const performActivate = async (routeId: RouteId) => {
     setPendingRoute(routeId);
-    setError(null);
+    clearError();
     try {
       const preview = await previewRouteActivation(routeId);
       if (preview.confirmationRequired) {
@@ -452,7 +467,7 @@ export function MenuPopover() {
         await finishActivation(preview);
       }
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setPendingRoute(null);
     }
@@ -461,7 +476,7 @@ export function MenuPopover() {
   const dismissRestartNotice = async (noticeId: string) => {
     setDismissedNoticeId(noticeId);
     setDismissingNoticeId(noticeId);
-    setError(null);
+    clearError();
     try {
       await dismissCodexRestartNotice(noticeId);
       await refreshMenu();
@@ -469,7 +484,7 @@ export function MenuPopover() {
       setDismissedNoticeId((current) =>
         current === noticeId ? null : current,
       );
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setDismissingNoticeId((current) =>
         current === noticeId ? null : current,
@@ -480,7 +495,7 @@ export function MenuPopover() {
   const dismissCapacityWarning = async (episodeId: string) => {
     setDismissedCapacityEpisodeId(episodeId);
     setDismissingCapacityEpisodeId(episodeId);
-    setError(null);
+    clearError();
     try {
       await dismissMcpImageCapacityWarning(episodeId);
       await refreshMenu();
@@ -488,7 +503,7 @@ export function MenuPopover() {
       setDismissedCapacityEpisodeId((current) =>
         current === episodeId ? null : current,
       );
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setDismissingCapacityEpisodeId((current) =>
         current === episodeId ? null : current,
@@ -498,12 +513,12 @@ export function MenuPopover() {
 
   const refreshOne = async (routeId: RouteId) => {
     setRefreshingRoute(routeId);
-    setError(null);
+    clearError();
     try {
       await refreshBalance(routeId);
       await refreshMenu();
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setRefreshingRoute(null);
     }
@@ -511,12 +526,12 @@ export function MenuPopover() {
 
   const refreshAll = async () => {
     setRefreshingAll(true);
-    setError(null);
+    clearError();
     try {
       await refreshAllBalances();
       await refreshMenu();
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setRefreshingAll(false);
     }
@@ -530,13 +545,13 @@ export function MenuPopover() {
     )
       return;
     setCodexOperation("connect");
-    setError(null);
+    clearError();
     try {
       if (status === "changed") await reconnectCodex();
       else await connectCodex(false);
       await refreshMenu();
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setCodexOperation(null);
     }
@@ -545,12 +560,12 @@ export function MenuPopover() {
   const disconnectCodexFromMenu = async () => {
     if (codexOperation !== null) return;
     setCodexOperation("disconnect");
-    setError(null);
+    clearError();
     try {
       await restoreCodex();
       await refreshMenu();
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setCodexOperation(null);
     }
@@ -567,12 +582,12 @@ export function MenuPopover() {
     }
     const nextEnabled = !fallback.enabled;
     setFallbackOperation(nextEnabled ? "enable" : "disable");
-    setError(null);
+    clearError();
     try {
       await setFallbackEnabled(nextEnabled);
       await refreshMenu();
     } catch (reason) {
-      setError(normalizeIpcError(reason).message);
+      setError(normalizeIpcError(reason));
     } finally {
       setFallbackOperation(null);
     }
@@ -584,6 +599,7 @@ export function MenuPopover() {
     ? codexControlPresentation(
         query.data.codexStatus,
         query.data.bootstrap.activeRouteId !== null,
+        menuMessages.codexControl,
       )
     : null;
   const fallbackBoundaryIndex = query.data
@@ -602,8 +618,13 @@ export function MenuPopover() {
     ? fallbackControlPresentation(
         query.data.bootstrap.fallback,
         effectiveFallbackParticipantCount,
+        menuMessages.fallbackControl,
       )
     : null;
+  const fallbackMissingNext =
+    query.data !== undefined &&
+    query.data.bootstrap.fallback.enabled &&
+    !query.data.bootstrap.fallback.hasNext;
   const fallbackBoundaryOwner = (() => {
     if (fallbackBoundaryIndex === null || visibleRoutes.length === 0) return null;
     if (fallbackBoundaryIndex === 0) {
@@ -626,13 +647,15 @@ export function MenuPopover() {
     : false;
   const codexPendingLabel =
     codexOperation === "disconnect"
-      ? "断开中"
+      ? menuMessages.codexControl.disconnecting
       : codexOperation === "connect"
-        ? "连接中"
+        ? menuMessages.codexControl.connecting
         : null;
   const codexReservedPendingLabel = codexPendingLabel ?? codexControl?.pending;
   const fallbackPendingLabel =
-    fallbackOperation === "enable" ? "开启中" : "关闭中";
+    fallbackOperation === "enable"
+      ? menuMessages.fallbackControl.enabling
+      : menuMessages.fallbackControl.disabling;
   const restartNotice =
     query.data?.codexRestartNotice?.noticeId === dismissedNoticeId
       ? null
@@ -652,7 +675,7 @@ export function MenuPopover() {
     >
       <main
         className={`menu-shell${confirming ? " menu-shell-confirming" : ""}`}
-        aria-label={`${appVariant.displayName} 菜单`}
+        aria-label={menuMessages.shellLabel(appVariant.displayName)}
         ref={shellRef}
       >
         <div className="menu-arrow" aria-hidden="true" />
@@ -666,19 +689,25 @@ export function MenuPopover() {
             </div>
           </div>
           {!databaseBlocked && query.data && codexControl && fallbackControl ? (
-            <div className="menu-runtime-status" aria-label="运行状态">
+            <div
+              className="menu-runtime-status"
+              aria-label={menuMessages.runtimeStatusLabel}
+            >
               <span
-                className={`runtime-status runtime-status-${proxyLabel(query.data.bootstrap.proxyStatus)[1]}`}
+                className={`runtime-status runtime-status-${proxyLabel(query.data.bootstrap.proxyStatus, menuMessages.proxyStatus)[1]}`}
               >
                 <i aria-hidden="true" />
-                {proxyLabel(query.data.bootstrap.proxyStatus)[0]}
+                {proxyLabel(query.data.bootstrap.proxyStatus, menuMessages.proxyStatus)[0]}
               </span>
               <button
                 className={`runtime-status runtime-control runtime-status-${codexControl.tone}${codexOperation ? " is-pending" : ""}`}
                 type="button"
                 disabled={codexOperation !== null}
                 aria-disabled={codexControl.unavailable || undefined}
-                aria-label={`${codexControl.state}，${codexPendingLabel ?? codexControl.action}`}
+                aria-label={menuMessages.codexControl.controlLabel(
+                  codexControl.state,
+                  codexPendingLabel ?? codexControl.action,
+                )}
                 title={codexControl.action}
                 onClick={() => {
                   if (codexOperation !== null || codexControl.unavailable)
@@ -721,11 +750,14 @@ export function MenuPopover() {
                 disabled={fallbackOperation !== null}
                 aria-disabled={fallbackControl.unavailable || undefined}
                 aria-pressed={query.data.bootstrap.fallback.enabled}
-                aria-label={`${fallbackControl.state}，${fallbackOperation ? fallbackPendingLabel : fallbackControl.action}${query.data.bootstrap.fallback.enabled && !query.data.bootstrap.fallback.hasNext ? "；当前路由之后没有可用的 Fallback 路由" : ""}`}
+                aria-label={menuMessages.fallbackControl.controlLabel(
+                  fallbackControl.state,
+                  fallbackOperation ? fallbackPendingLabel : fallbackControl.action,
+                  fallbackMissingNext ? menuMessages.fallbackControl.noNextRoute : null,
+                )}
                 title={
-                  query.data.bootstrap.fallback.enabled &&
-                  !query.data.bootstrap.fallback.hasNext
-                    ? "当前路由之后没有可用的 Fallback 路由"
+                  fallbackMissingNext
+                    ? menuMessages.fallbackControl.noNextRoute
                     : fallbackControl.action
                 }
                 onClick={() => void changeFallbackFromMenu()}
@@ -747,10 +779,10 @@ export function MenuPopover() {
             </div>
           ) : bootstrap.data ? (
             <span
-              className={`runtime-status runtime-status-${proxyLabel(bootstrap.data.proxyStatus)[1]}`}
+              className={`runtime-status runtime-status-${proxyLabel(bootstrap.data.proxyStatus, menuMessages.proxyStatus)[1]}`}
             >
               <i aria-hidden="true" />
-              {proxyLabel(bootstrap.data.proxyStatus)[0]}
+              {proxyLabel(bootstrap.data.proxyStatus, menuMessages.proxyStatus)[0]}
             </span>
           ) : null}
         </header>
@@ -758,17 +790,19 @@ export function MenuPopover() {
         {!databaseBlocked && restartNotice ? (
           <section
             className="menu-restart-notice"
-            aria-label="Codex 模型列表更新提醒"
+            aria-label={menuMessages.restartNotice.label}
           >
             <TriangleAlert aria-hidden="true" size={17} />
             <p>
-              <strong>已自动切换至 {restartNotice.routeName}</strong>
-              <span>重启 Codex 后更新模型列表</span>
+              <strong>
+                {menuMessages.restartNotice.switchedTo(restartNotice.routeName)}
+              </strong>
+              <span>{menuMessages.restartNotice.body}</span>
             </p>
             <button
               type="button"
-              aria-label="关闭 Codex 模型列表更新提醒"
-              title="关闭提醒"
+              aria-label={menuMessages.restartNotice.dismissLabel}
+              title={menuMessages.restartNotice.dismissTitle}
               disabled={dismissingNoticeId === restartNotice.noticeId}
               onClick={() => void dismissRestartNotice(restartNotice.noticeId)}
             >
@@ -780,15 +814,19 @@ export function MenuPopover() {
         {!databaseBlocked && capacityWarningVisible && capacity ? (
           <section
             className="menu-restart-notice menu-capacity-notice"
-            aria-label="生成图片容量提醒"
+            aria-label={menuMessages.capacityNotice.label}
           >
             <TriangleAlert aria-hidden="true" size={17} />
             <p>
               <strong>
-                生成图片占用 {formatCapacityBytes(capacity.bytes)}
+                {menuMessages.capacityNotice.usage(
+                  formatCapacityBytes(capacity.bytes),
+                )}
               </strong>
               <span>
-                已达到 {formatCapacityBytes(capacity.thresholdMib * 1024 ** 2)} 提醒阈值
+                {menuMessages.capacityNotice.threshold(
+                  formatCapacityBytes(capacity.thresholdMib * 1024 ** 2),
+                )}
               </span>
             </p>
             <button
@@ -798,13 +836,13 @@ export function MenuPopover() {
                 void showSettingsWindow("codex", false, "image_generation")
               }
             >
-              管理
+              {menuMessages.capacityNotice.manage}
             </button>
             <button
               className="menu-capacity-dismiss"
               type="button"
-              aria-label="本次超限期间不再提醒"
-              title="本次超限期间不再提醒"
+              aria-label={menuMessages.capacityNotice.dismissLabel}
+              title={menuMessages.capacityNotice.dismissLabel}
               disabled={dismissingCapacityEpisodeId === capacityEpisodeId}
               onClick={() => void dismissCapacityWarning(capacityEpisodeId)}
             >
@@ -818,15 +856,15 @@ export function MenuPopover() {
         ) : null}
 
         {!databaseBlocked && query.isPending ? (
-          <div className="menu-message">正在读取状态...</div>
+          <div className="menu-message">{menuMessages.menuStates.loading}</div>
         ) : null}
         {!databaseBlocked && query.isError ? (
           <div className="menu-message menu-message-error">
             {bootstrap.data?.proxyStatus === "database_error"
-              ? "数据库不可用，代理未启动。"
+              ? menuMessages.menuStates.proxyDatabaseError
               : bootstrap.data?.proxyStatus === "port_conflict"
-                ? "本地代理端口已被占用。"
-                : "状态读取失败"}
+                ? menuMessages.menuStates.proxyPortConflict
+                : menuMessages.menuStates.loadFailed}
           </div>
         ) : null}
         {databaseBlocked && bootstrap.data ? (
@@ -837,13 +875,13 @@ export function MenuPopover() {
             <AlertCircle aria-hidden="true" size={20} />
             <h2 id="database-status-title">
               {bootstrap.data.lifecycle.phase === "recovery_required"
-                ? "需要恢复数据库"
-                : databaseIssueLabel(bootstrap.data)}
+                ? menuMessages.databaseBlocked.recoveryRequiredTitle
+                : databaseIssueLabel(bootstrap.data, menuMessages)}
             </h2>
             <p>
               {bootstrap.data.lifecycle.phase === "recovery_required"
-                ? "代理已停止。请在设置中选择恢复点或创建空数据库。"
-                : "代理已停止。请在设置中查看数据库启动状态。"}
+                ? menuMessages.databaseBlocked.recoveryRequiredBody
+                : menuMessages.databaseBlocked.issueBody}
             </p>
             <button
               className="primary-button"
@@ -851,22 +889,22 @@ export function MenuPopover() {
               onClick={() => void showSettingsWindow("system")}
             >
               <Settings aria-hidden="true" size={16} />
-              打开恢复设置
+              {menuMessages.databaseBlocked.openSettings}
             </button>
           </section>
         ) : null}
         {!databaseBlocked && query.data?.bootstrap.routes.length === 0 ? (
           <section className="menu-empty" aria-labelledby="routes-title">
             <Circle aria-hidden="true" size={20} />
-            <h2 id="routes-title">还没有路由</h2>
-            <p>添加一条自定义 Responses 路由。</p>
+            <h2 id="routes-title">{menuMessages.menuStates.noRoutesTitle}</h2>
+            <p>{menuMessages.menuStates.noRoutesBody}</p>
             <button
               className="primary-button"
               type="button"
               onClick={() => void showSettingsWindow("routes", true)}
             >
               <Plus aria-hidden="true" size={16} />
-              添加自定义 Responses 路由
+              {menuMessages.menuStates.noRoutesAction}
             </button>
           </section>
         ) : null}
@@ -877,11 +915,13 @@ export function MenuPopover() {
         visibleRoutes.length === 0 ? (
           <section className="menu-empty" aria-labelledby="hidden-routes-title">
             <Circle aria-hidden="true" size={20} />
-            <h2 id="hidden-routes-title">没有显示在菜单中的路由</h2>
-            <p>可在路由设置中重新显示路由。</p>
+            <h2 id="hidden-routes-title">
+              {menuMessages.menuStates.hiddenRoutesTitle}
+            </h2>
+            <p>{menuMessages.menuStates.hiddenRoutesBody}</p>
             <button className="primary-button" type="button" onClick={() => void showSettingsWindow("routes")}>
               <Settings aria-hidden="true" size={16} />
-              打开路由设置
+              {menuMessages.menuStates.hiddenRoutesAction}
             </button>
           </section>
         ) : null}
@@ -892,7 +932,10 @@ export function MenuPopover() {
           <AppScrollArea
             className="menu-routes"
             viewportClassName="menu-routes-viewport"
-            viewportProps={{ role: "listbox", "aria-label": "路由" }}
+            viewportProps={{
+              role: "listbox",
+              "aria-label": menuMessages.routeList.label,
+            }}
           >
             {visibleRoutes.map((route) => {
               const active =
@@ -902,7 +945,11 @@ export function MenuPopover() {
               const refreshing =
                 refreshingRoute === route.routeId ||
                 balance?.status === "refreshing";
-              const balanceMeta = balanceMetaLabel(balance);
+              const balanceMeta = balanceMetaLabel(
+                balance,
+                menuMessages.balance,
+                effectiveLocale,
+              );
               const fallbackBoundaryEdge =
                 fallbackBoundaryOwner?.routeId === route.routeId
                   ? fallbackBoundaryOwner.edge
@@ -918,7 +965,7 @@ export function MenuPopover() {
                   <button
                     className="route-select"
                     type="button"
-                    aria-label={`切换到 ${route.name}`}
+                    aria-label={menuMessages.routeList.switchTo(route.name)}
                     disabled={pendingRoute !== null}
                     onClick={() => void performActivate(route.routeId)}
                   >
@@ -941,12 +988,18 @@ export function MenuPopover() {
                     <span
                       className={`inference inference-${route.inferenceStatus.kind}`}
                     >
-                      {inferenceLabel(route.inferenceStatus)}
+                      {inferenceLabel(route.inferenceStatus, menuMessages)}
                     </span>
                     <span
                       className={`balance balance-${balance?.status ?? "unavailable"}`}
                     >
-                      <span>{balanceLabel(balance, balanceEnabled)}</span>
+                      <span>
+                        {balanceLabel(
+                          balance,
+                          balanceEnabled,
+                          menuMessages.balance,
+                        )}
+                      </span>
                       {balanceMeta ? <small>{balanceMeta}</small> : null}
                     </span>
                   </button>
@@ -954,8 +1007,10 @@ export function MenuPopover() {
                     className="menu-refresh-button"
                     type="button"
                     disabled={refreshing || !balanceEnabled}
-                    aria-label={`刷新 ${route.name} 的余额`}
-                    title="刷新余额"
+                    aria-label={menuMessages.routeList.refreshBalanceLabel(
+                      route.name,
+                    )}
+                    title={menuMessages.routeList.refreshBalanceTitle}
                     onClick={() => void refreshOne(route.routeId)}
                   >
                     <RefreshCw
@@ -968,6 +1023,7 @@ export function MenuPopover() {
                     <MenuFallbackBoundary
                       edge={fallbackBoundaryEdge}
                       enabled={fallbackBoundaryEnabled}
+                      messages={menuMessages.fallbackControl}
                     />
                   ) : null}
                 </div>
@@ -976,19 +1032,22 @@ export function MenuPopover() {
           </AppScrollArea>
         ) : null}
 
-        {!databaseBlocked && error ? (
+        {!databaseBlocked && (error || incompleteSwitch) ? (
           <div className="menu-inline-error" role="alert">
             <AlertCircle aria-hidden="true" size={14} />
-            {error}
+            {error
+              ? ipcErrorMessage(error, messages)
+              : menuMessages.routeSwitch.activationIncomplete}
           </div>
         ) : null}
 
         {!databaseBlocked && disconnectConfirmation ? (
           <MenuConfirmDialog
             titleId="disconnect-codex-title"
-            title="断开 Codex？"
-            body="当前 config.toml 将被断开恢复配置替换；更新恢复配置后保留的修改不会丢失。"
-            confirmLabel="断开连接"
+            title={menuMessages.codexDisconnect.title}
+            body={menuMessages.codexDisconnect.body}
+            cancelLabel={messages.shell.cancel}
+            confirmLabel={menuMessages.codexDisconnect.confirm}
             destructive
             onCancel={() => setDisconnectConfirmation(false)}
             onConfirm={() => {
@@ -1001,21 +1060,28 @@ export function MenuPopover() {
         {!databaseBlocked && activationPreview ? (
           <MenuConfirmDialog
             titleId="activate-route-title"
-            title={`切换到“${activationPreview.targetRouteName}”？`}
+            title={menuMessages.routeSwitch.title(
+              activationPreview.targetRouteName,
+            )}
             body={
               <>
                 {activationPreview.targetCatalogMode === "custom"
-                  ? "该中转使用自定义模型。"
-                  : "该中转使用 Codex 官方模型。"}
+                  ? menuMessages.routeSwitch.customCatalog
+                  : menuMessages.routeSwitch.officialCatalog}
                 <br />
-                切换后需要重启 Codex，模型列表才会更新。
+                {menuMessages.routeSwitch.restartHint}
               </>
             }
-            confirmLabel={pendingRoute ? "切换中" : "切换中转"}
+            cancelLabel={messages.shell.cancel}
+            confirmLabel={
+              pendingRoute
+                ? menuMessages.routeSwitch.pending
+                : menuMessages.routeSwitch.confirm
+            }
             pending={pendingRoute !== null}
             onCancel={() => {
               setActivationPreview(null);
-              setError(null);
+              clearError();
             }}
             onConfirm={() => void finishActivation(activationPreview)}
           />
@@ -1039,10 +1105,10 @@ export function MenuPopover() {
               className={batchRefreshing ? "spin" : ""}
             />
             {databaseBlocked
-              ? "代理已停止"
+              ? menuMessages.footer.proxyStopped
               : query.data
-                ? batchLabel(query.data)
-                : "更新全部余额"}
+                ? batchLabel(query.data, menuMessages.balanceBatch)
+                : menuMessages.balanceBatch.refreshAll}
           </button>
           <div className="menu-footer-actions">
             <button
@@ -1050,10 +1116,10 @@ export function MenuPopover() {
               type="button"
               aria-label={
                 applicationUpdate.data?.available
-                  ? "打开设置，有可用更新"
-                  : "打开设置"
+                  ? menuMessages.footer.settingsLabelWithUpdate
+                  : menuMessages.footer.settingsLabel
               }
-              title="设置"
+              title={menuMessages.footer.settingsTitle}
               onClick={() => void showSettingsWindow("routes")}
             >
               <Settings aria-hidden="true" size={17} />
@@ -1067,8 +1133,10 @@ export function MenuPopover() {
             <button
               className="icon-button"
               type="button"
-              aria-label={`退出 ${appVariant.displayName}`}
-              title="退出"
+              aria-label={menuMessages.footer.quitLabel(
+                appVariant.displayName,
+              )}
+              title={menuMessages.footer.quitTitle}
               onClick={() => void quitApplication()}
             >
               <Power aria-hidden="true" size={17} />

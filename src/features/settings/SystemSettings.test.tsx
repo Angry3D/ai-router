@@ -15,7 +15,10 @@ import {
   previewRouteEdits,
   previewSettingsSnapshot,
 } from "../../previewFixtures";
+import { routesMessages } from "../language/catalog/routes";
+import { shellMessages } from "../language/catalog/shell";
 import { SettingsWindow } from "./SettingsWindow";
+import { LanguageProvider } from "../language/LanguageProvider";
 
 const ipc = vi.hoisted(() => ({
   clearRequestHistory: vi.fn(),
@@ -25,6 +28,7 @@ const ipc = vi.hoisted(() => ({
   createRecoveryPoint: vi.fn(),
   deleteRoute: vi.fn(),
   fetchRouteModels: vi.fn(),
+  getBootstrapSnapshot: vi.fn(),
   getRecoverySnapshot: vi.fn(),
   getPricingTable: vi.fn(async () => ({
     rows: [],
@@ -49,6 +53,7 @@ const ipc = vi.hoisted(() => ({
   startOverDatabase: vi.fn(),
   testBalanceQuery: vi.fn(),
   testOutboundProxy: vi.fn(),
+  updateLanguagePreference: vi.fn(),
   updateBalanceQuerySettings: vi.fn(),
   updateImagesGenerationSettings: vi.fn(),
   updateMenuBarSettings: vi.fn(),
@@ -72,7 +77,7 @@ vi.mock("../../api/ipc", () => ({
   createRecoveryPoint: ipc.createRecoveryPoint,
   deleteRoute: ipc.deleteRoute,
   fetchRouteModels: ipc.fetchRouteModels,
-  getBootstrapSnapshot: vi.fn(),
+  getBootstrapSnapshot: ipc.getBootstrapSnapshot,
   getMenuSnapshot: vi.fn(),
   getRecoverySnapshot: ipc.getRecoverySnapshot,
   getPricingTable: ipc.getPricingTable,
@@ -115,6 +120,7 @@ vi.mock("../../api/ipc", () => ({
   updateBalanceQuerySettings: ipc.updateBalanceQuerySettings,
   updateImagesGenerationSettings: ipc.updateImagesGenerationSettings,
   updateMenuBarSettings: ipc.updateMenuBarSettings,
+  updateLanguagePreference: ipc.updateLanguagePreference,
   updateOutboundProxySettings: ipc.updateOutboundProxySettings,
   quitApplication: ipc.quitApplication,
 }));
@@ -372,7 +378,7 @@ describe("SystemSettings interactions", () => {
         .getAllByRole("heading", { level: 3 })
         .map((heading) => heading.textContent),
     ).toEqual([
-      "外观",
+      "外观与语言",
       "菜单栏",
       "全局出站代理",
       "应用更新",
@@ -629,7 +635,9 @@ describe("SystemSettings interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "系统" }));
     fireEvent.click(screen.getByRole("radio", { name: "自定义代理" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(
       within(
         screen.getByRole("radiogroup", { name: "全局出站代理模式" }),
@@ -683,7 +691,9 @@ describe("SystemSettings interactions", () => {
     expect(activityAnimation).toBeDisabled();
     rejectUpdate?.(new Error("write failed"));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(statusText).toBeChecked();
     expect(activityAnimation).toBeChecked();
   });
@@ -735,7 +745,7 @@ describe("SystemSettings interactions", () => {
     const apply = screen.getByRole("button", { name: "应用" });
     fireEvent.click(apply);
 
-    expect(await screen.findByText("测试失败")).toHaveAttribute(
+    expect(await screen.findByText("操作失败，请重试。")).toHaveAttribute(
       "role",
       "alert",
     );
@@ -777,7 +787,9 @@ describe("SystemSettings interactions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "创建恢复点" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("测试失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "操作失败，请重试。",
+    );
     expect(screen.getByRole("button", { name: "创建恢复点" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "创建恢复点" }));
@@ -833,6 +845,179 @@ describe("SystemSettings interactions", () => {
       expect(screen.getByText(expected)).toBeInTheDocument();
     },
   );
+});
+
+describe("language preference control", () => {
+  beforeEach(() => {
+    ipc.updateLanguagePreference.mockReset();
+    ipc.updateLanguagePreference.mockResolvedValue({ revision: 2 });
+    ipc.getBootstrapSnapshot.mockReset();
+  });
+
+  async function renderSystemWithLanguage(
+    language: {
+      preference: "system" | "zh-CN" | "en";
+      effectiveLocale: "zh-CN" | "en";
+    },
+    client?: ReturnType<typeof createRouterQueryClient>,
+  ) {
+    ipc.getRouteEdit.mockImplementation(async (routeId: string) => {
+      const edit = previewRouteEdits.find(
+        (candidate) => candidate.routeId === routeId,
+      );
+      if (!edit) throw new Error("route not found");
+      return structuredClone(edit);
+    });
+    const queryClient = client ?? createRouterQueryClient();
+    queryClient.setQueryData(
+      queryKeys.settings,
+      structuredClone(previewSettingsSnapshot),
+    );
+    queryClient.setQueryData(queryKeys.bootstrap, {
+      ...structuredClone(previewMenuSnapshot.bootstrap),
+      language,
+    });
+    queryClient.setQueryData(queryKeys.menu, previewMenuSnapshot);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LanguageProvider view="settings">
+          <SettingsWindow />
+        </LanguageProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByLabelText(
+      routesMessages[language.effectiveLocale].editor.nameLabel,
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: shellMessages[language.effectiveLocale].sectionSystem,
+      }),
+    );
+    const groupLabel =
+      language.effectiveLocale === "zh-CN" ? "语言" : "Language";
+    return within(screen.getByRole("radiogroup", { name: groupLabel }));
+  }
+
+  it("renders stable autonyms with the localized system option", async () => {
+    const group = await renderSystemWithLanguage({
+      preference: "system",
+      effectiveLocale: "zh-CN",
+    });
+
+    expect(group.getByRole("radio", { name: "跟随系统" })).toBeChecked();
+    expect(group.getByRole("radio", { name: "简体中文" })).not.toBeChecked();
+    expect(group.getByRole("radio", { name: "English" })).not.toBeChecked();
+    expect(
+      screen.getByRole("heading", { name: "外观与语言", level: 3 }),
+    ).toBeInTheDocument();
+  });
+
+  it("disables only the language group while saving and restores focus", async () => {
+    let resolveSave: (value: { revision: number }) => void = () => {};
+    ipc.updateLanguagePreference.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const client = createRouterQueryClient();
+    const group = await renderSystemWithLanguage(
+      { preference: "system", effectiveLocale: "zh-CN" },
+      client,
+    );
+    fireEvent.click(group.getByRole("radio", { name: "简体中文" }));
+
+    expect(ipc.updateLanguagePreference).toHaveBeenCalledWith("zh-CN");
+    expect(group.getByRole("radio", { name: "简体中文" })).toBeDisabled();
+    expect(screen.getByRole("radiogroup", { name: "语言" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    // Theme radios stay enabled; the appearance control is unaffected.
+    expect(screen.getByRole("radio", { name: "浅色" })).toBeEnabled();
+    // No optimistic flip: System remains checked until the commit reconciles.
+    expect(group.getByRole("radio", { name: "跟随系统" })).toBeChecked();
+
+    client.setQueryData(queryKeys.bootstrap, {
+      ...structuredClone(previewMenuSnapshot.bootstrap),
+      language: { preference: "zh-CN", effectiveLocale: "zh-CN" },
+    });
+    resolveSave({ revision: 3 });
+    await waitFor(() => {
+      expect(group.getByRole("radio", { name: "简体中文" })).toBeChecked();
+    });
+    expect(group.getByRole("radio", { name: "简体中文" })).toHaveFocus();
+    expect(screen.getByRole("radiogroup", { name: "语言" })).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+  });
+
+  it("retranslates an on-screen failure when the authoritative language moves", async () => {
+    ipc.updateLanguagePreference.mockRejectedValueOnce(
+      new Error("storage failed"),
+    );
+    const client = createRouterQueryClient();
+    const group = await renderSystemWithLanguage(
+      { preference: "en", effectiveLocale: "en" },
+      client,
+    );
+    fireEvent.click(group.getByRole("radio", { name: "简体中文" }));
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent("Failed to save. Try again.");
+
+    // The authority moves (competing writer or reconciled platform change):
+    // the same typed failure identity must re-render in the new language.
+    client.setQueryData(queryKeys.bootstrap, {
+      ...structuredClone(previewMenuSnapshot.bootstrap),
+      language: { preference: "zh-CN", effectiveLocale: "zh-CN" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("保存失败，请重试。");
+    });
+    expect(
+      screen.getByRole("radiogroup", { name: "语言" }),
+    ).toHaveAccessibleDescription(/保存失败，请重试。/);
+  });
+
+  it("reports a committed preference whose sync has not completed", async () => {
+    // The preview fixture commits revision 12, so the acknowledged write must
+    // be newer than the snapshot already in the cache for this scenario.
+    ipc.updateLanguagePreference.mockResolvedValue({ revision: 20 });
+    ipc.getBootstrapSnapshot.mockRejectedValue(new Error("read failed"));
+    const group = await renderSystemWithLanguage({
+      preference: "en",
+      effectiveLocale: "en",
+    });
+    fireEvent.click(group.getByRole("radio", { name: "简体中文" }));
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("Saved. Sync is not complete yet.");
+    // The acknowledged commit is not presented as a completed switch, and the
+    // stored write is neither repeated nor undone.
+    expect(group.getByRole("radio", { name: "English" })).toBeChecked();
+    expect(ipc.updateLanguagePreference).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the brief approved failure line and keeps the prior selection", async () => {
+    ipc.updateLanguagePreference.mockRejectedValueOnce(
+      new Error("storage failed"),
+    );
+    const group = await renderSystemWithLanguage({
+      preference: "en",
+      effectiveLocale: "en",
+    });
+    fireEvent.click(group.getByRole("radio", { name: "简体中文" }));
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent("Failed to save. Try again.");
+    expect(
+      screen.getByRole("radiogroup", { name: "Language" }),
+    ).toHaveAccessibleDescription(/Failed to save. Try again./);
+    expect(group.getByRole("radio", { name: "English" })).toBeChecked();
+    expect(group.getByRole("radio", { name: "简体中文" })).toBeEnabled();
+  });
 });
 
 function recoveryRowLabels() {

@@ -1,16 +1,18 @@
-# AI Router 工程文档
+# AI Router engineering docs
 
-这里记录外部贡献者需要遵守的项目契约。它描述当前产品和发布边界，而不是未来路线图。
+This is where the project contracts that external contributors must follow live.
+It describes the current product and release boundaries, not a future roadmap.
 
-- [架构与代码边界](./architecture.md)：进程、模块、状态和生成类型的所有权。
-- [路由与韧性](./routing-resilience.md)：Responses 转发、自动回退和诊断边界。
-- [数据、隐私与恢复](./data-privacy-recovery.md)：本地文件、密钥、历史、日志和恢复点。
-- [macOS 原生生命周期](./native-lifecycle.md)：生产/QA 隔离、菜单面板和构建安全。
-- [发布与应用更新](./application-updates.md)：资产、签名、状态机、桥接版本与密钥轮换。
-- [稳定版本发布操作](./releasing.md)：protected environment、draft 验证、发布和失败恢复。
-- [开发与交付生命周期](./development-lifecycle.md)：自然语言控制、分支、PR、主线和版本候选边界。
-- [风险对应的验证策略](./verification.md)：按改动影响选择最小充分证据。
-- [GitHub CI 与安全设置](./github-security-settings.md)：required checks、ruleset 与安全功能交接清单。
+- [Architecture and code boundaries](./architecture.md): ownership of processes, modules, state, and generated types.
+- [Routing and resilience](./routing-resilience.md): Responses forwarding, automatic fallback, and diagnostic boundaries.
+- [Data, privacy, and recovery](./data-privacy-recovery.md): local files, secrets, history, logs, and recovery points.
+- [macOS native lifecycle](./native-lifecycle.md): production/QA isolation, the menu panel, and build safety.
+- [Release and app updates](./application-updates.md): assets, signing, the state machine, bridge versions, and key rotation.
+- [Stable release operations](./releasing.md): the protected environment, draft verification, publication, and failure recovery.
+- [Development and delivery lifecycle](./development-lifecycle.md): natural-language control, branches, PRs, mainline, and release candidate boundaries.
+- [Verification strategy by risk](./verification.md): choosing the minimum sufficient evidence for a given change.
+- [GitHub CI and security settings](./github-security-settings.md): required checks, the ruleset, and the security feature handoff checklist.
 
-项目支持范围、构建入口和协作规则分别见 [README](../../README.md)、
-[贡献指南](../../CONTRIBUTING.md) 和 [安全政策](../../SECURITY.md)。
+Product support scope, build entry points, and collaboration rules are covered by the
+[README](../../README.md), the [contributing guide](../../CONTRIBUTING.md), and the
+[security policy](../../SECURITY.md).

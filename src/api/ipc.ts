@@ -18,6 +18,7 @@ import type {
   CodexRecoveryUpdatePreviewDto,
   ConfigOperationResult,
   IpcErrorDto,
+  LanguagePreference,
   MenuSnapshotDto,
   MenuBarSettingsDto,
   MutationResultDto,
@@ -85,6 +86,7 @@ export const IPC_COMMANDS = {
   updateImagesGenerationSettings: "update_images_generation_settings",
   updateMcpImageCapacityThreshold: "update_mcp_image_capacity_threshold",
   updateAppearancePreference: "update_appearance_preference",
+  updateLanguagePreference: "update_language_preference",
   updateMenuBarSettings: "update_menu_bar_settings",
   updateOutboundProxySettings: "update_outbound_proxy_settings",
   testOutboundProxy: "test_outbound_proxy",
@@ -404,6 +406,14 @@ export async function updateAppearancePreference(
 ): Promise<MutationResultDto> {
   return invoke<MutationResultDto>(IPC_COMMANDS.updateAppearancePreference, {
     appearancePreference,
+  });
+}
+
+export async function updateLanguagePreference(
+  languagePreference: LanguagePreference,
+): Promise<MutationResultDto> {
+  return invoke<MutationResultDto>(IPC_COMMANDS.updateLanguagePreference, {
+    languagePreference,
   });
 }
 
