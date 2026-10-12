@@ -53,7 +53,7 @@ const CHINESE_RELEASE_NOTE_SECTIONS = new Map([
 ]);
 const CHINESE_RELEASE_NOTE_HEADING_PREFIX = "# AI Router v";
 const CHINESE_RELEASE_NOTE_NAME_SUFFIX = ".zh-CN.md";
-const RELEASE_NOTE_LANGUAGE_LINE = "中文 | English";
+const RELEASE_NOTE_LANGUAGE_LINE = "中文 | [English](#english)";
 
 export class ReleaseError extends Error {}
 
@@ -196,6 +196,12 @@ function releaseNotesFromDocument(version, document) {
   // footer, then the version link. Each block is separated by a blank line so
   // Markdown does not merge the Chinese and English sentences into one
   // paragraph.
+  const englishContent = pair.english.markdown
+    .split("\n")
+    .slice(2)
+    .map((line) => (line.startsWith("## ") ? `### ${line.slice(3)}` : line))
+    .join("\n")
+    .trim();
   return [
     pair.chinese.markdown,
     "",
@@ -203,11 +209,12 @@ function releaseNotesFromDocument(version, document) {
     "",
     RELEASE_NOTE_LANGUAGE_LINE,
     "",
-    pair.english.markdown,
+    "## English",
+    ...(englishContent ? ["", englishContent] : []),
     "",
     ...ENGLISH_INSTALL_FOOTER,
     "",
-    `Version details: https://github.com/${REPOSITORY}/releases/tag/v${version}`,
+    `版本详情 | Version details: https://github.com/${REPOSITORY}/releases/tag/v${version}`,
   ].join("\n");
 }
 

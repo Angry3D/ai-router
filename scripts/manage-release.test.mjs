@@ -445,11 +445,12 @@ describe("release metadata and inventory", () => {
     expect(manifest.notes_i18n.en).toBe(document.english.markdown);
     const body = releaseNotes("1.2.3", document);
     expect(body).toContain(document.chinese.markdown);
-    expect(body).toContain(document.english.markdown);
-    expect(body.indexOf(document.chinese.markdown)).toBeLessThan(
-      body.indexOf(document.english.markdown),
-    );
-    expect(body).toContain("中文 | English");
+    expect(body).toContain("## English");
+    expect(body).toContain("中文 | [English](#english)");
+    expect(body).toContain("### Highlights");
+    expect(body).toContain("- Adds a user-visible update summary.");
+    expect(body.indexOf("## 重点更新")).toBeLessThan(body.indexOf("## English"));
+    expect(body).toContain("版本详情 | Version details:");
     expect(document.english.highlights).toHaveLength(2);
     expect(document.english.fixes).toHaveLength(1);
     expect(document.english.notices).toHaveLength(1);
