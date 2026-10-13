@@ -84,7 +84,7 @@ place, and every route can select its own upstream protocol.
 | ---------------- | --------------------------------------------------------------------------------------------------------------- |
 | Operating system | macOS 13 or later                                                                                               |
 | Hardware         | Apple Silicon (`aarch64`)                                                                                       |
-| Codex            | Requires an installed and working Codex CLI or Codex app; the automatic compatibility check pins `codex-cli 0.160.0` |
+| Codex            | Requires an installed and working Codex CLI or Codex app; the automatic compatibility check pins `codex-cli 0.162.0` |
 | Interface language | Simplified Chinese / English (follows macOS by default, manual switch available)                             |
 | Distribution     | The official DMG uses ad-hoc signing, not Developer ID signing or Apple notarization; in-app updates require explicit confirmation |
 | Network boundary | The local proxy listens on loopback only; upstream requests go to the Responses API address configured by the user |

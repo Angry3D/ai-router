@@ -133,7 +133,7 @@ release script tests; do not read real updater secrets, create tags, or operate 
 verify the flow.
 
 The last command starts only a temporary loopback fixture, using the lockfile-pinned
-`codex-cli 0.160.0` and a temporary `CODEX_HOME`, and does not read the user's Codex configuration or a
+`codex-cli 0.162.0` and a temporary `CODEX_HOME`, and does not read the user's Codex configuration or a
 real upstream.
 
 ## Avoiding duplication

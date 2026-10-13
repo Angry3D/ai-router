@@ -70,7 +70,7 @@ AI Router 是一款面向 macOS 个人开发者的本地菜单栏应用，用于
 | -------- | ---------------------------------------------------------------------------------------- |
 | 操作系统 | macOS 13 或更高版本                                                                      |
 | 硬件     | Apple Silicon (`aarch64`)                                                                |
-| Codex    | 需要已安装并可运行的 Codex CLI 或 Codex App；自动兼容性检查固定为 `codex-cli 0.160.0`    |
+| Codex    | 需要已安装并可运行的 Codex CLI 或 Codex App；自动兼容性检查固定为 `codex-cli 0.162.0`    |
 | 界面语言 | 简体中文 / English（默认跟随 macOS，可手动切换）                                         |
 | 分发     | 官方 DMG 使用 ad-hoc 签名，不做 Developer ID 签名或 Apple 公证；支持显式确认的应用内更新 |
 | 网络边界 | 本地代理仅监听 loopback；上游请求按用户配置的 Responses API 地址发出                     |
