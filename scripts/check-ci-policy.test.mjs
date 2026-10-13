@@ -83,14 +83,14 @@ describe("GitHub CI policy", () => {
     ).toThrow("reviewed SHA/version pair");
   });
 
-  it("accepts only the reviewed CodeQL v4.38.2 SHA/version pair", () => {
-    const reviewedSha = "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2";
+  it("accepts only the reviewed CodeQL v4.38.3 SHA/version pair", () => {
+    const reviewedSha = "24c54180a607b1449ed407dd24f251e4e9147c8d";
     expect(() =>
       validateActionPins(
         "fixture.yml",
         [
-          `- uses: github/codeql-action/init@${reviewedSha} # v4.38.2`,
-          `- uses: github/codeql-action/analyze@${reviewedSha} # v4.38.2`,
+          `- uses: github/codeql-action/init@${reviewedSha} # v4.38.3`,
+          `- uses: github/codeql-action/analyze@${reviewedSha} # v4.38.3`,
           "",
         ].join("\n"),
       ),
@@ -98,19 +98,19 @@ describe("GitHub CI policy", () => {
     expect(() =>
       validateActionPins(
         "fixture.yml",
-        `- uses: github/codeql-action/init@${reviewedSha} # v4.37.9\n`,
+        `- uses: github/codeql-action/init@${reviewedSha} # v4.38.2\n`,
       ),
     ).toThrow("reviewed SHA/version pair");
     expect(() =>
       validateActionPins(
         "fixture.yml",
-        "- uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.38.2\n",
+        "- uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.3\n",
       ),
     ).toThrow("reviewed SHA/version pair");
     expect(() =>
       validateActionPins(
         "fixture.yml",
-        "- uses: github/codeql-action/init@v4.38.2\n",
+        "- uses: github/codeql-action/init@v4.38.3\n",
       ),
     ).toThrow("full SHA and version comment");
   });
