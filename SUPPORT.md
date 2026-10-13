@@ -14,7 +14,7 @@ versions.
 - Build per the [README](./README.md) with Node `22.22.3`, pnpm `10.33.2`, Rust
   `1.97.1`, and the lock file;
 - Codex CLI/App and upstreams compatible with the OpenAI Responses API; the automated
-  compatibility evidence is pinned to `codex-cli 0.160.0`;
+  compatibility evidence is pinned to `codex-cli 0.162.0`;
 - Routing can select a Responses or Chat Completions upstream protocol. Chat Completions
   routing still presents the Responses contract to Codex, but only covers the documented
   compatibility behavior; opaque reasoning, richer `web_search` declarations, remote

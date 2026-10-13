@@ -713,7 +713,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
     "22.22.3",
     "10.33.2",
     "1.97.1",
-    "codex-cli 0.160.0",
+    "codex-cli 0.162.0",
     "./LICENSE",
     "./THIRD_PARTY_NOTICES.md",
     ...REQUIRED_README_COMMANDS,
@@ -740,7 +740,7 @@ export async function checkPublicDocs(projectRoot = DEFAULT_PROJECT_ROOT) {
   for (const value of [
     "macOS 13",
     "Apple Silicon",
-    "codex-cli 0.160.0",
+    "codex-cli 0.162.0",
   ]) {
     assertContains(files.get("SUPPORT.md"), value, "SUPPORT.md");
   }
