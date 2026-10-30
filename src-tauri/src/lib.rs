@@ -5,6 +5,7 @@ mod pricing_sync;
 mod runtime;
 #[cfg(target_os = "macos")]
 mod system_proxy;
+mod tray_tooltip;
 pub mod update_signature;
 
 use std::path::PathBuf;
@@ -18,7 +19,7 @@ use application_update::{APPLICATION_UPDATE_RESTART_REQUEST_CODE, ApplicationUpd
 use popover::{
     MenuPopoverController, TrayPresentation, TrayVisualState, complete_menu_show,
     handle_tray_event, handle_window_event, hide_menu, hide_settings_window, initial_tray_title,
-    menu_frontend_ready, set_menu_usage_preview, tray_presentation,
+    menu_frontend_ready, set_menu_usage_preview, tray_presentation, tray_visual_state,
 };
 use router_core::app_api::{ApplicationUpdateProgressDto, ApplicationUpdateSnapshotDto};
 use router_core::lifecycle::{AppCoordinator, AppLifecycleIssue, AppLifecyclePhase};
@@ -141,16 +142,21 @@ impl TrayRefreshCoordinator {
         if transition.revision <= activity.revision {
             return false;
         }
+        let previous_visual_state = tray_visual_state(activity.phase);
+        let next_visual_state = tray_visual_state(transition.phase);
         activity.revision = transition.revision;
         activity.phase = transition.phase;
-        let mut animation = self
-            .animation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !animation.shutdown {
-            animation.generation = animation.generation.saturating_add(1);
-            animation.mode = None;
+        if previous_visual_state != next_visual_state {
+            let mut animation = self
+                .animation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !animation.shutdown {
+                animation.generation = animation.generation.saturating_add(1);
+                animation.mode = None;
+            }
         }
+        self.latest_revision.fetch_add(1, Ordering::AcqRel);
         self.monitor_generation.fetch_add(1, Ordering::AcqRel);
         true
     }
@@ -162,12 +168,12 @@ impl TrayRefreshCoordinator {
             .phase
     }
 
-    fn live_activity_revision(&self) -> Option<u64> {
+    fn active_activity_revision(&self) -> Option<u64> {
         let activity = self
             .activity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (activity.phase == LogicalRequestActivityPhase::Live).then_some(activity.revision)
+        (activity.phase != LogicalRequestActivityPhase::Idle).then_some(activity.revision)
     }
 
     fn observe_reduce_motion(&self, reduce_motion: Option<bool>) -> Option<(bool, bool)> {
@@ -176,19 +182,30 @@ impl TrayRefreshCoordinator {
             return None;
         }
         let previous = self.reduce_motion.swap(state as u8, Ordering::AcqRel);
-        Some((state.blocks_animation(), previous != state as u8))
+        let changed = previous != state as u8;
+        if changed {
+            let mut animation = self
+                .animation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !animation.shutdown {
+                animation.generation = animation.generation.saturating_add(1);
+                animation.mode = None;
+            }
+        }
+        Some((state.blocks_animation(), changed))
     }
 
     fn reduce_motion(&self) -> bool {
         ReduceMotionState::from_raw(self.reduce_motion.load(Ordering::Acquire)).blocks_animation()
     }
 
-    fn live_activity_is_current(&self, revision: u64) -> bool {
+    fn active_activity_is_current(&self, revision: u64) -> bool {
         let activity = self
             .activity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        activity.phase == LogicalRequestActivityPhase::Live
+        activity.phase != LogicalRequestActivityPhase::Idle
             && activity.revision == revision
             && self.activity_animation_enabled.load(Ordering::Acquire)
             && !self
@@ -203,7 +220,7 @@ impl TrayRefreshCoordinator {
             .apply_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !self.live_activity_is_current(activity_revision) {
+        if !self.active_activity_is_current(activity_revision) {
             return None;
         }
         Some(self.monitor_generation.fetch_add(1, Ordering::AcqRel) + 1)
@@ -211,7 +228,7 @@ impl TrayRefreshCoordinator {
 
     fn monitor_is_current(&self, activity_revision: u64, monitor_generation: u64) -> bool {
         self.monitor_generation.load(Ordering::Acquire) == monitor_generation
-            && self.live_activity_is_current(activity_revision)
+            && self.active_activity_is_current(activity_revision)
     }
 
     fn observe_reduce_motion_if_current(
@@ -298,10 +315,6 @@ impl TrayRefreshCoordinator {
     }
 
     fn shutdown(&self) {
-        let _apply_guard = self
-            .apply_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.latest_revision.fetch_add(1, Ordering::AcqRel);
         let mut animation = self
             .animation
@@ -401,7 +414,7 @@ impl TrayIconAssets {
     fn static_image(&self, visual_state: TrayVisualState) -> tauri::image::Image<'static> {
         match visual_state {
             TrayVisualState::Ready => self.ready.clone(),
-            TrayVisualState::Active | TrayVisualState::Waiting => self.active_static.clone(),
+            TrayVisualState::Active => self.active_static.clone(),
         }
     }
 }
@@ -421,7 +434,7 @@ impl StateEventSink for TauriStateEventSink {
                 .set_activity_animation_enabled(settings.activity_animation_enabled);
             if changed
                 && settings.activity_animation_enabled
-                && let Some(revision) = self.tray_refresh.live_activity_revision()
+                && let Some(revision) = self.tray_refresh.active_activity_revision()
             {
                 start_reduce_motion_monitor(
                     self.app_handle.clone(),
@@ -476,7 +489,7 @@ impl LogicalRequestActivitySink for TauriLogicalRequestActivitySink {
             if !schedule_tray_refresh(self.app_handle.clone(), Arc::clone(&self.tray_refresh)) {
                 return;
             }
-            if transition.phase == LogicalRequestActivityPhase::Live
+            if tray_visual_state(transition.phase) == TrayVisualState::Active
                 && self
                     .tray_refresh
                     .activity_animation_enabled
@@ -492,8 +505,9 @@ impl LogicalRequestActivitySink for TauriLogicalRequestActivitySink {
     }
 }
 
-/// Builds the status item; the startup tooltip uses the platform-language
-/// sample that the first committed tray projection replaces.
+/// Builds the status item with the platform-language startup tooltip. The first
+/// committed lifecycle projection replaces it through the native helper after
+/// setup, once main-thread dispatch is available.
 fn build_tray(app: &mut tauri::App, assets: &TrayIconAssets, isolated: bool) -> tauri::Result<()> {
     let tray_builder = tauri::tray::TrayIconBuilder::with_id("main")
         .icon(assets.ready.clone())
@@ -571,7 +585,7 @@ fn apply_tray_projection(
         app_handle.config().identifier != router_core::qa_acceptance::PRODUCTION_APP_IDENTIFIER,
     );
     let _ = tray.set_title(Some(title));
-    let _ = tray.set_tooltip(Some(presentation.tooltip));
+    tray_tooltip::set_status_item_tooltip(&tray, &presentation.tooltip);
 
     if decision.changed && decision.animated {
         start_tray_animation(app_handle.clone(), Arc::clone(refresh), decision.generation);
@@ -1127,7 +1141,52 @@ mod tests {
     }
 
     #[test]
-    fn tray_activity_phase_changes_invalidate_animation_and_monitor_synchronously() {
+    fn tray_shutdown_does_not_wait_for_an_inflight_native_apply() {
+        let refresh = Arc::new(TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        ));
+        let apply_guard = refresh
+            .apply_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (shutdown_finished_tx, shutdown_finished_rx) = std::sync::mpsc::channel();
+        let shutdown_refresh = Arc::clone(&refresh);
+        let shutdown = std::thread::spawn(move || {
+            shutdown_refresh.shutdown();
+            let _ = shutdown_finished_tx.send(());
+        });
+
+        shutdown_finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("shutdown must not queue behind a main-thread native apply");
+        drop(apply_guard);
+        shutdown.join().expect("shutdown thread");
+        assert!(refresh.request().is_none());
+    }
+
+    #[test]
+    fn tray_activity_transition_invalidates_an_inflight_refresh() {
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
+        let pending = refresh.request().expect("pending refresh");
+
+        assert!(
+            refresh.apply_activity_transition(activity_transition(
+                LogicalRequestActivityPhase::Live,
+                1,
+            ))
+        );
+        assert!(!refresh.is_current(pending));
+        let replacement = refresh.request().expect("replacement refresh");
+        assert!(replacement > pending);
+        assert!(refresh.is_current(replacement));
+    }
+
+    #[test]
+    fn tray_active_phase_changes_preserve_animation_and_replace_monitor() {
         let refresh = TrayRefreshCoordinator::new(
             TrayIconAssets::decode().expect("tray assets"),
             Some(false),
@@ -1141,18 +1200,20 @@ mod tests {
         );
         let live = refresh.transition_projection(TrayVisualState::Active);
         assert!(live.animated);
-        assert!(refresh.animation_is_current(live.generation));
+        let generation = live.generation;
+        assert!(refresh.animation_is_current(generation));
         let live_monitor = refresh
             .begin_reduce_motion_monitor(3)
             .expect("live monitor");
         assert!(refresh.monitor_is_current(3, live_monitor));
+        assert_eq!(refresh.active_activity_revision(), Some(3));
 
         assert!(!refresh.apply_activity_transition(activity_transition(
             LogicalRequestActivityPhase::Waiting,
             2,
         )));
         assert_eq!(refresh.phase(), LogicalRequestActivityPhase::Live);
-        assert!(refresh.animation_is_current(live.generation));
+        assert!(refresh.animation_is_current(generation));
         assert!(refresh.monitor_is_current(3, live_monitor));
 
         assert!(refresh.apply_activity_transition(activity_transition(
@@ -1160,31 +1221,49 @@ mod tests {
             4,
         )));
         assert_eq!(refresh.phase(), LogicalRequestActivityPhase::Waiting);
-        assert!(!refresh.animation_is_current(live.generation));
+        assert!(refresh.animation_is_current(generation));
         assert!(!refresh.monitor_is_current(3, live_monitor));
-        let waiting = refresh.transition_projection(TrayVisualState::Waiting);
-        assert!(waiting.changed);
-        assert!(!waiting.animated);
-        assert!(!refresh.animation_is_current(waiting.generation));
-
-        assert!(
-            refresh.apply_activity_transition(activity_transition(
-                LogicalRequestActivityPhase::Idle,
-                5,
-            ))
-        );
-        assert_eq!(refresh.phase(), LogicalRequestActivityPhase::Idle);
-        assert!(!refresh.live_activity_is_current(5));
+        let waiting_monitor = refresh
+            .begin_reduce_motion_monitor(4)
+            .expect("waiting monitor");
+        assert_ne!(live_monitor, waiting_monitor);
+        assert!(refresh.monitor_is_current(4, waiting_monitor));
+        let waiting = refresh.transition_projection(TrayVisualState::Active);
+        assert!(!waiting.changed);
+        assert!(waiting.animated);
+        assert_eq!(waiting.generation, generation);
 
         assert!(
             refresh.apply_activity_transition(activity_transition(
                 LogicalRequestActivityPhase::Live,
+                5,
+            ))
+        );
+        assert_eq!(refresh.phase(), LogicalRequestActivityPhase::Live);
+        assert!(refresh.animation_is_current(generation));
+        assert!(!refresh.monitor_is_current(4, waiting_monitor));
+        let returned_live_monitor = refresh
+            .begin_reduce_motion_monitor(5)
+            .expect("returned live monitor");
+        assert!(refresh.monitor_is_current(5, returned_live_monitor));
+        let returned_live = refresh.transition_projection(TrayVisualState::Active);
+        assert!(!returned_live.changed);
+        assert_eq!(returned_live.generation, generation);
+
+        assert!(
+            refresh.apply_activity_transition(activity_transition(
+                LogicalRequestActivityPhase::Idle,
                 6,
             ))
         );
-        assert!(refresh.live_activity_is_current(6));
-        refresh.shutdown();
-        assert!(!refresh.live_activity_is_current(6));
+        assert_eq!(refresh.phase(), LogicalRequestActivityPhase::Idle);
+        assert!(!refresh.animation_is_current(generation));
+        assert_eq!(refresh.active_activity_revision(), None);
+        assert!(refresh.begin_reduce_motion_monitor(6).is_none());
+        let idle = refresh.transition_projection(TrayVisualState::Ready);
+        assert!(idle.changed);
+        assert!(!idle.animated);
+        assert_eq!(idle.visual_state, TrayVisualState::Ready);
     }
 
     #[test]
@@ -1203,11 +1282,6 @@ mod tests {
         assert!(idle.changed);
         assert!(!refresh.animation_is_current(active.generation));
 
-        let waiting = refresh.transition_projection(TrayVisualState::Waiting);
-        assert!(waiting.changed);
-        assert!(!waiting.animated);
-        assert!(!refresh.animation_is_current(waiting.generation));
-
         let restarted = refresh.transition_projection(TrayVisualState::Active);
         assert!(refresh.animation_is_current(restarted.generation));
 
@@ -1215,12 +1289,18 @@ mod tests {
             refresh.observe_reduce_motion(Some(true)),
             Some((true, true))
         );
+        assert!(!refresh.animation_is_current(restarted.generation));
         let reduced = refresh.transition_projection(TrayVisualState::Active);
         assert!(reduced.changed);
         assert!(!reduced.animated);
+        assert_eq!(reduced.visual_state, TrayVisualState::Active);
         assert!(!refresh.animation_is_current(reduced.generation));
 
-        refresh.observe_reduce_motion(Some(false));
+        assert_eq!(
+            refresh.observe_reduce_motion(Some(false)),
+            Some((false, true))
+        );
+        assert!(!refresh.animation_is_current(reduced.generation));
         let before_shutdown = refresh.transition_projection(TrayVisualState::Active);
         assert!(refresh.animation_is_current(before_shutdown.generation));
         refresh.shutdown();
@@ -1259,21 +1339,19 @@ mod tests {
             refresh.set_activity_animation_enabled(true);
             assert!(refresh.set_activity_animation_enabled(false));
 
-            for visual_state in [
-                TrayVisualState::Ready,
-                TrayVisualState::Active,
-                TrayVisualState::Waiting,
-            ] {
-                let decision = refresh.transition_projection(visual_state);
-                assert_eq!(decision.visual_state, TrayVisualState::Ready);
-                assert!(!decision.animated);
-            }
+            let decision = refresh.transition_projection(TrayVisualState::Active);
+            assert_eq!(decision.visual_state, TrayVisualState::Ready);
+            assert!(!decision.animated);
+
+            let ready = refresh.transition_projection(TrayVisualState::Ready);
+            assert_eq!(ready.visual_state, TrayVisualState::Ready);
+            assert!(!ready.changed);
         }
     }
 
     #[test]
     fn tray_activity_animation_enabled_matches_the_approved_truth_table() {
-        for (reduce_motion, live_animates) in
+        for (reduce_motion, active_animates) in
             [(Some(false), true), (Some(true), false), (None, false)]
         {
             let refresh = TrayRefreshCoordinator::new(
@@ -1286,13 +1364,9 @@ mod tests {
             assert_eq!(ready.visual_state, TrayVisualState::Ready);
             assert!(!ready.animated);
 
-            let live = refresh.transition_projection(TrayVisualState::Active);
-            assert_eq!(live.visual_state, TrayVisualState::Active);
-            assert_eq!(live.animated, live_animates);
-
-            let waiting = refresh.transition_projection(TrayVisualState::Waiting);
-            assert_eq!(waiting.visual_state, TrayVisualState::Waiting);
-            assert!(!waiting.animated);
+            let active = refresh.transition_projection(TrayVisualState::Active);
+            assert_eq!(active.visual_state, TrayVisualState::Active);
+            assert_eq!(active.animated, active_animates);
         }
     }
 
@@ -1308,12 +1382,83 @@ mod tests {
             assets.static_image(TrayVisualState::Active).rgba(),
             assets.active_static.rgba()
         );
-        assert_eq!(
-            assets.static_image(TrayVisualState::Waiting).rgba(),
-            assets.active_static.rgba()
-        );
         // Folding activity states to Ready only hides the bead because these differ.
         assert_ne!(assets.ready.rgba(), assets.active_static.rgba());
+    }
+
+    #[test]
+    fn tray_waiting_activity_animates_and_starts_monitor_when_enabled() {
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
+        assert!(refresh.set_activity_animation_enabled(true));
+        assert!(refresh.apply_activity_transition(activity_transition(
+            LogicalRequestActivityPhase::Waiting,
+            1,
+        )));
+        assert!(refresh.active_activity_is_current(1));
+        let waiting = refresh.transition_projection(TrayVisualState::Active);
+        assert!(waiting.changed);
+        assert!(waiting.animated);
+        assert!(refresh.animation_is_current(waiting.generation));
+
+        let monitor = refresh
+            .begin_reduce_motion_monitor(1)
+            .expect("waiting monitor");
+        assert!(refresh.monitor_is_current(1, monitor));
+
+        refresh.shutdown();
+        assert!(!refresh.active_activity_is_current(1));
+        assert!(!refresh.animation_is_current(waiting.generation));
+        assert!(!refresh.monitor_is_current(1, monitor));
+    }
+
+    #[test]
+    fn tray_waiting_projection_respects_setting_and_reduce_motion() {
+        for (animation_enabled, reduce_motion, expected_state, animated) in [
+            (true, Some(false), TrayVisualState::Active, true),
+            (true, Some(true), TrayVisualState::Active, false),
+            (true, None, TrayVisualState::Active, false),
+            (false, Some(false), TrayVisualState::Ready, false),
+        ] {
+            let refresh = TrayRefreshCoordinator::new(
+                TrayIconAssets::decode().expect("tray assets"),
+                reduce_motion,
+            );
+            assert_eq!(
+                refresh.set_activity_animation_enabled(animation_enabled),
+                animation_enabled
+            );
+            assert!(refresh.apply_activity_transition(activity_transition(
+                LogicalRequestActivityPhase::Waiting,
+                1,
+            )));
+            let projection = refresh.transition_projection(tray_visual_state(refresh.phase()));
+            assert_eq!(projection.visual_state, expected_state);
+            assert_eq!(projection.animated, animated);
+        }
+    }
+
+    #[test]
+    fn tray_enabling_animation_while_waiting_starts_active_monitor() {
+        let refresh = TrayRefreshCoordinator::new(
+            TrayIconAssets::decode().expect("tray assets"),
+            Some(false),
+        );
+        assert!(refresh.apply_activity_transition(activity_transition(
+            LogicalRequestActivityPhase::Waiting,
+            1,
+        )));
+        assert_eq!(refresh.active_activity_revision(), Some(1));
+        assert!(refresh.begin_reduce_motion_monitor(1).is_none());
+
+        assert!(refresh.set_activity_animation_enabled(true));
+        let revision = refresh.active_activity_revision().expect("active revision");
+        let monitor = refresh
+            .begin_reduce_motion_monitor(revision)
+            .expect("waiting monitor after enabling animation");
+        assert!(refresh.monitor_is_current(revision, monitor));
     }
 
     #[test]
@@ -1352,7 +1497,27 @@ mod tests {
             2,
         )));
         assert!(!refresh.monitor_is_current(1, second));
-        assert!(refresh.begin_reduce_motion_monitor(2).is_none());
+        let waiting = refresh
+            .begin_reduce_motion_monitor(2)
+            .expect("waiting monitor");
+        assert!(refresh.monitor_is_current(2, waiting));
+        assert_eq!(
+            refresh.observe_reduce_motion_if_current(1, second, Some(false)),
+            None
+        );
+        assert!(!refresh.reduce_motion());
+
+        assert!(
+            refresh.apply_activity_transition(activity_transition(
+                LogicalRequestActivityPhase::Idle,
+                3,
+            ))
+        );
+        assert!(!refresh.monitor_is_current(2, waiting));
+        assert!(refresh.begin_reduce_motion_monitor(3).is_none());
+
+        refresh.shutdown();
+        assert!(!refresh.active_activity_is_current(2));
     }
 
     #[test]
@@ -1421,8 +1586,16 @@ mod tests {
     fn tray_refresh_filters_to_native_presentation_areas() {
         let event = |areas| StateChangedEventDto { revision: 1, areas };
 
-        assert!(state_event_affects_tray(&event(vec![StateArea::Balance])));
-        assert!(state_event_affects_tray(&event(vec![StateArea::Proxy])));
+        for area in [
+            StateArea::Routes,
+            StateArea::Route,
+            StateArea::Balance,
+            StateArea::Proxy,
+            StateArea::MenuBar,
+            StateArea::Language,
+        ] {
+            assert!(state_event_affects_tray(&event(vec![area])));
+        }
         assert!(!state_event_affects_tray(&event(vec![
             StateArea::CodexConnection,
             StateArea::RequestHistorySummary,

@@ -177,7 +177,6 @@ tauri_panel! {
 pub(crate) enum TrayVisualState {
     Ready,
     Active,
-    Waiting,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -717,11 +716,12 @@ fn balance_tooltip_detail(balance: Option<&BalanceDisplaySnapshot>, text: &Nativ
     }
 }
 
-fn tray_visual_state(activity_phase: LogicalRequestActivityPhase) -> TrayVisualState {
+pub(crate) fn tray_visual_state(activity_phase: LogicalRequestActivityPhase) -> TrayVisualState {
     match activity_phase {
         LogicalRequestActivityPhase::Idle => TrayVisualState::Ready,
-        LogicalRequestActivityPhase::Live => TrayVisualState::Active,
-        LogicalRequestActivityPhase::Waiting => TrayVisualState::Waiting,
+        LogicalRequestActivityPhase::Live | LogicalRequestActivityPhase::Waiting => {
+            TrayVisualState::Active
+        }
     }
 }
 
@@ -2186,7 +2186,7 @@ mod tests {
             );
             assert_eq!(
                 tray_visual_state(LogicalRequestActivityPhase::Waiting),
-                TrayVisualState::Waiting
+                TrayVisualState::Active
             );
             assert_ne!(
                 tray_status_label(&state, LogicalRequestActivityPhase::Idle, zh_text()),
@@ -2274,7 +2274,9 @@ mod tests {
                 .tooltip
                 .contains("等待工具继续 · INPUT · 余额 $24.80")
         );
-        assert_eq!(waiting.visual_state, TrayVisualState::Waiting);
+        assert_eq!(waiting.title, production.title);
+        assert_eq!(waiting.visual_state, active.visual_state);
+        assert_ne!(waiting.tooltip, active.tooltip);
 
         let mut english = snapshot.clone();
         english.language.effective_locale = router_core::domain::AppLocale::En;
