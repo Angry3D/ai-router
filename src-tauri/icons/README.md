@@ -26,8 +26,11 @@ The `tray-*.svg` and `tray-*.png` files are separate macOS template assets.
 `tray-active-a` through `tray-active-d` and `tray-active-static` use the same
 Route geometry plus the approved radius-3 activity bead. The moving frames
 advance from the solid head through two middle beads to the solid tail every
-300 ms; the static center bead is shared by Waiting, Reduce Motion, and the
-disabled-animation projection.
+300 ms. `Live` and `Waiting` share the same two-state `Active` projection, so a
+handoff continues the current frame without restarting. The static center bead
+is the `Active` accessibility fallback when Reduce Motion is enabled or
+unknown; when the animation setting is disabled, both phases use `tray-route`
+without a bead. Waiting is not a separate icon state.
 `pnpm icons:generate` rebuilds these 44 px PNGs from their SVG sources on macOS.
 Do not substitute the coloured application icon for `tray-route.png`: the
 native status item requires transparent, monochrome template pixels.
